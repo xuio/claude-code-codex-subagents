@@ -25,6 +25,7 @@
     "test:reliability": "node test/reliability-matrix.mjs",
     "test:codex-runtime": "node test/codex-runtime-probe.mjs",
     "test:claude-orchestration": "node test/claude-orchestration.mjs",
+    "test:claude-autodiscovery": "node test/claude-autodiscovery.mjs",
     "test:claude-real-codex": "node test/claude-real-codex.mjs",
     "test:ci": "npm run build && npm test && npm run smoke:mcp && npm run test:reliability",
     "test:comprehensive": "npm run build && npm test && npm run smoke:mcp && npm run test:reliability && npm run test:codex-runtime && npm run validate:plugin && npm run test:claude-desktop",

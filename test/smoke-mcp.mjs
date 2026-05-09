@@ -33,6 +33,17 @@ try {
     throw new Error(`codex_status failed: ${JSON.stringify(status.structuredContent)}`);
   }
 
+  const guide = await client.callTool(
+    {
+      name: "codex_usage_guide",
+      arguments: {},
+    },
+    CallToolResultSchema,
+  );
+  if (!guide.structuredContent?.guide?.includes("Use run_agent for one delegated Codex task.")) {
+    throw new Error(`codex_usage_guide failed: ${JSON.stringify(guide.structuredContent)}`);
+  }
+
   const result = await client.callTool(
     {
       name: "run_agents",

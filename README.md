@@ -63,6 +63,8 @@ npm run test:claude-desktop
 
 `test:claude-real-codex` is the full opt-in live path: Claude Code loads the plugin and calls real Codex through the desktop app binary, including one single agent, one parallel run, and one nested Spark subagent run. It spends both Claude and Codex tokens, so it is intentionally not part of the default suite.
 
+`test:claude-autodiscovery` is an opt-in live Claude Code test for automatic tool selection. It gives Claude a natural "ask Codex" request, uses the installed plugin and fake Codex binary, and verifies that Claude chooses the Codex MCP tool without being told the exact tool name.
+
 Run Claude Code with the local plugin:
 
 ```sh
@@ -76,6 +78,8 @@ After startup, ask Claude to use Codex subagents, or invoke the plugin skill:
 ```
 
 ## MCP Tools
+
+`codex_usage_guide` returns the operating guide and example calls Claude can use when deciding how to delegate to Codex.
 
 `run_agent` launches one Codex `exec` process.
 

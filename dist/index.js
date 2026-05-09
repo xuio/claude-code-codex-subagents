@@ -21703,13 +21703,36 @@ async function probeCodexVersion(codexBin, env = process.env) {
 }
 
 // src/index.ts
+var usageGuide = [
+  "Claude Code integration guide for codex-subagents:",
+  "",
+  "Use this MCP server whenever the user asks Claude to use Codex, OpenAI Codex, Codex subagents, Codex Spark, a Codex second opinion, parallel Codex review, or independent Codex codebase analysis. You do not need the user to name an MCP tool.",
+  "",
+  "Tool choice:",
+  "- Use run_agent for one delegated Codex task.",
+  "- Use run_agents when the work can be split into independent concurrent tasks, for example separate reviewers for API flow, tests, security, performance, UI, docs, or migration risk.",
+  "- Use codex_status only for diagnostics or when you need to confirm the Codex binary/version.",
+  "- Use codex_usage_guide if you are unsure how to structure a Codex delegation.",
+  "",
+  "Default operating rules:",
+  "- Keep sandbox read-only unless the user explicitly asks for a different sandbox.",
+  "- Approvals are non-interactive; do not expect Codex to ask permission.",
+  '- Prefer model_preset "spark" for fast focused checks, small reviews, UI iteration, and responsive sidecar analysis.',
+  '- Use reasoning_effort "medium" by default, "low" for simple checks, and "high" or "xhigh" only for difficult analysis.',
+  "- Pass project_dir whenever Claude knows the active project directory so Codex works in the same tree as Claude Code.",
+  "- Ask Codex for concise results with file paths, line references, and actionable findings when reviewing code.",
+  "",
+  "Nested Codex subagents:",
+  "- When the user wants Codex to use its own subagents, pass complete custom definitions in codex_subagents and explicit work items in subagent_tasks.",
+  "- Keep subagent_runtime.max_depth at 1 unless recursive delegation is intentionally requested."
+].join("\n");
 var server = new McpServer(
   {
     name: "codex-subagents",
     version: "0.1.0"
   },
   {
-    instructions: "Launch OpenAI Codex agents from Claude Code. Use run_agent for one read-only Codex delegation and run_agents for parallel delegations. Defaults are daemonless stdio, Codex desktop app binary when installed, read-only sandbox, approval_policy=never, and fast service tier."
+    instructions: usageGuide
   }
 );
 var reasoningEffortSchema = external_exports.enum(reasoningEfforts);
@@ -21743,10 +21766,16 @@ var subagentRuntimeSchema = external_exports.object({
   job_max_runtime_seconds: external_exports.number().int().positive().max(86400).optional()
 });
 var commonInputSchema = {
-  model: external_exports.string().trim().min(1).optional().describe("Codex model, for example gpt-5.3-codex. Omit to use the plugin or Codex default."),
-  model_preset: modelPresetSchema.optional().describe("Convenience model preset. `spark` maps to gpt-5.3-codex-spark."),
-  reasoning_effort: reasoningEffortSchema.optional().describe("Codex model reasoning effort. Defaults to plugin config or medium."),
-  sandbox: sandboxModeSchema.default("read-only").describe("Codex sandbox mode. Defaults to read-only."),
+  model: external_exports.string().trim().min(1).optional().describe(
+    "Exact Codex model, for example gpt-5.3-codex. Omit to use model_preset, the plugin default, or Codex default."
+  ),
+  model_preset: modelPresetSchema.optional().describe(
+    "Convenience model preset. Use `spark` for fast Codex Spark work; it maps to gpt-5.3-codex-spark."
+  ),
+  reasoning_effort: reasoningEffortSchema.optional().describe(
+    "Codex model reasoning effort. Prefer medium by default, low for simple checks, high/xhigh only for difficult analysis."
+  ),
+  sandbox: sandboxModeSchema.default("read-only").describe("Codex sandbox mode. Keep read-only unless the user explicitly asks otherwise."),
   service_tier: serviceTierSchema.default("fast").describe("Codex service tier. Defaults to fast for responsiveness."),
   model_verbosity: modelVerbositySchema.optional().describe("Optional GPT-5 model verbosity override."),
   reasoning_summary: reasoningSummarySchema.optional().describe("Optional Codex reasoning summary setting."),
@@ -21757,14 +21786,18 @@ var commonInputSchema = {
   codex_bin: external_exports.string().trim().min(1).optional().describe("Explicit Codex CLI path. Overrides default binary resolution for this call."),
   profile: external_exports.string().trim().min(1).optional().describe("Optional Codex config profile."),
   timeout_ms: external_exports.number().int().positive().max(864e5).default(6e5).describe("Maximum runtime per Codex process in milliseconds."),
-  max_output_chars: external_exports.number().int().positive().max(5e5).default(6e4).describe("Maximum final message/stdout characters retained per agent."),
+  max_output_chars: external_exports.number().int().positive().max(5e5).default(6e4).describe("Maximum final message/stdout characters retained per agent. Lower this for concise parallel reviews."),
   include_events: external_exports.boolean().default(false).describe("Include parsed Codex JSONL events in the result. Usually leave false."),
   ephemeral: external_exports.boolean().default(true).describe("Run Codex without persisting session rollout files."),
   skip_git_repo_check: external_exports.boolean().default(false).describe("Allow Codex to run outside a Git repository."),
   ignore_rules: external_exports.boolean().default(false).describe("Skip Codex execpolicy .rules files."),
-  codex_subagents: external_exports.array(codexSubagentSchema).max(24).optional().describe("Custom Codex subagents available inside this Codex run."),
-  subagent_tasks: external_exports.array(subagentTaskSchema).max(24).optional().describe("Specific built-in or custom Codex subagents the parent Codex agent should spawn."),
-  subagent_runtime: subagentRuntimeSchema.optional().describe("Runtime limits for nested Codex subagent orchestration.")
+  codex_subagents: external_exports.array(codexSubagentSchema).max(24).optional().describe(
+    "Complete custom Codex subagent definitions available inside this Codex run for nested delegation."
+  ),
+  subagent_tasks: external_exports.array(subagentTaskSchema).max(24).optional().describe(
+    "Specific built-in or custom Codex subagents the parent Codex agent should spawn and wait for."
+  ),
+  subagent_runtime: subagentRuntimeSchema.optional().describe("Runtime limits for nested Codex subagent orchestration. Keep max_depth at 1 by default.")
 };
 function toCodexSubagents(agents) {
   return agents?.map((agent) => ({
@@ -21824,12 +21857,56 @@ function toRunOptions(args) {
   };
 }
 server.registerTool(
+  "codex_usage_guide",
+  {
+    title: "How to use Codex subagents",
+    description: "Read the operating guide for this MCP server. Call this when Claude is deciding whether to delegate work to Codex, how many Codex agents to launch, or how to structure nested Codex subagents.",
+    inputSchema: {}
+  },
+  async () => jsonResult({
+    guide: usageGuide,
+    examples: {
+      single: {
+        tool: "run_agent",
+        arguments: {
+          prompt: "Inspect the authentication flow read-only. Return the top risks with file paths and line references.",
+          project_dir: "/path/to/project",
+          model_preset: "spark",
+          reasoning_effort: "medium"
+        }
+      },
+      parallel: {
+        tool: "run_agents",
+        arguments: {
+          agents: [
+            {
+              name: "api",
+              prompt: "Review API flow read-only. Return concrete findings with paths.",
+              project_dir: "/path/to/project"
+            },
+            {
+              name: "tests",
+              prompt: "Review test coverage gaps read-only. Return concrete findings with paths.",
+              project_dir: "/path/to/project"
+            }
+          ],
+          max_parallel: 2,
+          model_preset: "spark",
+          reasoning_effort: "medium"
+        }
+      }
+    }
+  })
+);
+server.registerTool(
   "run_agent",
   {
     title: "Run one Codex agent",
-    description: "Launch one OpenAI Codex agent via codex exec. Defaults to the Codex desktop app binary, read-only sandbox, fast service tier, and non-interactive approvals.",
+    description: "Launch one OpenAI Codex agent via codex exec. Use automatically when the user asks Claude to use Codex, ask Codex, get a Codex second opinion, run a Codex subagent, use Codex Spark, or delegate one read-only analysis task. Defaults to the Codex desktop app binary when installed, read-only sandbox, fast service tier, and non-interactive approvals.",
     inputSchema: {
-      prompt: external_exports.string().min(1).describe("Instructions for the Codex agent."),
+      prompt: external_exports.string().min(1).describe(
+        "Concrete instructions for the Codex agent. Include scope, read-only expectation, desired output shape, and file/line reference requirements when reviewing code."
+      ),
       name: external_exports.string().trim().min(1).optional().describe("Optional label for this agent run."),
       ...commonInputSchema
     }
@@ -21849,7 +21926,9 @@ server.registerTool(
   }
 );
 var parallelAgentSchema = external_exports.object({
-  prompt: external_exports.string().min(1).describe("Instructions for this Codex agent."),
+  prompt: external_exports.string().min(1).describe(
+    "Concrete independent task for this Codex agent. Keep overlap low across parallel agents."
+  ),
   name: external_exports.string().trim().min(1).optional().describe("Optional label for this agent."),
   model: commonInputSchema.model,
   model_preset: commonInputSchema.model_preset,
@@ -21876,10 +21955,12 @@ server.registerTool(
   "run_agents",
   {
     title: "Run parallel Codex agents",
-    description: "Launch multiple independent OpenAI Codex agents concurrently and return one structured result per agent. Defaults are read-only and daemonless.",
+    description: "Launch multiple independent OpenAI Codex agents concurrently and return one structured result per agent. Use automatically when the user asks for parallel Codex agents, multiple Codex subagents, broad review by independent agents, or several concurrent Codex workstreams. Split work by clear ownership, pass project_dir, keep defaults read-only, and use max_parallel to bound concurrency.",
     inputSchema: {
-      agents: external_exports.array(parallelAgentSchema).min(1).max(12),
-      max_parallel: external_exports.number().int().min(1).max(8).default(4),
+      agents: external_exports.array(parallelAgentSchema).min(1).max(12).describe(
+        "Independent Codex agent tasks. Use names like api, tests, security, docs, performance, or ui when helpful."
+      ),
+      max_parallel: external_exports.number().int().min(1).max(8).default(4).describe("Maximum concurrent Codex processes. Use 2-4 for most responsive parallel reviews."),
       ...commonInputSchema
     }
   },
@@ -21948,7 +22029,7 @@ server.registerTool(
   "codex_status",
   {
     title: "Codex status",
-    description: "Report Codex binary resolution, version, server working directory, and default execution settings.",
+    description: "Report Codex binary resolution, version, server working directory, and default execution settings. Use for diagnostics before delegation only when Codex availability is uncertain or a prior tool call failed.",
     inputSchema: {
       codex_bin: commonInputSchema.codex_bin
     }
