@@ -1,0 +1,53 @@
+{
+  "name": "claude-code-codex-subagents",
+  "version": "0.1.0",
+  "description": "Claude Code plugin that launches OpenAI Codex agents through a daemonless stdio MCP server.",
+  "type": "module",
+  "private": true,
+  "author": "xuio",
+  "homepage": "https://github.com/xuio/claude-code-codex-subagents#readme",
+  "bugs": {
+    "url": "https://github.com/xuio/claude-code-codex-subagents/issues"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/xuio/claude-code-codex-subagents.git"
+  },
+  "bin": {
+    "codex-subagents-mcp": "./dist/index.js"
+  },
+  "scripts": {
+    "build": "tsc --noEmit && esbuild src/index.ts --bundle --platform=node --target=node20 --format=esm --outfile=dist/index.js --banner:js='#!/usr/bin/env node' && chmod 755 dist/index.js",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "validate:plugin": "claude plugin validate .",
+    "smoke:mcp": "node test/smoke-mcp.mjs",
+    "test:reliability": "node test/reliability-matrix.mjs",
+    "test:codex-runtime": "node test/codex-runtime-probe.mjs",
+    "test:claude-orchestration": "node test/claude-orchestration.mjs",
+    "test:claude-real-codex": "node test/claude-real-codex.mjs",
+    "test:ci": "npm run build && npm test && npm run smoke:mcp && npm run test:reliability",
+    "test:comprehensive": "npm run build && npm test && npm run smoke:mcp && npm run test:reliability && npm run test:codex-runtime && npm run validate:plugin && npm run test:claude-desktop",
+    "test:claude-desktop": "node test/claude-desktop-cli.mjs"
+  },
+  "keywords": [
+    "claude-code",
+    "codex",
+    "mcp",
+    "subagents"
+  ],
+  "license": "MIT",
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.29.0",
+    "zod": "^3.25.76"
+  },
+  "devDependencies": {
+    "@types/node": "^25.0.0",
+    "esbuild": "^0.28.0",
+    "typescript": "^6.0.3",
+    "vitest": "^4.1.5"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}

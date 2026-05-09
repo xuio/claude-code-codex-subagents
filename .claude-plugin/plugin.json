@@ -1,0 +1,12 @@
+{
+  "name": "codex-subagents",
+  "version": "0.1.0",
+  "description": "Launch OpenAI Codex agents from Claude Code through a daemonless MCP server.",
+  "author": {
+    "name": "xuio"
+  },
+  "license": "MIT",
+  "keywords": ["codex", "subagents", "mcp", "parallel"],
+  "mcpServers": "./.claude-plugin/mcp.json",
+  "skills": "./skills"
+}

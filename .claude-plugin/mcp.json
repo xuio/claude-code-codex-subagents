@@ -1,0 +1,10 @@
+{
+  "mcpServers": {
+    "codex-subagents": {
+      "command": "${CLAUDE_PLUGIN_ROOT}/dist/index.js",
+      "env": {
+        "CLAUDE_PROJECT_DIR": "${CLAUDE_PROJECT_DIR}"
+      }
+    }
+  }
+}
