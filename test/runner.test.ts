@@ -23,7 +23,7 @@ afterEach(async () => {
 });
 
 describe("buildCodexExecArgs", () => {
-  it("defaults to read-only, non-interactive approvals, fast tier, and stdin prompt input", () => {
+  it("defaults to read-only, non-interactive approvals, Codex default service tier, and stdin prompt input", () => {
     const args = buildCodexExecArgs({ cwd: "/repo" }, "/tmp/out.md", {});
 
     expect(args).toContain("exec");
@@ -32,7 +32,7 @@ describe("buildCodexExecArgs", () => {
     expect(args[args.indexOf("--sandbox") + 1]).toBe("read-only");
     expect(args).toContain('approval_policy="never"');
     expect(args).toContain('model_reasoning_effort="medium"');
-    expect(args).toContain('service_tier="fast"');
+    expect(args.some((arg) => arg.includes("service_tier="))).toBe(false);
     expect(args).toContain("--cd");
     expect(args[args.indexOf("--cd") + 1]).toBe("/repo");
     expect(args.at(-1)).toBe("-");

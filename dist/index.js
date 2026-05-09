@@ -21450,7 +21450,6 @@ function buildCodexExecArgs(options, outputPath, env = process.env) {
   const model = resolveRequestedModel(options, env);
   const reasoningEffort = options.reasoningEffort ?? defaultReasoningEffort(env);
   const sandbox = options.sandbox ?? "read-only";
-  const serviceTier = options.serviceTier ?? "fast";
   const ephemeral = options.ephemeral ?? true;
   const args = [
     "exec",
@@ -21463,8 +21462,6 @@ function buildCodexExecArgs(options, outputPath, env = process.env) {
     `approval_policy=${tomlString("never")}`,
     "-c",
     `model_reasoning_effort=${tomlString(reasoningEffort)}`,
-    "-c",
-    `service_tier=${tomlString(serviceTier)}`,
     "--output-last-message",
     outputPath
   ];
@@ -21479,6 +21476,9 @@ function buildCodexExecArgs(options, outputPath, env = process.env) {
   }
   if (options.reasoningSummary) {
     args.push("-c", `model_reasoning_summary=${tomlString(options.reasoningSummary)}`);
+  }
+  if (options.serviceTier) {
+    args.push("-c", `service_tier=${tomlString(options.serviceTier)}`);
   }
   if (options.subagentRuntime?.maxThreads !== void 0) {
     args.push("-c", `agents.max_threads=${options.subagentRuntime.maxThreads}`);
@@ -21622,7 +21622,7 @@ async function runAgent(options) {
       modelPreset: options.modelPreset,
       reasoningEffort: options.reasoningEffort ?? defaultReasoningEffort(childEnv),
       sandbox: options.sandbox ?? "read-only",
-      serviceTier: options.serviceTier ?? "fast",
+      serviceTier: options.serviceTier,
       exitCode,
       signal,
       finalMessage: final.text,
@@ -21717,8 +21717,9 @@ var usageGuide = [
   "Default operating rules:",
   "- Keep sandbox read-only unless the user explicitly asks for a different sandbox.",
   "- Approvals are non-interactive; do not expect Codex to ask permission.",
-  '- Prefer model_preset "spark" for fast focused checks, small reviews, UI iteration, and responsive sidecar analysis.',
+  '- Prefer model_preset "spark" for responsive focused checks, small reviews, UI iteration, and sidecar analysis.',
   '- Use reasoning_effort "medium" by default, "low" for simple checks, and "high" or "xhigh" only for difficult analysis.',
+  "- Do not set service_tier by default. Let Codex use its normal account/default service tier unless the user explicitly asks for a service tier.",
   "- Pass project_dir whenever Claude knows the active project directory so Codex works in the same tree as Claude Code.",
   "- Ask Codex for concise results with file paths, line references, and actionable findings when reviewing code.",
   "",
@@ -21770,13 +21771,15 @@ var commonInputSchema = {
     "Exact Codex model, for example gpt-5.3-codex. Omit to use model_preset, the plugin default, or Codex default."
   ),
   model_preset: modelPresetSchema.optional().describe(
-    "Convenience model preset. Use `spark` for fast Codex Spark work; it maps to gpt-5.3-codex-spark."
+    "Convenience model preset. Use `spark` for responsive Codex Spark work; it maps to gpt-5.3-codex-spark."
   ),
   reasoning_effort: reasoningEffortSchema.optional().describe(
     "Codex model reasoning effort. Prefer medium by default, low for simple checks, high/xhigh only for difficult analysis."
   ),
   sandbox: sandboxModeSchema.default("read-only").describe("Codex sandbox mode. Keep read-only unless the user explicitly asks otherwise."),
-  service_tier: serviceTierSchema.default("fast").describe("Codex service tier. Defaults to fast for responsiveness."),
+  service_tier: serviceTierSchema.optional().describe(
+    "Optional Codex service tier. Omit by default; only set this when the user explicitly asks for a service tier."
+  ),
   model_verbosity: modelVerbositySchema.optional().describe("Optional GPT-5 model verbosity override."),
   reasoning_summary: reasoningSummarySchema.optional().describe("Optional Codex reasoning summary setting."),
   cwd: external_exports.string().trim().min(1).optional().describe("Compatibility alias for project_dir."),
@@ -21902,7 +21905,7 @@ server.registerTool(
   "run_agent",
   {
     title: "Run one Codex agent",
-    description: "Launch one OpenAI Codex agent via codex exec. Use automatically when the user asks Claude to use Codex, ask Codex, get a Codex second opinion, run a Codex subagent, use Codex Spark, or delegate one read-only analysis task. Defaults to the Codex desktop app binary when installed, read-only sandbox, fast service tier, and non-interactive approvals.",
+    description: "Launch one OpenAI Codex agent via codex exec. Use automatically when the user asks Claude to use Codex, ask Codex, get a Codex second opinion, run a Codex subagent, use Codex Spark, or delegate one read-only analysis task. Defaults to the Codex desktop app binary when installed, read-only sandbox, Codex's normal service tier, and non-interactive approvals.",
     inputSchema: {
       prompt: external_exports.string().min(1).describe(
         "Concrete instructions for the Codex agent. Include scope, read-only expectation, desired output shape, and file/line reference requirements when reviewing code."
@@ -22046,7 +22049,7 @@ server.registerTool(
         defaultModel: defaultModel(),
         defaultReasoningEffort: defaultReasoningEffort(),
         defaultSandbox: "read-only",
-        defaultServiceTier: "fast",
+        defaultServiceTier: "codex-default",
         modelPresets: {
           codex: "gpt-5.3-codex",
           spark: "gpt-5.3-codex-spark"

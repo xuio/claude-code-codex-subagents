@@ -11,6 +11,7 @@ The plugin lets Claude Code launch one Codex agent or several Codex agents in pa
 - Codex binary: prefers `/Applications/Codex.app/Contents/Resources/codex` when the Codex desktop app is installed, then falls back to configured overrides and `codex` on `PATH`.
 - Sandbox: `read-only`.
 - Approvals: non-interactive `approval_policy="never"`.
+- Service tier: omitted by default so Codex uses its normal account/default service tier. Pass `service_tier` only when you explicitly want one.
 - Transport: stdio MCP, launched by Claude Code for the active session. No daemon is required.
 - Prompt delivery: stdin, not command-line arguments.
 

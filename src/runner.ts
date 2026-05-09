@@ -72,7 +72,7 @@ export interface AgentRunResult {
   modelPreset?: ModelPreset;
   reasoningEffort: ReasoningEffort;
   sandbox: SandboxMode;
-  serviceTier: ServiceTier;
+  serviceTier?: ServiceTier;
   exitCode: number | null;
   signal: NodeJS.Signals | null;
   finalMessage: string;
@@ -199,7 +199,6 @@ export function buildCodexExecArgs(
   const model = resolveRequestedModel(options, env);
   const reasoningEffort = options.reasoningEffort ?? defaultReasoningEffort(env);
   const sandbox = options.sandbox ?? "read-only";
-  const serviceTier = options.serviceTier ?? "fast";
   const ephemeral = options.ephemeral ?? true;
 
   const args = [
@@ -213,8 +212,6 @@ export function buildCodexExecArgs(
     `approval_policy=${tomlString("never")}`,
     "-c",
     `model_reasoning_effort=${tomlString(reasoningEffort)}`,
-    "-c",
-    `service_tier=${tomlString(serviceTier)}`,
     "--output-last-message",
     outputPath,
   ];
@@ -230,6 +227,9 @@ export function buildCodexExecArgs(
   }
   if (options.reasoningSummary) {
     args.push("-c", `model_reasoning_summary=${tomlString(options.reasoningSummary)}`);
+  }
+  if (options.serviceTier) {
+    args.push("-c", `service_tier=${tomlString(options.serviceTier)}`);
   }
   if (options.subagentRuntime?.maxThreads !== undefined) {
     args.push("-c", `agents.max_threads=${options.subagentRuntime.maxThreads}`);
@@ -400,7 +400,7 @@ export async function runAgent(options: AgentRunOptions): Promise<AgentRunResult
       modelPreset: options.modelPreset,
       reasoningEffort: options.reasoningEffort ?? defaultReasoningEffort(childEnv),
       sandbox: options.sandbox ?? "read-only",
-      serviceTier: options.serviceTier ?? "fast",
+      serviceTier: options.serviceTier,
       exitCode,
       signal,
       finalMessage: final.text,

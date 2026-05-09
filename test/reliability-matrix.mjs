@@ -71,6 +71,12 @@ try {
   assert(defaultAgent?.ok, "run_agent should succeed with CLAUDE_PROJECT_DIR", defaultProject);
   assert(defaultAgent.cwd === projectDir, "run_agent should default to CLAUDE_PROJECT_DIR", defaultAgent);
   assert(defaultAgent.sandbox === "read-only", "run_agent should default to read-only", defaultAgent);
+  assert(defaultAgent.serviceTier === undefined, "run_agent should not default service_tier", defaultAgent);
+  assert(
+    !defaultAgent.commandPreview.some((arg) => arg.includes("service_tier=")),
+    "run_agent should omit service_tier unless explicitly requested",
+    defaultAgent.commandPreview,
+  );
   assert(
     defaultAgent.eventSummary?.commands?.[0]?.command === "rg example",
     "run_agent should parse command events",

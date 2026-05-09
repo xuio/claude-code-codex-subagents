@@ -78,7 +78,7 @@ try {
 
 Work in this exact project directory: ${projectDir}
 
-Codex should stay read-only and include the token AUTODISCOVERY_OK in its reply. Use a fast focused Codex configuration.
+Codex should stay read-only and include the token AUTODISCOVERY_OK in its reply. Use Codex Spark, but do not set an explicit service_tier.
 
 After the Codex result comes back, return exactly one compact JSON object and no markdown. Shape: {"ok": boolean, "tokenSeen": boolean, "model": string, "cwd": string}. Set ok true when the Codex tool call completed successfully.`;
 
@@ -154,6 +154,11 @@ After the Codex result comes back, return exactly one compact JSON object and no
     calls[0].args.includes("--model") &&
       calls[0].args[calls[0].args.indexOf("--model") + 1] === "gpt-5.3-codex-spark",
     "Fake Codex should be launched with the Spark preset",
+    calls[0],
+  );
+  assert(
+    !calls[0].args.some((arg) => arg.includes("service_tier=")),
+    "Fake Codex should not be launched with an explicit service tier by default",
     calls[0],
   );
 

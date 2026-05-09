@@ -24,7 +24,9 @@ When Claude wants Codex to work in the same repository or folder as the active C
 
 Prefer `reasoning_effort: "medium"` for exploration and `high` or `xhigh` only when the task is complex enough to justify the extra latency and token usage.
 
-Use `model_preset: "spark"` for fast, focused work such as UI iteration, narrow exploration, small reviews, and quick sidecar checks.
+Use `model_preset: "spark"` for responsive, focused work such as UI iteration, narrow exploration, small reviews, and quick sidecar checks.
+
+Do not set `service_tier` by default. Let Codex use its normal account/default service tier unless the user explicitly asks for a service tier.
 
 Use `codex_status` only when diagnosing installation or binary resolution, or after a failed Codex tool call. Normal delegation should start with `run_agent` or `run_agents`.
 
