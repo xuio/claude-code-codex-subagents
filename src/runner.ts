@@ -18,6 +18,7 @@ export const sandboxModes = ["read-only", "workspace-write", "danger-full-access
 export const serviceTiers = ["fast", "flex"] as const;
 export const modelVerbosities = ["low", "medium", "high"] as const;
 export const reasoningSummaries = ["auto", "concise", "detailed", "none"] as const;
+export const sparkModel = "gpt-5.3-codex-spark";
 
 export type ReasoningEffort = (typeof reasoningEfforts)[number];
 export type SandboxMode = (typeof sandboxModes)[number];
@@ -45,6 +46,7 @@ export interface AgentRunOptions {
   ephemeral?: boolean;
   skipGitRepoCheck?: boolean;
   ignoreRules?: boolean;
+  isolatedCodexHome?: boolean;
   env?: NodeJS.ProcessEnv;
   codexSubagents?: CodexSubagentDefinition[];
   subagentTasks?: SubagentTask[];
@@ -85,6 +87,7 @@ export interface AgentRunResult {
   };
   eventSummary: CodexEventSummary;
   commandPreview: string[];
+  validationError?: string;
   codexSubagents: {
     customAgents: string[];
     requestedTasks: number;
@@ -110,6 +113,7 @@ export interface ParallelRunOptions
           | "ephemeral"
           | "skipGitRepoCheck"
           | "ignoreRules"
+          | "isolatedCodexHome"
           | "codexBin"
           | "projectDir"
           | "codexSubagents"
@@ -151,7 +155,7 @@ class LimitedText {
 
 export function defaultReasoningEffort(env: NodeJS.ProcessEnv = process.env): ReasoningEffort {
   const value = env.CODEX_SUBAGENTS_DEFAULT_REASONING_EFFORT?.trim();
-  return reasoningEfforts.includes(value as ReasoningEffort)
+  return value !== "minimal" && reasoningEfforts.includes(value as ReasoningEffort)
     ? (value as ReasoningEffort)
     : "medium";
 }
@@ -167,6 +171,44 @@ export function resolveRequestedModel(
   env: NodeJS.ProcessEnv = process.env,
 ): string | undefined {
   return options.model?.trim() || modelForPreset(options.modelPreset) || defaultModel(env);
+}
+
+export class RunValidationError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "RunValidationError";
+  }
+}
+
+export function validateRunConfiguration(
+  options: Pick<AgentRunOptions, "model" | "modelPreset" | "reasoningEffort" | "reasoningSummary">,
+  env: NodeJS.ProcessEnv = process.env,
+): {
+  model?: string;
+  reasoningEffort: ReasoningEffort;
+  reasoningSummary?: ReasoningSummary;
+} {
+  const model = resolveRequestedModel(options, env);
+  const reasoningEffort = options.reasoningEffort ?? defaultReasoningEffort(env);
+  let reasoningSummary = options.reasoningSummary;
+
+  if (reasoningEffort === "minimal") {
+    throw new RunValidationError(
+      "reasoning_effort='minimal' is not supported by this plugin because Codex currently auto-attaches web_search, which the API rejects with reasoning.effort 'minimal'. Use reasoning_effort='low' or higher.",
+    );
+  }
+
+  if (model === sparkModel && reasoningSummary) {
+    if (reasoningSummary === "none") {
+      reasoningSummary = undefined;
+    } else {
+      throw new RunValidationError(
+        `reasoning_summary='${reasoningSummary}' is not supported with model_preset='spark' (${sparkModel}). Omit reasoning_summary or use reasoning_summary='none'.`,
+      );
+    }
+  }
+
+  return { model, reasoningEffort, reasoningSummary };
 }
 
 export async function resolveWorkingDirectory(
@@ -196,8 +238,7 @@ export function buildCodexExecArgs(
   outputPath: string,
   env: NodeJS.ProcessEnv = process.env,
 ): string[] {
-  const model = resolveRequestedModel(options, env);
-  const reasoningEffort = options.reasoningEffort ?? defaultReasoningEffort(env);
+  const { model, reasoningEffort, reasoningSummary } = validateRunConfiguration(options, env);
   const sandbox = options.sandbox ?? "read-only";
   const ephemeral = options.ephemeral ?? true;
 
@@ -225,8 +266,8 @@ export function buildCodexExecArgs(
   if (options.modelVerbosity) {
     args.push("-c", `model_verbosity=${tomlString(options.modelVerbosity)}`);
   }
-  if (options.reasoningSummary) {
-    args.push("-c", `model_reasoning_summary=${tomlString(options.reasoningSummary)}`);
+  if (reasoningSummary) {
+    args.push("-c", `model_reasoning_summary=${tomlString(reasoningSummary)}`);
   }
   if (options.serviceTier) {
     args.push("-c", `service_tier=${tomlString(options.serviceTier)}`);
@@ -246,6 +287,54 @@ export function buildCodexExecArgs(
 
   args.push("-");
   return args;
+}
+
+function validationFailureResult(options: {
+  started: number;
+  error: RunValidationError;
+  codexBinary: ResolvedCodexBinary;
+  cwd: string;
+  runOptions: AgentRunOptions;
+  env: NodeJS.ProcessEnv;
+}): AgentRunResult {
+  const reasoningEffort = options.runOptions.reasoningEffort ?? defaultReasoningEffort(options.env);
+  const message = options.error.message;
+
+  return {
+    name: options.runOptions.name,
+    ok: false,
+    status: "failed",
+    durationMs: Date.now() - options.started,
+    codexBinary: options.codexBinary,
+    cwd: options.cwd,
+    model: resolveRequestedModel(options.runOptions, options.env),
+    modelPreset: options.runOptions.modelPreset,
+    reasoningEffort,
+    sandbox: options.runOptions.sandbox ?? "read-only",
+    serviceTier: options.runOptions.serviceTier,
+    exitCode: null,
+    signal: null,
+    finalMessage: "",
+    stderr: message,
+    stdoutTail: "",
+    truncated: {
+      stdoutChars: 0,
+      stderrChars: 0,
+      finalMessageChars: 0,
+    },
+    eventSummary: {
+      counts: {},
+      commands: [],
+      errors: [message],
+    },
+    commandPreview: [],
+    validationError: message,
+    codexSubagents: {
+      customAgents: options.runOptions.codexSubagents?.map((agent) => agent.name) ?? [],
+      requestedTasks: options.runOptions.subagentTasks?.length ?? 0,
+      tempCodexHomeUsed: false,
+    },
+  };
 }
 
 function parseJsonLine(line: string, summary: CodexEventSummary): void {
@@ -307,10 +396,26 @@ export async function runAgent(options: AgentRunOptions): Promise<AgentRunResult
     explicitPath: options.codexBin,
     env: mergedEnv,
   });
+  try {
+    validateRunConfiguration(options, mergedEnv);
+  } catch (error) {
+    if (error instanceof RunValidationError) {
+      return validationFailureResult({
+        started,
+        error,
+        codexBinary,
+        cwd,
+        runOptions: options,
+        env: mergedEnv,
+      });
+    }
+    throw error;
+  }
   const preparedSubagents = await prepareSubagents({
     definitions: options.codexSubagents,
     tasks: options.subagentTasks,
     env: options.env,
+    isolatedCodexHome: options.isolatedCodexHome,
   });
   const tempDir = await mkdtemp(path.join(os.tmpdir(), "codex-subagents-"));
   const childEnv = { ...mergedEnv, ...preparedSubagents.env };

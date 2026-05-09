@@ -14,16 +14,21 @@ The plugin lets Claude Code launch one Codex agent or several Codex agents in pa
 - Service tier: omitted by default so Codex uses its normal account/default service tier. Pass `service_tier` only when you explicitly want one.
 - Transport: stdio MCP, launched by Claude Code for the active session. No daemon is required.
 - Prompt delivery: stdin, not command-line arguments.
+- Codex home: uses the user's Codex home by default; pass `isolated_codex_home: true` to use a temporary Codex home with auth but without inherited `config.toml` MCP servers.
 
 Optional environment overrides:
 
 - `CODEX_SUBAGENTS_CODEX_BIN`: explicit Codex CLI path.
 - `CODEX_SUBAGENTS_DEFAULT_MODEL`: model to use when a tool call omits `model`.
-- `CODEX_SUBAGENTS_DEFAULT_REASONING_EFFORT`: `minimal`, `low`, `medium`, `high`, or `xhigh`.
+- `CODEX_SUBAGENTS_DEFAULT_REASONING_EFFORT`: `low`, `medium`, `high`, or `xhigh`. `minimal` is ignored as a default and falls back to `medium`.
 
 ## Spark And Nested Subagents
 
 Use `model_preset: "spark"` to launch a top-level Codex agent with `gpt-5.3-codex-spark`. Exact `model` still wins when both are provided.
+
+Spark does not support `reasoning_summary`; the plugin rejects `model_preset: "spark"` with `reasoning_summary` values other than `none` before starting Codex.
+
+`reasoning_effort: "minimal"` is also rejected before starting Codex because the current Codex CLI auto-attaches `web_search`, which the API does not allow with minimal reasoning. Use `low` or higher.
 
 To let a Codex agent spawn its own Codex subagents, pass:
 
@@ -88,7 +93,7 @@ After startup, ask Claude to use Codex subagents, or invoke the plugin skill:
 
 `codex_status` reports the resolved Codex binary, server working directory, Claude project directory, default model, default reasoning effort, and version probe.
 
-Each agent accepts model, reasoning effort, sandbox, project directory, timeout, and output-size controls. Pass `project_dir` when Claude Code wants Codex to inspect the same repository or subdirectory Claude is currently working in. If `project_dir` is omitted, the server uses `CLAUDE_PROJECT_DIR` when Claude Code provides it. Omit model to use Codex's configured default or the plugin's optional configured default model.
+Each agent accepts model, reasoning effort, sandbox, project directory, timeout, isolated Codex home, and output-size controls. Pass `project_dir` when Claude Code wants Codex to inspect the same repository or subdirectory Claude is currently working in. If `project_dir` is omitted, the server uses `CLAUDE_PROJECT_DIR` when Claude Code provides it. Omit model to use Codex's configured default or the plugin's optional configured default model.
 
 ## License
 

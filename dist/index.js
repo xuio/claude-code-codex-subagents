@@ -21317,17 +21317,22 @@ async function linkIfPresent(source, destination) {
   if (!await exists(source)) return;
   await symlink(source, destination);
 }
-async function prepareTempCodexHome(definitions, env) {
+async function prepareTempCodexHome(definitions, env, options = {}) {
   const realCodexHome = env.CODEX_HOME?.trim() || path2.join(os2.homedir(), ".codex");
   const tempCodexHome = await mkdtemp(path2.join(os2.tmpdir(), "codex-subagents-home-"));
-  await Promise.all([
+  const links = [
     linkIfPresent(path2.join(realCodexHome, "auth.json"), path2.join(tempCodexHome, "auth.json")),
-    linkIfPresent(path2.join(realCodexHome, "config.toml"), path2.join(tempCodexHome, "config.toml")),
     linkIfPresent(path2.join(realCodexHome, "AGENTS.md"), path2.join(tempCodexHome, "AGENTS.md")),
     linkIfPresent(path2.join(realCodexHome, "skills"), path2.join(tempCodexHome, "skills")),
     linkIfPresent(path2.join(realCodexHome, "rules"), path2.join(tempCodexHome, "rules")),
     linkIfPresent(path2.join(realCodexHome, "plugins"), path2.join(tempCodexHome, "plugins"))
-  ]);
+  ];
+  if (options.isolated) {
+    links.push(writeFile(path2.join(tempCodexHome, "config.toml"), "# isolated codex-subagents run\n"));
+  } else {
+    links.push(linkIfPresent(path2.join(realCodexHome, "config.toml"), path2.join(tempCodexHome, "config.toml")));
+  }
+  await Promise.all(links);
   const agentsDir = path2.join(tempCodexHome, "agents");
   await mkdir(agentsDir, { recursive: true });
   await Promise.all(
@@ -21375,8 +21380,10 @@ async function prepareSubagents(options) {
   const tasks = options.tasks ?? [];
   const env = { ...options.env ?? {} };
   let tempCodexHome;
-  if (definitions.length > 0) {
-    tempCodexHome = await prepareTempCodexHome(definitions, { ...process.env, ...env });
+  if (definitions.length > 0 || options.isolatedCodexHome) {
+    tempCodexHome = await prepareTempCodexHome(definitions, { ...process.env, ...env }, {
+      isolated: options.isolatedCodexHome
+    });
     env.CODEX_HOME = tempCodexHome;
   }
   return {
@@ -21396,6 +21403,7 @@ var sandboxModes = ["read-only", "workspace-write", "danger-full-access"];
 var serviceTiers = ["fast", "flex"];
 var modelVerbosities = ["low", "medium", "high"];
 var reasoningSummaries = ["auto", "concise", "detailed", "none"];
+var sparkModel = "gpt-5.3-codex-spark";
 var LimitedText = class {
   constructor(maxChars) {
     this.maxChars = maxChars;
@@ -21422,7 +21430,7 @@ var LimitedText = class {
 };
 function defaultReasoningEffort(env = process.env) {
   const value = env.CODEX_SUBAGENTS_DEFAULT_REASONING_EFFORT?.trim();
-  return reasoningEfforts.includes(value) ? value : "medium";
+  return value !== "minimal" && reasoningEfforts.includes(value) ? value : "medium";
 }
 function defaultModel(env = process.env) {
   const value = env.CODEX_SUBAGENTS_DEFAULT_MODEL?.trim();
@@ -21431,6 +21439,32 @@ function defaultModel(env = process.env) {
 }
 function resolveRequestedModel(options, env = process.env) {
   return options.model?.trim() || modelForPreset(options.modelPreset) || defaultModel(env);
+}
+var RunValidationError = class extends Error {
+  constructor(message) {
+    super(message);
+    this.name = "RunValidationError";
+  }
+};
+function validateRunConfiguration(options, env = process.env) {
+  const model = resolveRequestedModel(options, env);
+  const reasoningEffort = options.reasoningEffort ?? defaultReasoningEffort(env);
+  let reasoningSummary = options.reasoningSummary;
+  if (reasoningEffort === "minimal") {
+    throw new RunValidationError(
+      "reasoning_effort='minimal' is not supported by this plugin because Codex currently auto-attaches web_search, which the API rejects with reasoning.effort 'minimal'. Use reasoning_effort='low' or higher."
+    );
+  }
+  if (model === sparkModel && reasoningSummary) {
+    if (reasoningSummary === "none") {
+      reasoningSummary = void 0;
+    } else {
+      throw new RunValidationError(
+        `reasoning_summary='${reasoningSummary}' is not supported with model_preset='spark' (${sparkModel}). Omit reasoning_summary or use reasoning_summary='none'.`
+      );
+    }
+  }
+  return { model, reasoningEffort, reasoningSummary };
 }
 async function resolveWorkingDirectory(cwd, env = process.env) {
   const requested = cwd?.trim();
@@ -21447,8 +21481,7 @@ function tomlString(value) {
   return JSON.stringify(value);
 }
 function buildCodexExecArgs(options, outputPath, env = process.env) {
-  const model = resolveRequestedModel(options, env);
-  const reasoningEffort = options.reasoningEffort ?? defaultReasoningEffort(env);
+  const { model, reasoningEffort, reasoningSummary } = validateRunConfiguration(options, env);
   const sandbox = options.sandbox ?? "read-only";
   const ephemeral = options.ephemeral ?? true;
   const args = [
@@ -21474,8 +21507,8 @@ function buildCodexExecArgs(options, outputPath, env = process.env) {
   if (options.modelVerbosity) {
     args.push("-c", `model_verbosity=${tomlString(options.modelVerbosity)}`);
   }
-  if (options.reasoningSummary) {
-    args.push("-c", `model_reasoning_summary=${tomlString(options.reasoningSummary)}`);
+  if (reasoningSummary) {
+    args.push("-c", `model_reasoning_summary=${tomlString(reasoningSummary)}`);
   }
   if (options.serviceTier) {
     args.push("-c", `service_tier=${tomlString(options.serviceTier)}`);
@@ -21494,6 +21527,45 @@ function buildCodexExecArgs(options, outputPath, env = process.env) {
   }
   args.push("-");
   return args;
+}
+function validationFailureResult(options) {
+  const reasoningEffort = options.runOptions.reasoningEffort ?? defaultReasoningEffort(options.env);
+  const message = options.error.message;
+  return {
+    name: options.runOptions.name,
+    ok: false,
+    status: "failed",
+    durationMs: Date.now() - options.started,
+    codexBinary: options.codexBinary,
+    cwd: options.cwd,
+    model: resolveRequestedModel(options.runOptions, options.env),
+    modelPreset: options.runOptions.modelPreset,
+    reasoningEffort,
+    sandbox: options.runOptions.sandbox ?? "read-only",
+    serviceTier: options.runOptions.serviceTier,
+    exitCode: null,
+    signal: null,
+    finalMessage: "",
+    stderr: message,
+    stdoutTail: "",
+    truncated: {
+      stdoutChars: 0,
+      stderrChars: 0,
+      finalMessageChars: 0
+    },
+    eventSummary: {
+      counts: {},
+      commands: [],
+      errors: [message]
+    },
+    commandPreview: [],
+    validationError: message,
+    codexSubagents: {
+      customAgents: options.runOptions.codexSubagents?.map((agent) => agent.name) ?? [],
+      requestedTasks: options.runOptions.subagentTasks?.length ?? 0,
+      tempCodexHomeUsed: false
+    }
+  };
 }
 function parseJsonLine(line, summary) {
   if (!line.trim()) return;
@@ -21544,10 +21616,26 @@ async function runAgent(options) {
     explicitPath: options.codexBin,
     env: mergedEnv
   });
+  try {
+    validateRunConfiguration(options, mergedEnv);
+  } catch (error2) {
+    if (error2 instanceof RunValidationError) {
+      return validationFailureResult({
+        started,
+        error: error2,
+        codexBinary,
+        cwd,
+        runOptions: options,
+        env: mergedEnv
+      });
+    }
+    throw error2;
+  }
   const preparedSubagents = await prepareSubagents({
     definitions: options.codexSubagents,
     tasks: options.subagentTasks,
-    env: options.env
+    env: options.env,
+    isolatedCodexHome: options.isolatedCodexHome
   });
   const tempDir = await mkdtemp2(path3.join(os3.tmpdir(), "codex-subagents-"));
   const childEnv = { ...mergedEnv, ...preparedSubagents.env };
@@ -21718,9 +21806,11 @@ var usageGuide = [
   "- Keep sandbox read-only unless the user explicitly asks for a different sandbox.",
   "- Approvals are non-interactive; do not expect Codex to ask permission.",
   '- Prefer model_preset "spark" for responsive focused checks, small reviews, UI iteration, and sidecar analysis.',
-  '- Use reasoning_effort "medium" by default, "low" for simple checks, and "high" or "xhigh" only for difficult analysis.',
+  '- Use reasoning_effort "medium" by default, "low" for simple checks, and "high" or "xhigh" only for difficult analysis. Do not use "minimal"; Codex currently auto-attaches web_search and the API rejects that tool with minimal reasoning.',
+  '- Do not combine model_preset "spark" with reasoning_summary values other than "none"; Spark does not support reasoning.summary.',
   "- Do not set service_tier by default. Let Codex use its normal account/default service tier unless the user explicitly asks for a service tier.",
   "- Pass project_dir whenever Claude knows the active project directory so Codex works in the same tree as Claude Code.",
+  "- Set isolated_codex_home true when a run should ignore the user's Codex MCP server config and use only this request's temporary Codex configuration.",
   "- Ask Codex for concise results with file paths, line references, and actionable findings when reviewing code.",
   "",
   "Nested Codex subagents:",
@@ -21774,14 +21864,16 @@ var commonInputSchema = {
     "Convenience model preset. Use `spark` for responsive Codex Spark work; it maps to gpt-5.3-codex-spark."
   ),
   reasoning_effort: reasoningEffortSchema.optional().describe(
-    "Codex model reasoning effort. Prefer medium by default, low for simple checks, high/xhigh only for difficult analysis."
+    "Codex model reasoning effort. Prefer medium by default, low for simple checks, high/xhigh only for difficult analysis. `minimal` is rejected because Codex currently auto-attaches web_search, which the API does not allow with minimal reasoning."
   ),
   sandbox: sandboxModeSchema.default("read-only").describe("Codex sandbox mode. Keep read-only unless the user explicitly asks otherwise."),
   service_tier: serviceTierSchema.optional().describe(
     "Optional Codex service tier. Omit by default; only set this when the user explicitly asks for a service tier."
   ),
   model_verbosity: modelVerbositySchema.optional().describe("Optional GPT-5 model verbosity override."),
-  reasoning_summary: reasoningSummarySchema.optional().describe("Optional Codex reasoning summary setting."),
+  reasoning_summary: reasoningSummarySchema.optional().describe(
+    "Optional Codex reasoning summary setting. Do not use with model_preset `spark` except `none`; Spark does not support reasoning.summary."
+  ),
   cwd: external_exports.string().trim().min(1).optional().describe("Compatibility alias for project_dir."),
   project_dir: external_exports.string().trim().min(1).optional().describe(
     "Project directory for Codex. Pass Claude Code's active project directory so Codex works in the same tree. Defaults to CLAUDE_PROJECT_DIR when Claude provides it."
@@ -21794,6 +21886,9 @@ var commonInputSchema = {
   ephemeral: external_exports.boolean().default(true).describe("Run Codex without persisting session rollout files."),
   skip_git_repo_check: external_exports.boolean().default(false).describe("Allow Codex to run outside a Git repository."),
   ignore_rules: external_exports.boolean().default(false).describe("Skip Codex execpolicy .rules files."),
+  isolated_codex_home: external_exports.boolean().default(false).describe(
+    "Run with a temporary Codex home that links auth but does not inherit the user's Codex config.toml. Use to avoid unrelated MCP servers from the user's Codex config."
+  ),
   codex_subagents: external_exports.array(codexSubagentSchema).max(24).optional().describe(
     "Complete custom Codex subagent definitions available inside this Codex run for nested delegation."
   ),
@@ -21850,6 +21945,7 @@ function toRunOptions(args) {
     ephemeral: args.ephemeral,
     skipGitRepoCheck: args.skip_git_repo_check,
     ignoreRules: args.ignore_rules,
+    isolatedCodexHome: args.isolated_codex_home,
     codexSubagents: toCodexSubagents(args.codex_subagents),
     subagentTasks: args.subagent_tasks,
     subagentRuntime: args.subagent_runtime ? {
@@ -21950,6 +22046,7 @@ var parallelAgentSchema = external_exports.object({
   ephemeral: commonInputSchema.ephemeral.optional(),
   skip_git_repo_check: commonInputSchema.skip_git_repo_check.optional(),
   ignore_rules: commonInputSchema.ignore_rules.optional(),
+  isolated_codex_home: commonInputSchema.isolated_codex_home.optional(),
   codex_subagents: commonInputSchema.codex_subagents,
   subagent_tasks: commonInputSchema.subagent_tasks,
   subagent_runtime: commonInputSchema.subagent_runtime
@@ -21994,6 +22091,7 @@ server.registerTool(
           ephemeral: agent.ephemeral ?? args.ephemeral,
           skipGitRepoCheck: agent.skip_git_repo_check ?? args.skip_git_repo_check,
           ignoreRules: agent.ignore_rules ?? args.ignore_rules,
+          isolatedCodexHome: agent.isolated_codex_home ?? args.isolated_codex_home,
           codexSubagents: toCodexSubagents(agent.codex_subagents ?? args.codex_subagents),
           subagentTasks: agent.subagent_tasks ?? args.subagent_tasks,
           subagentRuntime: agent.subagent_runtime ? {

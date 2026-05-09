@@ -41,6 +41,7 @@ if (process.env.FAKE_CODEX_RECORD_DIR) {
             .map((file) => [file, readFileSync(join(agentDir, file), "utf8")]),
         )
       : {};
+  const configPath = process.env.CODEX_HOME ? join(process.env.CODEX_HOME, "config.toml") : undefined;
   appendFileSync(
     join(process.env.FAKE_CODEX_RECORD_DIR, "calls.jsonl"),
     `${JSON.stringify({
@@ -49,6 +50,7 @@ if (process.env.FAKE_CODEX_RECORD_DIR) {
       prompt,
       at: Date.now(),
       codexHome: process.env.CODEX_HOME,
+      codexConfig: configPath && existsSync(configPath) ? readFileSync(configPath, "utf8") : undefined,
       agentFiles,
     })}\n`,
   );

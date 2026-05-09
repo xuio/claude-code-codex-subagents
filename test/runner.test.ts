@@ -1,9 +1,10 @@
-import { mkdtemp, readFile, realpath, rm, stat } from "node:fs/promises";
+import { mkdtemp, readFile, realpath, rm, stat, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import {
   buildCodexExecArgs,
+  defaultReasoningEffort,
   resolveWorkingDirectory,
   runAgent,
   runAgents,
@@ -78,6 +79,58 @@ describe("buildCodexExecArgs", () => {
     expect(args).toContain("agents.max_threads=8");
     expect(args).toContain("agents.max_depth=2");
     expect(args).toContain("agents.job_max_runtime_seconds=900");
+  });
+
+  it("rejects Spark reasoning summaries before starting Codex", () => {
+    expect(() =>
+      buildCodexExecArgs(
+        {
+          cwd: "/repo",
+          modelPreset: "spark",
+          reasoningSummary: "concise",
+        },
+        "/tmp/out.md",
+        {},
+      ),
+    ).toThrow(/reasoning_summary='concise'.*model_preset='spark'/);
+  });
+
+  it("drops Spark reasoning_summary none because it is equivalent to omitted", () => {
+    const args = buildCodexExecArgs(
+      {
+        cwd: "/repo",
+        modelPreset: "spark",
+        reasoningSummary: "none",
+      },
+      "/tmp/out.md",
+      {},
+    );
+
+    expect(args[args.indexOf("--model") + 1]).toBe("gpt-5.3-codex-spark");
+    expect(args.some((arg) => arg.includes("model_reasoning_summary="))).toBe(false);
+  });
+
+  it("rejects minimal reasoning before starting Codex", () => {
+    expect(() =>
+      buildCodexExecArgs(
+        {
+          cwd: "/repo",
+          reasoningEffort: "minimal",
+        },
+        "/tmp/out.md",
+        {},
+      ),
+    ).toThrow(/reasoning_effort='minimal'.*web_search/);
+  });
+});
+
+describe("defaultReasoningEffort", () => {
+  it("does not allow minimal as an environment default", () => {
+    expect(
+      defaultReasoningEffort({
+        CODEX_SUBAGENTS_DEFAULT_REASONING_EFFORT: "minimal",
+      }),
+    ).toBe("medium");
   });
 });
 
@@ -195,6 +248,63 @@ describe("runAgent", () => {
     expect(result.status).toBe("failed");
     expect(result.exitCode).toBe(7);
     expect(result.stderr).toContain("requested failure");
+  });
+
+  it("returns validation failures without spawning Codex", async () => {
+    const projectDir = await tempDir("codex-subagents-repo-");
+    const recordDir = await tempDir("codex-subagents-record-");
+
+    const result = await runAgent({
+      prompt: "should not start",
+      projectDir,
+      codexBin: fakeCodex,
+      modelPreset: "spark",
+      reasoningSummary: "concise",
+      env: {
+        FAKE_CODEX_RECORD_DIR: recordDir,
+      },
+    });
+
+    expect(result.ok).toBe(false);
+    expect(result.validationError).toContain("model_preset='spark'");
+    expect(result.exitCode).toBeNull();
+    await expect(readFile(path.join(recordDir, "calls.jsonl"), "utf8")).rejects.toThrow();
+  });
+
+  it("can run with an isolated temporary Codex home", async () => {
+    const projectDir = await tempDir("codex-subagents-repo-");
+    const recordDir = await tempDir("codex-subagents-record-");
+    const codexHome = await tempDir("codex-subagents-real-home-");
+    await writeFile(path.join(codexHome, "auth.json"), "{}", "utf8");
+    await writeFile(
+      path.join(codexHome, "config.toml"),
+      '[mcp_servers.stale]\nurl = "http://127.0.0.1:3845/mcp"\n',
+      "utf8",
+    );
+
+    const result = await runAgent({
+      prompt: "isolated home",
+      projectDir,
+      codexBin: fakeCodex,
+      isolatedCodexHome: true,
+      env: {
+        CODEX_HOME: codexHome,
+        FAKE_CODEX_RECORD_DIR: recordDir,
+      },
+    });
+
+    expect(result.ok).toBe(true);
+    expect(result.codexSubagents.tempCodexHomeUsed).toBe(true);
+
+    const calls = (await readFile(path.join(recordDir, "calls.jsonl"), "utf8"))
+      .trim()
+      .split("\n")
+      .map((line) => JSON.parse(line));
+    expect(calls).toHaveLength(1);
+    expect(calls[0].codexHome).toMatch(/codex-subagents-home-/);
+    expect(calls[0].codexConfig).toContain("isolated codex-subagents run");
+    expect(calls[0].codexConfig).not.toContain("127.0.0.1:3845");
+    await expect(stat(calls[0].codexHome)).rejects.toThrow();
   });
 
   it("times out long-running Codex processes", async () => {

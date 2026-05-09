@@ -32,9 +32,11 @@ const usageGuide = [
   "- Keep sandbox read-only unless the user explicitly asks for a different sandbox.",
   "- Approvals are non-interactive; do not expect Codex to ask permission.",
   "- Prefer model_preset \"spark\" for responsive focused checks, small reviews, UI iteration, and sidecar analysis.",
-  "- Use reasoning_effort \"medium\" by default, \"low\" for simple checks, and \"high\" or \"xhigh\" only for difficult analysis.",
+  "- Use reasoning_effort \"medium\" by default, \"low\" for simple checks, and \"high\" or \"xhigh\" only for difficult analysis. Do not use \"minimal\"; Codex currently auto-attaches web_search and the API rejects that tool with minimal reasoning.",
+  "- Do not combine model_preset \"spark\" with reasoning_summary values other than \"none\"; Spark does not support reasoning.summary.",
   "- Do not set service_tier by default. Let Codex use its normal account/default service tier unless the user explicitly asks for a service tier.",
   "- Pass project_dir whenever Claude knows the active project directory so Codex works in the same tree as Claude Code.",
+  "- Set isolated_codex_home true when a run should ignore the user's Codex MCP server config and use only this request's temporary Codex configuration.",
   "- Ask Codex for concise results with file paths, line references, and actionable findings when reviewing code.",
   "",
   "Nested Codex subagents:",
@@ -140,7 +142,7 @@ const commonInputSchema = {
   reasoning_effort: reasoningEffortSchema
     .optional()
     .describe(
-      "Codex model reasoning effort. Prefer medium by default, low for simple checks, high/xhigh only for difficult analysis.",
+      "Codex model reasoning effort. Prefer medium by default, low for simple checks, high/xhigh only for difficult analysis. `minimal` is rejected because Codex currently auto-attaches web_search, which the API does not allow with minimal reasoning.",
     ),
   sandbox: sandboxModeSchema
     .default("read-only")
@@ -155,7 +157,9 @@ const commonInputSchema = {
     .describe("Optional GPT-5 model verbosity override."),
   reasoning_summary: reasoningSummarySchema
     .optional()
-    .describe("Optional Codex reasoning summary setting."),
+    .describe(
+      "Optional Codex reasoning summary setting. Do not use with model_preset `spark` except `none`; Spark does not support reasoning.summary.",
+    ),
   cwd: z
     .string()
     .trim()
@@ -204,6 +208,12 @@ const commonInputSchema = {
     .default(false)
     .describe("Allow Codex to run outside a Git repository."),
   ignore_rules: z.boolean().default(false).describe("Skip Codex execpolicy .rules files."),
+  isolated_codex_home: z
+    .boolean()
+    .default(false)
+    .describe(
+      "Run with a temporary Codex home that links auth but does not inherit the user's Codex config.toml. Use to avoid unrelated MCP servers from the user's Codex config.",
+    ),
   codex_subagents: z
     .array(codexSubagentSchema)
     .max(24)
@@ -288,6 +298,7 @@ function toRunOptions(args: {
   ephemeral?: boolean;
   skip_git_repo_check?: boolean;
   ignore_rules?: boolean;
+  isolated_codex_home?: boolean;
   codex_subagents?: Parameters<typeof toCodexSubagents>[0];
   subagent_tasks?: Array<{ agent: string; prompt: string; name?: string }>;
   subagent_runtime?: {
@@ -316,6 +327,7 @@ function toRunOptions(args: {
     ephemeral: args.ephemeral,
     skipGitRepoCheck: args.skip_git_repo_check,
     ignoreRules: args.ignore_rules,
+    isolatedCodexHome: args.isolated_codex_home,
     codexSubagents: toCodexSubagents(args.codex_subagents),
     subagentTasks: args.subagent_tasks,
     subagentRuntime: args.subagent_runtime
@@ -431,6 +443,7 @@ const parallelAgentSchema = z.object({
   ephemeral: commonInputSchema.ephemeral.optional(),
   skip_git_repo_check: commonInputSchema.skip_git_repo_check.optional(),
   ignore_rules: commonInputSchema.ignore_rules.optional(),
+  isolated_codex_home: commonInputSchema.isolated_codex_home.optional(),
   codex_subagents: commonInputSchema.codex_subagents,
   subagent_tasks: commonInputSchema.subagent_tasks,
   subagent_runtime: commonInputSchema.subagent_runtime,
@@ -487,6 +500,7 @@ server.registerTool(
           ephemeral: agent.ephemeral ?? args.ephemeral,
           skipGitRepoCheck: agent.skip_git_repo_check ?? args.skip_git_repo_check,
           ignoreRules: agent.ignore_rules ?? args.ignore_rules,
+          isolatedCodexHome: agent.isolated_codex_home ?? args.isolated_codex_home,
           codexSubagents: toCodexSubagents(agent.codex_subagents ?? args.codex_subagents),
           subagentTasks: agent.subagent_tasks ?? args.subagent_tasks,
           subagentRuntime: agent.subagent_runtime

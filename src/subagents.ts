@@ -196,18 +196,26 @@ async function linkIfPresent(source: string, destination: string): Promise<void>
 async function prepareTempCodexHome(
   definitions: CodexSubagentDefinition[],
   env: NodeJS.ProcessEnv,
+  options: { isolated?: boolean } = {},
 ): Promise<string> {
   const realCodexHome = env.CODEX_HOME?.trim() || path.join(os.homedir(), ".codex");
   const tempCodexHome = await mkdtemp(path.join(os.tmpdir(), "codex-subagents-home-"));
 
-  await Promise.all([
+  const links = [
     linkIfPresent(path.join(realCodexHome, "auth.json"), path.join(tempCodexHome, "auth.json")),
-    linkIfPresent(path.join(realCodexHome, "config.toml"), path.join(tempCodexHome, "config.toml")),
     linkIfPresent(path.join(realCodexHome, "AGENTS.md"), path.join(tempCodexHome, "AGENTS.md")),
     linkIfPresent(path.join(realCodexHome, "skills"), path.join(tempCodexHome, "skills")),
     linkIfPresent(path.join(realCodexHome, "rules"), path.join(tempCodexHome, "rules")),
     linkIfPresent(path.join(realCodexHome, "plugins"), path.join(tempCodexHome, "plugins")),
-  ]);
+  ];
+
+  if (options.isolated) {
+    links.push(writeFile(path.join(tempCodexHome, "config.toml"), "# isolated codex-subagents run\n"));
+  } else {
+    links.push(linkIfPresent(path.join(realCodexHome, "config.toml"), path.join(tempCodexHome, "config.toml")));
+  }
+
+  await Promise.all(links);
 
   const agentsDir = path.join(tempCodexHome, "agents");
   await mkdir(agentsDir, { recursive: true });
@@ -268,14 +276,17 @@ export async function prepareSubagents(options: {
   definitions?: CodexSubagentDefinition[];
   tasks?: SubagentTask[];
   env?: NodeJS.ProcessEnv;
+  isolatedCodexHome?: boolean;
 }): Promise<PreparedSubagents> {
   const definitions = options.definitions ?? [];
   const tasks = options.tasks ?? [];
   const env = { ...(options.env ?? {}) };
   let tempCodexHome: string | undefined;
 
-  if (definitions.length > 0) {
-    tempCodexHome = await prepareTempCodexHome(definitions, { ...process.env, ...env });
+  if (definitions.length > 0 || options.isolatedCodexHome) {
+    tempCodexHome = await prepareTempCodexHome(definitions, { ...process.env, ...env }, {
+      isolated: options.isolatedCodexHome,
+    });
     env.CODEX_HOME = tempCodexHome;
   }
 

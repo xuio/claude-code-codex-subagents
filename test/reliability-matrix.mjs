@@ -134,6 +134,40 @@ try {
     invalidProject.structuredContent,
   );
 
+  const callsBeforeValidation = (await readCalls()).length;
+  const invalidSparkSummary = await callTool("run_agent", {
+    prompt: "matrix-invalid-spark-summary",
+    project_dir: projectDir,
+    model_preset: "spark",
+    reasoning_summary: "concise",
+  });
+  assert(invalidSparkSummary.isError, "Spark reasoning_summary should fail at plugin layer");
+  assert(
+    invalidSparkSummary.structuredContent?.agent?.validationError?.includes("model_preset='spark'"),
+    "Spark reasoning_summary failure should explain the unsupported pair",
+    invalidSparkSummary.structuredContent,
+  );
+  assert(
+    (await readCalls()).length === callsBeforeValidation,
+    "Spark reasoning_summary validation should not spawn Codex",
+  );
+
+  const minimalReasoning = await callTool("run_agent", {
+    prompt: "matrix-minimal-reasoning",
+    project_dir: projectDir,
+    reasoning_effort: "minimal",
+  });
+  assert(minimalReasoning.isError, "minimal reasoning should fail at plugin layer");
+  assert(
+    minimalReasoning.structuredContent?.agent?.validationError?.includes("web_search"),
+    "minimal reasoning failure should explain the web_search incompatibility",
+    minimalReasoning.structuredContent,
+  );
+  assert(
+    (await readCalls()).length === callsBeforeValidation,
+    "minimal reasoning validation should not spawn Codex",
+  );
+
   const parallelStarted = Date.now();
   const parallel = await callTool("run_agents", {
     agents: Array.from({ length: 5 }, (_, index) => ({
@@ -172,6 +206,36 @@ try {
     mixed.structuredContent.agents?.some((agent) => agent.status === "failed"),
     "mixed run_agents should include the failed agent result",
     mixed.structuredContent,
+  );
+
+  const mixedValidation = await callTool("run_agents", {
+    agents: [
+      { name: "valid-a", prompt: "matrix-validation-valid-a", project_dir: projectDir },
+      {
+        name: "invalid-spark",
+        prompt: "matrix-validation-invalid",
+        project_dir: projectDir,
+        model_preset: "spark",
+        reasoning_summary: "concise",
+      },
+      { name: "valid-b", prompt: "matrix-validation-valid-b", project_dir: projectDir },
+      { name: "valid-c", prompt: "matrix-validation-valid-c", project_dir: projectDir },
+    ],
+    max_parallel: 4,
+  });
+  assert(mixedValidation.isError, "run_agents should report error when one agent is invalid");
+  assert(
+    mixedValidation.structuredContent?.agents?.length === 4,
+    "run_agents should return every validation-mixed result",
+    mixedValidation.structuredContent,
+  );
+  assert(
+    mixedValidation.structuredContent.agents.filter((agent) => agent.ok).length === 3 &&
+      mixedValidation.structuredContent.agents.some((agent) =>
+        agent.validationError?.includes("model_preset='spark'"),
+      ),
+    "run_agents should validate one bad agent without aborting siblings",
+    mixedValidation.structuredContent,
   );
 
   const nested = await callTool("run_agent", {
@@ -252,6 +316,21 @@ try {
     .catch((error) => {
       if (error?.code !== "ENOENT") throw error;
     });
+
+  const isolated = await callTool("run_agent", {
+    prompt: "matrix-isolated-home",
+    project_dir: projectDir,
+    isolated_codex_home: true,
+  });
+  const isolatedAgent = isolated.structuredContent?.agent;
+  assert(isolatedAgent?.ok, "isolated Codex home run should succeed", isolated);
+  assert(
+    isolatedAgent.codexSubagents?.tempCodexHomeUsed,
+    "isolated Codex home should use a temporary CODEX_HOME",
+    isolatedAgent,
+  );
+  const isolatedCall = (await readCalls()).find((call) => call.prompt.includes("matrix-isolated-home"));
+  assert(isolatedCall?.codexConfig?.includes("isolated codex-subagents run"), "isolated run should use minimal config", isolatedCall);
 
   console.log("Reliability matrix passed");
 } finally {

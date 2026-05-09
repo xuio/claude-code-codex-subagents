@@ -22,11 +22,15 @@ For independent tasks that can run concurrently, call `run_agents` with one agen
 
 When Claude wants Codex to work in the same repository or folder as the active Claude Code session, pass that folder as `project_dir`. Use `cwd` only as a compatibility alias.
 
-Prefer `reasoning_effort: "medium"` for exploration and `high` or `xhigh` only when the task is complex enough to justify the extra latency and token usage.
+Prefer `reasoning_effort: "medium"` for exploration and `high` or `xhigh` only when the task is complex enough to justify the extra latency and token usage. Do not use `minimal`; the plugin rejects it because Codex currently auto-attaches `web_search`, which the API does not allow with minimal reasoning.
 
 Use `model_preset: "spark"` for responsive, focused work such as UI iteration, narrow exploration, small reviews, and quick sidecar checks.
 
+Do not set `reasoning_summary` with `model_preset: "spark"` except for `reasoning_summary: "none"`. Spark does not support `reasoning.summary`, and the plugin rejects unsupported combinations before starting Codex.
+
 Do not set `service_tier` by default. Let Codex use its normal account/default service tier unless the user explicitly asks for a service tier.
+
+Set `isolated_codex_home: true` when unrelated Codex MCP servers from the user's `~/.codex/config.toml` should not be loaded for the run.
 
 Use `codex_status` only when diagnosing installation or binary resolution, or after a failed Codex tool call. Normal delegation should start with `run_agent` or `run_agents`.
 
