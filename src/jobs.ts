@@ -1,5 +1,6 @@
 import {
   type AgentRunOptions,
+  type AgentRunPartial,
   type AgentRunResult,
   type ParallelRunOptions,
   runAgent,
@@ -31,6 +32,7 @@ interface QueueRunOptions {
   projectKey?: string;
   onStart?: (queuedMs: number, label?: string) => void | Promise<void>;
   onComplete?: (result: AgentRunResult, index?: number, total?: number) => void | Promise<void>;
+  onSnapshot?: (snapshot: AgentRunPartial, index?: number, total?: number) => void | Promise<void>;
 }
 
 interface JobRecord {
@@ -43,6 +45,7 @@ interface JobRecord {
   completedAt?: string;
   queuedMs?: number;
   result?: unknown;
+  partial?: unknown;
   error?: string;
   controller: AbortController;
   waiters: Set<() => void>;
@@ -58,6 +61,7 @@ export interface JobSnapshot {
   completedAt?: string;
   queuedMs?: number;
   result?: unknown;
+  partial?: unknown;
   error?: string;
 }
 
@@ -100,6 +104,7 @@ function snapshot(job: JobRecord): JobSnapshot {
     completedAt: job.completedAt,
     queuedMs: job.queuedMs,
     result: job.result,
+    partial: job.partial,
     error: job.error,
   };
 }
@@ -211,8 +216,14 @@ export async function runQueuedAgent(
   if (options.abortSignal?.aborted || queueOptions.signal?.aborted) controller.abort();
 
   try {
+    const onSnapshot = options.onSnapshot || queueOptions.onSnapshot
+      ? (snapshot: AgentRunPartial) => {
+          options.onSnapshot?.(snapshot);
+          void callQueueCallback(() => queueOptions.onSnapshot?.(snapshot));
+        }
+      : undefined;
     const { value, queuedMs } = await agentRunQueue.enqueue(
-      () => runAgent({ ...options, abortSignal: controller.signal }),
+      () => runAgent({ ...options, abortSignal: controller.signal, onSnapshot }),
       {
         signal: controller.signal,
         projectKey: queueOptions.projectKey ?? projectKeyForOptions(options),
@@ -261,6 +272,8 @@ export async function runQueuedAgents(
           ...queueOptions,
           onStart: (queuedMs) => queueOptions.onStart?.(queuedMs, agent.name ?? `agent-${index + 1}`),
           onComplete: undefined,
+          onSnapshot: (snapshot) =>
+            queueOptions.onSnapshot?.(snapshot, index, options.agents.length),
         },
       );
       results[index] = result;
@@ -286,6 +299,10 @@ class CodexJobManager {
           job.queuedMs = queuedMs;
           job.updatedAt = job.startedAt;
         },
+        onSnapshot: (partial) => {
+          job.partial = partial;
+          job.updatedAt = new Date().toISOString();
+        },
       });
       return result;
     });
@@ -298,6 +315,15 @@ class CodexJobManager {
       job.updatedAt = job.startedAt;
       const results = await runQueuedAgents(options, {
         signal: job.controller.signal,
+        onSnapshot: (partial, index) => {
+          const current =
+            job.partial && typeof job.partial === "object" && Array.isArray((job.partial as { agents?: unknown[] }).agents)
+              ? [...((job.partial as { agents: unknown[] }).agents)]
+              : new Array(options.agents.length).fill(undefined);
+          if (index !== undefined) current[index] = partial;
+          job.partial = { agents: current };
+          job.updatedAt = new Date().toISOString();
+        },
       });
       return {
         ok: results.every((result) => result.ok),

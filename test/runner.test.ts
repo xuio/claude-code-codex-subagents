@@ -320,6 +320,22 @@ describe("runAgent", () => {
     expect(result.status).toBe("timeout");
   });
 
+  it("times out idle Codex processes with an idle timeout reason", async () => {
+    const projectDir = await tempDir("codex-subagents-repo-");
+    const result = await runAgent({
+      prompt: "HANG_FOREVER",
+      projectDir,
+      codexBin: fakeCodex,
+      timeoutMs: 30_000,
+      idleTimeoutMs: 50,
+      terminateGraceMs: 50,
+    });
+
+    expect(result.ok).toBe(false);
+    expect(result.status).toBe("timeout");
+    expect(result.timeoutReason).toBe("idle_timeout");
+  });
+
   it("cancels stubborn Codex processes with an abort signal", async () => {
     const projectDir = await tempDir("codex-subagents-repo-");
     const controller = new AbortController();

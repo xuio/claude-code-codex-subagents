@@ -24,6 +24,15 @@ if (args[0] !== "exec") {
   process.exit(64);
 }
 
+const isResume = args[1] === "resume";
+function resumeSessionId(args) {
+  if (!isResume) return undefined;
+  if (args.includes("--last")) return `fake-last-${process.pid}`;
+  const promptIndex = args.lastIndexOf("-");
+  const candidate = promptIndex > 0 ? args[promptIndex - 1] : undefined;
+  return candidate && !candidate.startsWith("-") ? candidate : undefined;
+}
+
 let prompt = "";
 process.stdin.setEncoding("utf8");
 for await (const chunk of process.stdin) {
@@ -55,6 +64,7 @@ if (process.env.FAKE_CODEX_RECORD_DIR) {
       at: Date.now(),
       codexHome: process.env.CODEX_HOME,
       codexConfig: configPath && existsSync(configPath) ? readFileSync(configPath, "utf8") : undefined,
+      hasCanaryApiKey: Boolean(process.env.CANARY_API_KEY),
       agentFiles,
     })}\n`,
   );
@@ -85,7 +95,7 @@ if (delayMatch) {
   await new Promise((resolve) => setTimeout(resolve, Number(delayMatch[1])));
 }
 
-emit({ type: "thread.started", thread_id: `fake-${process.pid}` });
+emit({ type: "thread.started", thread_id: resumeSessionId(args) ?? `fake-${process.pid}` });
 emit({ type: "turn.started" });
 
 if (prompt.includes("RUN_COMMAND_EVENT")) {
@@ -100,7 +110,26 @@ if (prompt.includes("RUN_COMMAND_EVENT")) {
   });
 }
 
-const finalMessage = `fake codex result for: ${prompt.trim()}`;
+let finalMessage = `fake codex result for: ${prompt.trim()}`;
+if (prompt.includes("JSON_FINAL=review_findings")) {
+  finalMessage = JSON.stringify({
+    summary: "fake structured review",
+    findings: [
+      {
+        severity: "medium",
+        title: "Fake finding",
+        description: "Structured output was requested.",
+        file: "src/example.ts",
+        line: 1,
+        recommendation: "Use the structured output.",
+      },
+    ],
+  });
+}
+if (prompt.includes("LEAK_SECRET")) {
+  const canarySecret = ["sk", "test1234567890abcdefghijklmnop"].join("-");
+  finalMessage = `secret ${canarySecret} and CANARY_API_KEY=abc123secret`;
+}
 emit({
   type: "item.completed",
   item: {

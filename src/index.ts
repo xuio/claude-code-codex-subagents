@@ -6,15 +6,19 @@ import { z } from "zod";
 import {
   defaultModel,
   defaultReasoningEffort,
+  mcpConfigPolicies,
   modelVerbosities,
+  outputContracts,
   probeCodexVersion,
   reasoningEfforts,
   reasoningSummaries,
   sandboxModes,
   serviceTiers,
 } from "./runner.js";
+import { aggregateAgentResults } from "./aggregate.js";
 import { cleanOption } from "./binary.js";
 import { jobManager, runQueuedAgent, runQueuedAgents } from "./jobs.js";
+import { sessionManager } from "./sessions.js";
 import { modelPresets } from "./subagents.js";
 
 type ToolExtra = RequestHandlerExtra<ServerRequest, ServerNotification>;
@@ -28,7 +32,10 @@ const usageGuide = [
   "Tool choice:",
   "- Use run_agent for one delegated Codex task.",
   "- Use run_agents when the work can be split into independent concurrent tasks, for example separate reviewers for API flow, tests, security, performance, UI, docs, or migration risk.",
+  "- Use run_agents_aggregate when Claude needs a concise consensus object from several independent Codex agents.",
   "- Use start_agent_run or start_agents_run for slow or broad Codex work; poll with get_agent_run, wait with wait_agent_run, and cancel with cancel_agent_run.",
+  "- Use start_session and send_session_prompt when the user wants a Codex agent to keep context across multiple prompts.",
+  "- Use codex_doctor for installation, binary, auth, and default-setting diagnostics.",
   "- Use codex_status only for diagnostics or when you need to confirm the Codex binary/version.",
   "- Use codex_usage_guide if you are unsure how to structure a Codex delegation.",
   "",
@@ -41,6 +48,8 @@ const usageGuide = [
   "- Do not set service_tier by default. Let Codex use its normal account/default service tier unless the user explicitly asks for a service tier.",
   "- Pass project_dir whenever Claude knows the active project directory so Codex works in the same tree as Claude Code.",
   "- Set isolated_codex_home true when a run should ignore the user's Codex MCP server config and use only this request's temporary Codex configuration.",
+  "- Use mcp_config_policy \"explicit\" with codex_mcp_servers for intentional MCP sharing. Use \"inherit_claude_project\" only when the project has a Claude MCP config that should be shared with Codex.",
+  "- Use output_contract for machine-readable results when Claude needs to merge or compare Codex outputs.",
   "- Ask Codex for concise results with file paths, line references, and actionable findings when reviewing code.",
   "",
   "Nested Codex subagents:",
@@ -64,6 +73,8 @@ const serviceTierSchema = z.enum(serviceTiers);
 const modelVerbositySchema = z.enum(modelVerbosities);
 const reasoningSummarySchema = z.enum(reasoningSummaries);
 const modelPresetSchema = z.enum(modelPresets);
+const outputContractSchema = z.enum(outputContracts);
+const mcpConfigPolicySchema = z.enum(mcpConfigPolicies);
 const looseRecordSchema = z.record(z.unknown());
 
 const codexSubagentSchema = z.object({
@@ -218,6 +229,45 @@ const commonInputSchema = {
     .describe(
       "Run with a temporary Codex home that links auth but does not inherit the user's Codex config.toml. Use to avoid unrelated MCP servers from the user's Codex config.",
     ),
+  mcp_config_policy: mcpConfigPolicySchema
+    .default("inherit_codex")
+    .describe(
+      "How to provide MCP servers to Codex: inherit_codex uses the user's Codex config, isolated uses no MCP servers, explicit uses codex_mcp_servers, inherit_claude_project imports a project .mcp.json when present.",
+    ),
+  codex_mcp_servers: looseRecordSchema
+    .optional()
+    .describe("Explicit Codex mcp_servers config used when mcp_config_policy is explicit."),
+  forward_sensitive_env: z
+    .boolean()
+    .default(false)
+    .describe("Forward secret-looking environment variables to Codex. Leave false unless Codex auth requires env-based secrets."),
+  idle_timeout_ms: z
+    .number()
+    .int()
+    .positive()
+    .max(86_400_000)
+    .optional()
+    .describe("Optional no-output timeout. Kills the Codex process if stdout/stderr are silent for this long."),
+  spawn_timeout_ms: z
+    .number()
+    .int()
+    .positive()
+    .max(300_000)
+    .default(10_000)
+    .describe("Maximum time to wait for the Codex process to spawn."),
+  terminate_grace_ms: z
+    .number()
+    .int()
+    .positive()
+    .max(60_000)
+    .default(2_000)
+    .describe("Time between SIGTERM and SIGKILL during cancellation or timeout."),
+  output_contract: outputContractSchema
+    .default("freeform")
+    .describe("Optional structured output contract for Codex final responses."),
+  output_schema: looseRecordSchema
+    .optional()
+    .describe("Custom JSON Schema passed to Codex --output-schema for final response validation."),
   codex_subagents: z
     .array(codexSubagentSchema)
     .max(24)
@@ -347,6 +397,14 @@ function toRunOptions(args: {
   skip_git_repo_check?: boolean;
   ignore_rules?: boolean;
   isolated_codex_home?: boolean;
+  mcp_config_policy?: (typeof mcpConfigPolicies)[number];
+  codex_mcp_servers?: Record<string, unknown>;
+  forward_sensitive_env?: boolean;
+  idle_timeout_ms?: number;
+  spawn_timeout_ms?: number;
+  terminate_grace_ms?: number;
+  output_contract?: (typeof outputContracts)[number];
+  output_schema?: Record<string, unknown>;
   codex_subagents?: Parameters<typeof toCodexSubagents>[0];
   subagent_tasks?: Array<{ agent: string; prompt: string; name?: string }>;
   subagent_runtime?: {
@@ -376,6 +434,14 @@ function toRunOptions(args: {
     skipGitRepoCheck: args.skip_git_repo_check,
     ignoreRules: args.ignore_rules,
     isolatedCodexHome: args.isolated_codex_home,
+    mcpConfigPolicy: args.mcp_config_policy,
+    codexMcpServers: args.codex_mcp_servers,
+    forwardSensitiveEnv: args.forward_sensitive_env,
+    idleTimeoutMs: args.idle_timeout_ms,
+    spawnTimeoutMs: args.spawn_timeout_ms,
+    terminateGraceMs: args.terminate_grace_ms,
+    outputContract: args.output_contract,
+    outputSchema: args.output_schema,
     codexSubagents: toCodexSubagents(args.codex_subagents),
     subagentTasks: args.subagent_tasks,
     subagentRuntime: args.subagent_runtime
@@ -409,6 +475,14 @@ type ParallelAgentInput = {
   skip_git_repo_check?: boolean;
   ignore_rules?: boolean;
   isolated_codex_home?: boolean;
+  mcp_config_policy?: (typeof mcpConfigPolicies)[number];
+  codex_mcp_servers?: Record<string, unknown>;
+  forward_sensitive_env?: boolean;
+  idle_timeout_ms?: number;
+  spawn_timeout_ms?: number;
+  terminate_grace_ms?: number;
+  output_contract?: (typeof outputContracts)[number];
+  output_schema?: Record<string, unknown>;
   codex_subagents?: Parameters<typeof toCodexSubagents>[0];
   subagent_tasks?: Array<{ agent: string; prompt: string; name?: string }>;
   subagent_runtime?: {
@@ -452,6 +526,14 @@ function toParallelRunOptions(args: ParallelToolInput) {
       skipGitRepoCheck: agent.skip_git_repo_check ?? args.skip_git_repo_check,
       ignoreRules: agent.ignore_rules ?? args.ignore_rules,
       isolatedCodexHome: agent.isolated_codex_home ?? args.isolated_codex_home,
+      mcpConfigPolicy: agent.mcp_config_policy ?? args.mcp_config_policy,
+      codexMcpServers: agent.codex_mcp_servers ?? args.codex_mcp_servers,
+      forwardSensitiveEnv: agent.forward_sensitive_env ?? args.forward_sensitive_env,
+      idleTimeoutMs: agent.idle_timeout_ms ?? args.idle_timeout_ms,
+      spawnTimeoutMs: agent.spawn_timeout_ms ?? args.spawn_timeout_ms,
+      terminateGraceMs: agent.terminate_grace_ms ?? args.terminate_grace_ms,
+      outputContract: agent.output_contract ?? args.output_contract,
+      outputSchema: agent.output_schema ?? args.output_schema,
       codexSubagents: toCodexSubagents(agent.codex_subagents ?? args.codex_subagents),
       subagentTasks: agent.subagent_tasks ?? args.subagent_tasks,
       subagentRuntime: agent.subagent_runtime
@@ -617,6 +699,14 @@ const parallelAgentSchema = z.object({
   skip_git_repo_check: commonInputSchema.skip_git_repo_check.optional(),
   ignore_rules: commonInputSchema.ignore_rules.optional(),
   isolated_codex_home: commonInputSchema.isolated_codex_home.optional(),
+  mcp_config_policy: commonInputSchema.mcp_config_policy.optional(),
+  codex_mcp_servers: commonInputSchema.codex_mcp_servers,
+  forward_sensitive_env: commonInputSchema.forward_sensitive_env.optional(),
+  idle_timeout_ms: commonInputSchema.idle_timeout_ms,
+  spawn_timeout_ms: commonInputSchema.spawn_timeout_ms.optional(),
+  terminate_grace_ms: commonInputSchema.terminate_grace_ms.optional(),
+  output_contract: commonInputSchema.output_contract.optional(),
+  output_schema: commonInputSchema.output_schema,
   codex_subagents: commonInputSchema.codex_subagents,
   subagent_tasks: commonInputSchema.subagent_tasks,
   subagent_runtime: commonInputSchema.subagent_runtime,
@@ -686,6 +776,60 @@ server.registerTool(
         },
         true,
       );
+    }
+  },
+);
+
+server.registerTool(
+  "run_agents_aggregate",
+  {
+    title: "Run and aggregate parallel Codex agents",
+    description:
+      "Launch multiple independent Codex agents and return both individual results and a deterministic aggregation object with summaries, structured findings, failed agents, and a recommended next action.",
+    inputSchema: {
+      agents: z
+        .array(parallelAgentSchema)
+        .min(1)
+        .max(12)
+        .describe("Independent Codex agent tasks. Use output_contract when you need structured findings."),
+      max_parallel: z.number().int().min(1).max(8).default(4),
+      ...commonInputSchema,
+    },
+  },
+  async (args, extra) => {
+    const progress = createProgressReporter(extra);
+    try {
+      const total = args.agents.length * 2 + 1;
+      let completed = 0;
+      await progress.send(`Queued ${args.agents.length} Codex agents for aggregation`, { total });
+      const results = await runQueuedAgents(toParallelRunOptions(args), {
+        onStart: (queuedMs, label) => {
+          void progress.send(`Started ${label ?? "Codex agent"} after ${queuedMs}ms queued`, { total });
+        },
+        onComplete: async () => {
+          completed += 1;
+          const last = completed === args.agents.length;
+          await progress.send(
+            last
+              ? `Aggregating ${completed}/${args.agents.length} Codex results`
+              : `Completed ${completed}/${args.agents.length} Codex agents`,
+            last ? { progress: total, total } : { total },
+          );
+        },
+      });
+      const aggregation = aggregateAgentResults(results);
+      await progress.flush();
+      return jsonResult(
+        {
+          ok: aggregation.ok,
+          aggregation,
+          agents: results,
+        },
+        !aggregation.ok,
+      );
+    } catch (error) {
+      await progress.flush();
+      return jsonResult({ error: error instanceof Error ? error.message : String(error) }, true);
     }
   },
 );
@@ -798,6 +942,116 @@ server.registerTool(
   },
 );
 
+const sessionIdSchema = z.string().trim().min(1).describe("Session id returned by start_session.");
+
+server.registerTool(
+  "start_session",
+  {
+    title: "Start persistent Codex session",
+    description:
+      "Start a Codex session that can keep Codex context across later send_session_prompt calls. The initial run is non-ephemeral so Codex records a resumable thread id.",
+    inputSchema: {
+      prompt: z.string().min(1).describe("Initial prompt for the persistent Codex session."),
+      session_name: z.string().trim().min(1).optional().describe("Optional human label for this session."),
+      name: z.string().trim().min(1).optional().describe("Optional label for the initial Codex run."),
+      ...commonInputSchema,
+    },
+  },
+  async (args, extra) => {
+    const progress = createProgressReporter(extra);
+    try {
+      await progress.send("Starting persistent Codex session");
+      const { session, result } = await sessionManager.start(
+        {
+          ...toRunOptions(args),
+          ephemeral: false,
+        },
+        { sessionName: args.session_name },
+      );
+      await reportAgentResult(progress, result);
+      await progress.flush();
+      return jsonResult({ session, agent: result }, !result.ok);
+    } catch (error) {
+      await progress.flush();
+      return jsonResult({ error: error instanceof Error ? error.message : String(error) }, true);
+    }
+  },
+);
+
+server.registerTool(
+  "send_session_prompt",
+  {
+    title: "Send prompt to Codex session",
+    description:
+      "Resume an existing Codex session and send another prompt, preserving Codex context through the recorded Codex thread id.",
+    inputSchema: {
+      session_id: sessionIdSchema,
+      prompt: z.string().min(1).describe("Follow-up prompt for the persistent Codex session."),
+      ...commonInputSchema,
+    },
+  },
+  async (args, extra) => {
+    const progress = createProgressReporter(extra);
+    try {
+      await progress.send(`Resuming Codex session ${args.session_id}`);
+      const { session, result, error } = await sessionManager.send(args.session_id, args.prompt, toRunOptions(args));
+      if (error || !session || !result) {
+        await progress.flush();
+        return jsonResult({ error, session }, true);
+      }
+      await reportAgentResult(progress, result);
+      await progress.flush();
+      return jsonResult({ session, agent: result }, !result.ok);
+    } catch (error) {
+      await progress.flush();
+      return jsonResult({ error: error instanceof Error ? error.message : String(error) }, true);
+    }
+  },
+);
+
+server.registerTool(
+  "get_session",
+  {
+    title: "Get Codex session",
+    description: "Return metadata, partial progress, and last result for a persistent Codex session.",
+    inputSchema: {
+      session_id: sessionIdSchema,
+    },
+  },
+  async (args) => {
+    const session = sessionManager.get(args.session_id);
+    if (!session) return jsonResult({ error: `Unknown session_id: ${args.session_id}` }, true);
+    return jsonResult({ session });
+  },
+);
+
+server.registerTool(
+  "list_sessions",
+  {
+    title: "List Codex sessions",
+    description: "List persistent Codex sessions held by this daemonless MCP server process.",
+    inputSchema: {},
+  },
+  async () => jsonResult({ sessions: sessionManager.list() }),
+);
+
+server.registerTool(
+  "cancel_session",
+  {
+    title: "Cancel Codex session",
+    description:
+      "Cancel the currently running turn for a persistent Codex session, or mark an idle session cancelled.",
+    inputSchema: {
+      session_id: sessionIdSchema,
+    },
+  },
+  async (args) => {
+    const session = sessionManager.cancel(args.session_id);
+    if (!session) return jsonResult({ error: `Unknown session_id: ${args.session_id}` }, true);
+    return jsonResult({ session });
+  },
+);
+
 server.registerTool(
   "codex_status",
   {
@@ -825,6 +1079,8 @@ server.registerTool(
           codex: "gpt-5.3-codex",
           spark: "gpt-5.3-codex-spark",
         },
+        outputContracts,
+        mcpConfigPolicies,
         pluginCodexBin: cleanOption(process.env.CODEX_SUBAGENTS_CODEX_BIN),
         claudeProjectDir: cleanOption(process.env.CLAUDE_PROJECT_DIR),
         queue: jobManager.stats(),
@@ -838,6 +1094,76 @@ server.registerTool(
         true,
       );
     }
+  },
+);
+
+server.registerTool(
+  "codex_doctor",
+  {
+    title: "Codex subagents doctor",
+    description:
+      "Run local diagnostics for the Codex subagents plugin without invoking a model: binary resolution, version probe, project directory, defaults, queue state, and safety posture.",
+    inputSchema: {
+      codex_bin: commonInputSchema.codex_bin,
+      project_dir: commonInputSchema.project_dir,
+    },
+  },
+  async (args) => {
+    const checks: Array<{ name: string; ok: boolean; detail?: unknown }> = [];
+    let ok = true;
+
+    try {
+      const status = await probeCodexVersion(args.codex_bin);
+      checks.push({
+        name: "codex_binary",
+        ok: !status.error,
+        detail: { binary: status.binary, version: status.version, error: status.error },
+      });
+      if (status.error) ok = false;
+    } catch (error) {
+      ok = false;
+      checks.push({
+        name: "codex_binary",
+        ok: false,
+        detail: error instanceof Error ? error.message : String(error),
+      });
+    }
+
+    try {
+      const projectDir = args.project_dir ?? process.env.CLAUDE_PROJECT_DIR ?? process.cwd();
+      checks.push({
+        name: "project_dir",
+        ok: Boolean(projectDir),
+        detail: { projectDir: cleanOption(projectDir) },
+      });
+    } catch (error) {
+      ok = false;
+      checks.push({ name: "project_dir", ok: false, detail: String(error) });
+    }
+
+    checks.push({
+      name: "defaults",
+      ok: defaultReasoningEffort() !== "minimal",
+      detail: {
+        sandbox: "read-only",
+        approvalPolicy: "never",
+        defaultModel: defaultModel(),
+        defaultReasoningEffort: defaultReasoningEffort(),
+        forwardSensitiveEnvDefault: false,
+      },
+    });
+    checks.push({ name: "queue", ok: true, detail: jobManager.stats() });
+
+    return jsonResult({
+      ok,
+      checks,
+      supported: {
+        modelPresets,
+        reasoningEfforts,
+        outputContracts,
+        mcpConfigPolicies,
+      },
+    });
   },
 );
 

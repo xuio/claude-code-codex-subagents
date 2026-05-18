@@ -1,11 +1,20 @@
 import { spawn } from "node:child_process";
-import { mkdtemp, readFile, rm, stat } from "node:fs/promises";
+import { mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { resolveCodexBinary, type ResolvedCodexBinary } from "./binary.js";
 import {
+  type OutputContract,
+  outputContracts,
+  parseStructuredOutput,
+  schemaForOutputContract,
+} from "./contracts.js";
+import { redactJsonValue, redactSensitiveText, sanitizeChildEnv } from "./redaction.js";
+import {
   codexSubagentConfigOverrides,
+  type McpConfigPolicy,
   modelForPreset,
+  mcpConfigPolicies,
   prepareSubagents,
   type CodexSubagentDefinition,
   type ModelPreset,
@@ -19,6 +28,7 @@ export const serviceTiers = ["fast", "flex"] as const;
 export const modelVerbosities = ["low", "medium", "high"] as const;
 export const reasoningSummaries = ["auto", "concise", "detailed", "none"] as const;
 export const sparkModel = "gpt-5.3-codex-spark";
+export { mcpConfigPolicies, outputContracts };
 
 export type ReasoningEffort = (typeof reasoningEfforts)[number];
 export type SandboxMode = (typeof sandboxModes)[number];
@@ -47,11 +57,33 @@ export interface AgentRunOptions {
   skipGitRepoCheck?: boolean;
   ignoreRules?: boolean;
   isolatedCodexHome?: boolean;
+  mcpConfigPolicy?: McpConfigPolicy;
+  codexMcpServers?: Record<string, unknown>;
+  forwardSensitiveEnv?: boolean;
+  idleTimeoutMs?: number;
+  spawnTimeoutMs?: number;
+  terminateGraceMs?: number;
+  outputContract?: OutputContract;
+  outputSchema?: Record<string, unknown>;
+  resumeSessionId?: string;
+  resumeLast?: boolean;
+  onSnapshot?: (snapshot: AgentRunPartial) => void;
   abortSignal?: AbortSignal;
   env?: NodeJS.ProcessEnv;
   codexSubagents?: CodexSubagentDefinition[];
   subagentTasks?: SubagentTask[];
   subagentRuntime?: SubagentRuntimeOptions;
+}
+
+export interface AgentRunPartial {
+  name?: string;
+  status: "starting" | "running" | "timeout" | "cancelled";
+  durationMs: number;
+  cwd: string;
+  stdoutTail: string;
+  stderrTail: string;
+  lastAgentMessage?: string;
+  eventSummary: CodexEventSummary;
 }
 
 export interface CodexEventSummary {
@@ -87,8 +119,11 @@ export interface AgentRunResult {
     finalMessageChars: number;
   };
   eventSummary: CodexEventSummary;
+  structuredOutput?: unknown;
+  structuredOutputError?: string;
   commandPreview: string[];
   validationError?: string;
+  timeoutReason?: "timeout" | "idle_timeout" | "spawn_timeout";
   queue?: {
     queuedMs: number;
   };
@@ -238,7 +273,7 @@ function tomlString(value: string): string {
 }
 
 export function buildCodexExecArgs(
-  options: Omit<AgentRunOptions, "prompt" | "env">,
+  options: Omit<AgentRunOptions, "prompt" | "env" | "onSnapshot"> & { outputSchemaPath?: string },
   outputPath: string,
   env: NodeJS.ProcessEnv = process.env,
 ): string[] {
@@ -246,27 +281,41 @@ export function buildCodexExecArgs(
   const sandbox = options.sandbox ?? "read-only";
   const ephemeral = options.ephemeral ?? true;
 
-  const args = [
-    "exec",
-    "--json",
-    "--color",
-    "never",
-    "--sandbox",
-    sandbox,
-    "-c",
-    `approval_policy=${tomlString("never")}`,
-    "-c",
-    `model_reasoning_effort=${tomlString(reasoningEffort)}`,
-    "--output-last-message",
-    outputPath,
-  ];
+  const resume = Boolean(options.resumeSessionId || options.resumeLast);
+  const args = resume
+    ? [
+        "exec",
+        "resume",
+        "--json",
+        "-c",
+        `approval_policy=${tomlString("never")}`,
+        "-c",
+        `model_reasoning_effort=${tomlString(reasoningEffort)}`,
+        "--output-last-message",
+        outputPath,
+      ]
+    : [
+        "exec",
+        "--json",
+        "--color",
+        "never",
+        "--sandbox",
+        sandbox,
+        "-c",
+        `approval_policy=${tomlString("never")}`,
+        "-c",
+        `model_reasoning_effort=${tomlString(reasoningEffort)}`,
+        "--output-last-message",
+        outputPath,
+      ];
 
   if (model) args.push("--model", model);
-  if (options.profile) args.push("--profile", options.profile);
-  if (options.cwd) args.push("--cd", options.cwd);
+  if (!resume && options.profile) args.push("--profile", options.profile);
+  if (!resume && options.cwd) args.push("--cd", options.cwd);
   if (ephemeral) args.push("--ephemeral");
   if (options.skipGitRepoCheck) args.push("--skip-git-repo-check");
   if (options.ignoreRules) args.push("--ignore-rules");
+  if (!resume && options.outputSchemaPath) args.push("--output-schema", options.outputSchemaPath);
   if (options.modelVerbosity) {
     args.push("-c", `model_verbosity=${tomlString(options.modelVerbosity)}`);
   }
@@ -289,6 +338,10 @@ export function buildCodexExecArgs(
     args.push("-c", override);
   }
 
+  if (resume) {
+    if (options.resumeLast) args.push("--last");
+    else if (options.resumeSessionId) args.push(options.resumeSessionId);
+  }
   args.push("-");
   return args;
 }
@@ -319,7 +372,7 @@ function validationFailureResult(options: {
     exitCode: null,
     signal: null,
     finalMessage: "",
-    stderr: message,
+    stderr: redactSensitiveText(message),
     stdoutTail: "",
     truncated: {
       stdoutChars: 0,
@@ -329,10 +382,10 @@ function validationFailureResult(options: {
     eventSummary: {
       counts: {},
       commands: [],
-      errors: [message],
+      errors: [redactSensitiveText(message)],
     },
     commandPreview: [],
-    validationError: message,
+    validationError: redactSensitiveText(message),
     codexSubagents: {
       customAgents: options.runOptions.codexSubagents?.map((agent) => agent.name) ?? [],
       requestedTasks: options.runOptions.subagentTasks?.length ?? 0,
@@ -369,7 +422,7 @@ function baseFailureResult(options: {
     exitCode: options.exitCode ?? null,
     signal: options.signal ?? null,
     finalMessage: "",
-    stderr: message,
+    stderr: redactSensitiveText(message),
     stdoutTail: "",
     truncated: {
       stdoutChars: 0,
@@ -379,7 +432,7 @@ function baseFailureResult(options: {
     eventSummary: {
       counts: {},
       commands: [],
-      errors: [message],
+      errors: [redactSensitiveText(message)],
     },
     commandPreview: [],
     codexSubagents: {
@@ -407,6 +460,18 @@ function killChildProcess(child: ReturnType<typeof spawn>, signal: NodeJS.Signal
   } catch {
     // Ignore kill races; the close event decides the final state.
   }
+}
+
+function cloneEventSummary(summary: CodexEventSummary): CodexEventSummary {
+  return redactJsonValue({
+    counts: { ...summary.counts },
+    threadId: summary.threadId,
+    usage: summary.usage,
+    commands: summary.commands.map((command) => ({ ...command })),
+    errors: [...summary.errors],
+    lastAgentMessage: summary.lastAgentMessage,
+    events: summary.events ? [...summary.events] : undefined,
+  });
 }
 
 function parseJsonLine(line: string, summary: CodexEventSummary): void {
@@ -494,16 +559,25 @@ export async function runAgent(options: AgentRunOptions): Promise<AgentRunResult
     }
     throw error;
   }
+  const tempDir = await mkdtemp(path.join(os.tmpdir(), "codex-subagents-"));
   const preparedSubagents = await prepareSubagents({
     definitions: options.codexSubagents,
     tasks: options.subagentTasks,
     env: options.env,
     isolatedCodexHome: options.isolatedCodexHome,
+    mcpConfigPolicy: options.mcpConfigPolicy,
+    codexMcpServers: options.codexMcpServers,
+    projectDir: cwd,
   });
-  const tempDir = await mkdtemp(path.join(os.tmpdir(), "codex-subagents-"));
-  const childEnv = { ...mergedEnv, ...preparedSubagents.env };
+  const childEnv = sanitizeChildEnv({ ...mergedEnv, ...preparedSubagents.env }, options.forwardSensitiveEnv);
   const outputPath = path.join(tempDir, "last-message.md");
-  const args = buildCodexExecArgs({ ...options, cwd }, outputPath, childEnv);
+  const outputSchema = schemaForOutputContract(options.outputContract, options.outputSchema);
+  const outputSchemaPath =
+    outputSchema && !options.resumeSessionId && !options.resumeLast
+      ? path.join(tempDir, "output-schema.json")
+      : undefined;
+  if (outputSchemaPath) await writeFile(outputSchemaPath, JSON.stringify(outputSchema), "utf8");
+  const args = buildCodexExecArgs({ ...options, cwd, outputSchemaPath }, outputPath, childEnv);
   const stdout = new LimitedText(maxOutputChars);
   const stderr = new LimitedText(Math.min(maxOutputChars, 20_000));
   const summary: CodexEventSummary = {
@@ -514,10 +588,14 @@ export async function runAgent(options: AgentRunOptions): Promise<AgentRunResult
   };
   let pendingLine = "";
   let timedOut = false;
+  let timeoutReason: "timeout" | "idle_timeout" | "spawn_timeout" | undefined;
   let cancelled = false;
   let timeout: NodeJS.Timeout | undefined;
+  let idleTimeout: NodeJS.Timeout | undefined;
+  let spawnTimeout: NodeJS.Timeout | undefined;
   let killTimeout: NodeJS.Timeout | undefined;
   let abortHandler: (() => void) | undefined;
+  let lastSnapshotAt = 0;
 
   try {
     const child = spawn(codexBinary.path, args, {
@@ -528,15 +606,41 @@ export async function runAgent(options: AgentRunOptions): Promise<AgentRunResult
       detached: process.platform !== "win32",
     });
 
-    const requestKill = (reason: "timeout" | "cancelled") => {
-      if (reason === "timeout") timedOut = true;
-      else cancelled = true;
+    const makeSnapshot = (status: AgentRunPartial["status"]): AgentRunPartial => ({
+      name: options.name,
+      status,
+      durationMs: Date.now() - started,
+      cwd,
+      stdoutTail: redactSensitiveText(stdout.text()),
+      stderrTail: redactSensitiveText(stderr.text()),
+      lastAgentMessage: summary.lastAgentMessage
+        ? redactSensitiveText(summary.lastAgentMessage)
+        : undefined,
+      eventSummary: cloneEventSummary(summary),
+    });
+
+    const publishSnapshot = (force = false) => {
+      if (!options.onSnapshot) return;
+      const now = Date.now();
+      if (!force && now - lastSnapshotAt < 500) return;
+      lastSnapshotAt = now;
+      options.onSnapshot(makeSnapshot(cancelled ? "cancelled" : timedOut ? "timeout" : "running"));
+    };
+
+    const requestKill = (reason: "timeout" | "idle_timeout" | "spawn_timeout" | "cancelled") => {
+      if (reason === "timeout" || reason === "idle_timeout" || reason === "spawn_timeout") {
+        timedOut = true;
+        timeoutReason = reason;
+      } else {
+        cancelled = true;
+      }
 
       killChildProcess(child, "SIGTERM");
       if (!killTimeout) {
-        killTimeout = setTimeout(() => killChildProcess(child, "SIGKILL"), 2_000);
+        killTimeout = setTimeout(() => killChildProcess(child, "SIGKILL"), options.terminateGraceMs ?? 2_000);
         killTimeout.unref();
       }
+      publishSnapshot(true);
     };
 
     abortHandler = () => requestKill("cancelled");
@@ -544,6 +648,19 @@ export async function runAgent(options: AgentRunOptions): Promise<AgentRunResult
     if (options.abortSignal?.aborted) requestKill("cancelled");
 
     const timeoutMs = options.timeoutMs ?? 600_000;
+    const resetIdleTimeout = () => {
+      if (!options.idleTimeoutMs) return;
+      if (idleTimeout) clearTimeout(idleTimeout);
+      idleTimeout = setTimeout(() => requestKill("idle_timeout"), options.idleTimeoutMs);
+      idleTimeout.unref();
+    };
+    resetIdleTimeout();
+    spawnTimeout = setTimeout(() => requestKill("spawn_timeout"), options.spawnTimeoutMs ?? 10_000);
+    spawnTimeout.unref();
+    child.once("spawn", () => {
+      if (spawnTimeout) clearTimeout(spawnTimeout);
+      publishSnapshot(true);
+    });
     timeout = setTimeout(() => {
       requestKill("timeout");
     }, timeoutMs);
@@ -551,19 +668,26 @@ export async function runAgent(options: AgentRunOptions): Promise<AgentRunResult
 
     child.stdout.setEncoding("utf8");
     child.stdout.on("data", (chunk: string) => {
+      resetIdleTimeout();
       stdout.append(chunk);
+      publishSnapshot(true);
       pendingLine += chunk;
       let newlineIndex = pendingLine.indexOf("\n");
       while (newlineIndex >= 0) {
         const line = pendingLine.slice(0, newlineIndex);
         pendingLine = pendingLine.slice(newlineIndex + 1);
         parseJsonLine(line, summary);
+        publishSnapshot();
         newlineIndex = pendingLine.indexOf("\n");
       }
     });
 
     child.stderr.setEncoding("utf8");
-    child.stderr.on("data", (chunk: string) => stderr.append(chunk));
+    child.stderr.on("data", (chunk: string) => {
+      resetIdleTimeout();
+      stderr.append(chunk);
+      publishSnapshot(true);
+    });
 
     child.stdin.on("error", (error: Error) => {
       summary.errors.push(`Codex stdin error: ${error.message}`);
@@ -591,8 +715,11 @@ export async function runAgent(options: AgentRunOptions): Promise<AgentRunResult
     });
 
     if (pendingLine.trim()) parseJsonLine(pendingLine, summary);
+    publishSnapshot(true);
 
     if (timeout) clearTimeout(timeout);
+    if (idleTimeout) clearTimeout(idleTimeout);
+    if (spawnTimeout) clearTimeout(spawnTimeout);
     if (killTimeout) clearTimeout(killTimeout);
     if (abortHandler) options.abortSignal?.removeEventListener("abort", abortHandler);
 
@@ -603,7 +730,7 @@ export async function runAgent(options: AgentRunOptions): Promise<AgentRunResult
         cwd,
         runOptions: options,
         env: childEnv,
-        message: `Failed to start Codex: ${spawnError.message}`,
+        message: redactSensitiveText(`Failed to start Codex: ${spawnError.message}`),
         status: "failed",
       });
     }
@@ -615,7 +742,16 @@ export async function runAgent(options: AgentRunOptions): Promise<AgentRunResult
       // Codex may fail before creating the last-message file; use the last JSONL agent message.
     }
 
-    const final = truncate(finalMessage, maxOutputChars);
+    const wantsStructuredOutput = Boolean(
+      outputSchema || (options.outputContract && options.outputContract !== "freeform"),
+    );
+    const structured =
+      wantsStructuredOutput
+        ? parseStructuredOutput(finalMessage)
+        : { value: undefined, error: undefined };
+    const final = truncate(redactSensitiveText(finalMessage), maxOutputChars);
+    const redactedSummary = cloneEventSummary(summary);
+    const redactedStructuredOutput = structured.value === undefined ? undefined : redactJsonValue(structured.value);
     const status = cancelled
       ? "cancelled"
       : timedOut
@@ -639,15 +775,18 @@ export async function runAgent(options: AgentRunOptions): Promise<AgentRunResult
       exitCode,
       signal,
       finalMessage: final.text,
-      stderr: stderr.text(),
-      stdoutTail: stdout.text(),
+      stderr: redactSensitiveText(stderr.text()),
+      stdoutTail: redactSensitiveText(stdout.text()),
       truncated: {
         stdoutChars: stdout.truncated(),
         stderrChars: stderr.truncated(),
         finalMessageChars: final.truncatedChars,
       },
-      eventSummary: summary,
+      eventSummary: redactedSummary,
+      structuredOutput: redactedStructuredOutput,
+      structuredOutputError: structured.error,
       commandPreview: [codexBinary.path, ...args.filter((arg) => arg !== options.prompt)],
+      timeoutReason,
       codexSubagents: {
         customAgents: preparedSubagents.names,
         requestedTasks: options.subagentTasks?.length ?? 0,
@@ -656,6 +795,8 @@ export async function runAgent(options: AgentRunOptions): Promise<AgentRunResult
     };
   } finally {
     if (timeout) clearTimeout(timeout);
+    if (idleTimeout) clearTimeout(idleTimeout);
+    if (spawnTimeout) clearTimeout(spawnTimeout);
     if (killTimeout) clearTimeout(killTimeout);
     if (abortHandler) options.abortSignal?.removeEventListener("abort", abortHandler);
     await rm(tempDir, { recursive: true, force: true }).catch(() => {});

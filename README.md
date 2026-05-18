@@ -17,6 +17,8 @@ The plugin lets Claude Code launch one Codex agent or several Codex agents in pa
 - Codex home: uses the user's Codex home by default; pass `isolated_codex_home: true` to use a temporary Codex home with auth but without inherited `config.toml` MCP servers.
 - Concurrency: Codex processes run through a global queue. Defaults are `CODEX_SUBAGENTS_MAX_GLOBAL_PROCESSES=4` and `CODEX_SUBAGENTS_MAX_PROJECT_PROCESSES=2`.
 - Progress: long-running tools emit MCP `notifications/progress` events when the client supplies a progress token.
+- Security: secret-looking output is redacted before it is returned to Claude, and secret-looking environment variables are not forwarded to Codex unless `forward_sensitive_env` is explicitly true.
+- Sessions: `start_session` and `send_session_prompt` use Codex's recorded thread id so a Codex subagent can keep context across multiple prompts without a background daemon.
 
 Optional environment overrides:
 
@@ -43,6 +45,24 @@ To let a Codex agent spawn its own Codex subagents, pass:
 
 Custom subagents are passed to Codex as `agents.<name>...` config overrides and also materialized in a temporary Codex home for the duration of one run. The target project is not modified, and the default sandbox remains `read-only`.
 
+## Structured Output And MCP Config
+
+Pass `output_contract` when Claude needs machine-readable Codex results:
+
+- `review_findings`
+- `plan`
+- `risk_matrix`
+- `patch_suggestions`
+
+You can also pass `output_schema` with a custom JSON Schema. The plugin passes schemas to Codex through `--output-schema`, parses the final JSON message, and returns it as `structuredOutput`.
+
+MCP sharing is explicit:
+
+- `mcp_config_policy: "inherit_codex"` uses the user's normal Codex config.
+- `mcp_config_policy: "isolated"` uses a temporary Codex home without inherited MCP servers.
+- `mcp_config_policy: "explicit"` uses only `codex_mcp_servers`.
+- `mcp_config_policy: "inherit_claude_project"` imports `.mcp.json` or `.claude/mcp.json` from `project_dir` when present.
+
 ## Installation
 
 ```sh
@@ -68,11 +88,13 @@ npm run test:claude-desktop
 
 `test:ci` is the GitHub-safe suite. It uses the fake Codex binary and does not require Claude Code, the Codex desktop app, or live model credentials.
 
-`test:comprehensive` runs the TypeScript build, unit tests, stdio MCP smoke test, reliability matrix, MCP stress test, MCP progress notification test, Codex desktop runtime probe, Claude plugin validation, and desktop-shipped Claude Code CLI plugin/auth checks. The runtime probe validates local Codex capabilities without invoking a model.
+`test:comprehensive` runs the TypeScript build, unit tests, stdio MCP smoke test, reliability matrix, MCP stress test, MCP progress notification test, advanced MCP behavior test, Codex desktop runtime probe, Claude plugin validation, and desktop-shipped Claude Code CLI plugin/auth checks. The runtime probe validates local Codex capabilities without invoking a model.
 
 `test:stress` uses the fake Codex binary to exercise queued async jobs, noisy output, malformed JSONL, and truncation behavior.
 
 `test:progress` verifies that SDK clients receive monotonically increasing MCP progress notifications from blocking, async start, parallel, and wait-style tool calls.
+
+`test:advanced` verifies structured output, secret redaction, safe env forwarding, partial job snapshots, persistent sessions, result aggregation, doctor diagnostics, and explicit MCP config materialization through the stdio MCP server.
 
 `test:claude-orchestration` is an opt-in live Claude Code test. It loads the plugin inside Claude Code, lets Claude call the plugin MCP tools, and uses the fake Codex binary so no Codex model tokens are spent. It is kept out of `test:comprehensive` because it does spend Claude tokens.
 
@@ -100,17 +122,25 @@ After startup, ask Claude to use Codex subagents, or invoke the plugin skill:
 
 `run_agents` launches multiple Codex `exec` processes concurrently with a bounded `max_parallel` setting and the global queue.
 
+`run_agents_aggregate` launches multiple agents and returns both raw agent results and a deterministic aggregation object.
+
 `start_agent_run` starts one queued Codex run and returns a `job.id` immediately.
 
 `start_agents_run` starts a queued parallel Codex run and returns a `job.id` immediately.
 
 `get_agent_run`, `wait_agent_run`, and `cancel_agent_run` inspect, wait for, or cancel async jobs.
 
-`codex_status` reports the resolved Codex binary, server working directory, Claude project directory, default model, default reasoning effort, and version probe.
+`start_session`, `send_session_prompt`, `get_session`, `list_sessions`, and `cancel_session` manage daemonless persistent Codex sessions using Codex's own resumable thread ids.
+
+`codex_status` reports the resolved Codex binary, server working directory, Claude project directory, default model, default reasoning effort, feature sets, and version probe.
+
+`codex_doctor` runs installation and safety diagnostics without invoking a model.
 
 Each agent accepts model, reasoning effort, sandbox, project directory, timeout, isolated Codex home, and output-size controls. Pass `project_dir` when Claude Code wants Codex to inspect the same repository or subdirectory Claude is currently working in. If `project_dir` is omitted, the server uses `CLAUDE_PROJECT_DIR` when Claude Code provides it. Omit model to use Codex's configured default or the plugin's optional configured default model.
 
 Prefer `start_agent_run` or `start_agents_run` for work that may run longer than a normal MCP request. The async job API keeps Claude responsive, supports cancellation, and avoids request failures caused by long-running Codex subprocesses.
+
+Async job snapshots expose partial stdout/stderr and parsed event summaries through `get_agent_run` while work is still running.
 
 When a client supports MCP progress tokens, `run_agent`, `run_agents`, `start_agent_run`, `start_agents_run`, `get_agent_run`, `wait_agent_run`, and `cancel_agent_run` send progress notifications. SDK clients should pass an `onprogress` handler and enable timeout reset on progress for long waits.
 
