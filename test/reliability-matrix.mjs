@@ -238,6 +238,26 @@ try {
     mixedValidation.structuredContent,
   );
 
+  const asyncParallelStart = await callTool("start_agents_run", {
+    agents: [
+      { name: "async-a", prompt: "matrix-async-a DELAY_MS=40", project_dir: projectDir },
+      { name: "async-b", prompt: "matrix-async-b DELAY_MS=40", project_dir: projectDir },
+    ],
+    max_parallel: 2,
+  });
+  const asyncParallelJobId = asyncParallelStart.structuredContent?.job?.id;
+  assert(asyncParallelJobId, "start_agents_run should return a job id", asyncParallelStart.structuredContent);
+  const asyncParallelDone = await callTool("wait_agent_run", {
+    job_id: asyncParallelJobId,
+    timeout_ms: 5_000,
+  });
+  assert(
+    asyncParallelDone.structuredContent?.job?.status === "completed" &&
+      asyncParallelDone.structuredContent?.job?.result?.agents?.length === 2,
+    "wait_agent_run should return completed start_agents_run results",
+    asyncParallelDone.structuredContent,
+  );
+
   const nested = await callTool("run_agent", {
     prompt: "matrix-nested coordinate nested work",
     project_dir: projectDir,

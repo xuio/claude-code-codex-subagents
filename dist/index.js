@@ -21567,6 +21567,57 @@ function validationFailureResult(options) {
     }
   };
 }
+function baseFailureResult(options) {
+  const message = options.message;
+  return {
+    name: options.runOptions.name,
+    ok: false,
+    status: options.status ?? "failed",
+    durationMs: Date.now() - options.started,
+    codexBinary: options.codexBinary,
+    cwd: options.cwd,
+    model: resolveRequestedModel(options.runOptions, options.env),
+    modelPreset: options.runOptions.modelPreset,
+    reasoningEffort: options.runOptions.reasoningEffort ?? defaultReasoningEffort(options.env),
+    sandbox: options.runOptions.sandbox ?? "read-only",
+    serviceTier: options.runOptions.serviceTier,
+    exitCode: options.exitCode ?? null,
+    signal: options.signal ?? null,
+    finalMessage: "",
+    stderr: message,
+    stdoutTail: "",
+    truncated: {
+      stdoutChars: 0,
+      stderrChars: 0,
+      finalMessageChars: 0
+    },
+    eventSummary: {
+      counts: {},
+      commands: [],
+      errors: [message]
+    },
+    commandPreview: [],
+    codexSubagents: {
+      customAgents: options.runOptions.codexSubagents?.map((agent) => agent.name) ?? [],
+      requestedTasks: options.runOptions.subagentTasks?.length ?? 0,
+      tempCodexHomeUsed: false
+    }
+  };
+}
+function killChildProcess(child, signal) {
+  if (child.exitCode !== null || child.killed) return;
+  try {
+    if (process.platform !== "win32" && child.pid) {
+      process.kill(-child.pid, signal);
+      return;
+    }
+  } catch {
+  }
+  try {
+    child.kill(signal);
+  } catch {
+  }
+}
 function parseJsonLine(line, summary) {
   if (!line.trim()) return;
   let event;
@@ -21616,6 +21667,17 @@ async function runAgent(options) {
     explicitPath: options.codexBin,
     env: mergedEnv
   });
+  if (options.abortSignal?.aborted) {
+    return baseFailureResult({
+      started,
+      codexBinary,
+      cwd,
+      runOptions: options,
+      env: mergedEnv,
+      message: "Codex run was cancelled before it started.",
+      status: "cancelled"
+    });
+  }
   try {
     validateRunConfiguration(options, mergedEnv);
   } catch (error2) {
@@ -21651,21 +21713,33 @@ async function runAgent(options) {
   };
   let pendingLine = "";
   let timedOut = false;
+  let cancelled = false;
   let timeout;
   let killTimeout;
+  let abortHandler;
   try {
     const child = spawn(codexBinary.path, args, {
       cwd,
       env: childEnv,
       stdio: ["pipe", "pipe", "pipe"],
-      shell: false
+      shell: false,
+      detached: process.platform !== "win32"
     });
+    const requestKill = (reason) => {
+      if (reason === "timeout") timedOut = true;
+      else cancelled = true;
+      killChildProcess(child, "SIGTERM");
+      if (!killTimeout) {
+        killTimeout = setTimeout(() => killChildProcess(child, "SIGKILL"), 2e3);
+        killTimeout.unref();
+      }
+    };
+    abortHandler = () => requestKill("cancelled");
+    options.abortSignal?.addEventListener("abort", abortHandler, { once: true });
+    if (options.abortSignal?.aborted) requestKill("cancelled");
     const timeoutMs = options.timeoutMs ?? 6e5;
     timeout = setTimeout(() => {
-      timedOut = true;
-      child.kill("SIGTERM");
-      killTimeout = setTimeout(() => child.kill("SIGKILL"), 2e3);
-      killTimeout.unref();
+      requestKill("timeout");
     }, timeoutMs);
     timeout.unref();
     child.stdout.setEncoding("utf8");
@@ -21682,9 +21756,20 @@ async function runAgent(options) {
     });
     child.stderr.setEncoding("utf8");
     child.stderr.on("data", (chunk) => stderr.append(chunk));
-    child.stdin.end(`${preparedSubagents.promptPrefix}${options.prompt}`);
-    const { exitCode, signal } = await new Promise((resolve, reject) => {
-      child.once("error", reject);
+    child.stdin.on("error", (error2) => {
+      summary.errors.push(`Codex stdin error: ${error2.message}`);
+    });
+    try {
+      child.stdin.end(`${preparedSubagents.promptPrefix}${options.prompt}`);
+    } catch (error2) {
+      summary.errors.push(
+        `Codex stdin write failed: ${error2 instanceof Error ? error2.message : String(error2)}`
+      );
+    }
+    const { exitCode, signal, spawnError } = await new Promise((resolve) => {
+      child.once("error", (error2) => {
+        resolve({ exitCode: null, signal: null, spawnError: error2 });
+      });
       child.once("close", (code, signalValue) => {
         resolve({ exitCode: code, signal: signalValue });
       });
@@ -21692,13 +21777,25 @@ async function runAgent(options) {
     if (pendingLine.trim()) parseJsonLine(pendingLine, summary);
     if (timeout) clearTimeout(timeout);
     if (killTimeout) clearTimeout(killTimeout);
+    if (abortHandler) options.abortSignal?.removeEventListener("abort", abortHandler);
+    if (spawnError) {
+      return baseFailureResult({
+        started,
+        codexBinary,
+        cwd,
+        runOptions: options,
+        env: childEnv,
+        message: `Failed to start Codex: ${spawnError.message}`,
+        status: "failed"
+      });
+    }
     let finalMessage = summary.lastAgentMessage ?? "";
     try {
       finalMessage = await readFile2(outputPath, "utf8");
     } catch {
     }
     const final = truncate(finalMessage, maxOutputChars);
-    const status = timedOut ? "timeout" : exitCode === 0 ? "completed" : "failed";
+    const status = cancelled ? "cancelled" : timedOut ? "timeout" : exitCode === 0 ? "completed" : "failed";
     return {
       name: options.name,
       ok: status === "completed",
@@ -21732,36 +21829,12 @@ async function runAgent(options) {
   } finally {
     if (timeout) clearTimeout(timeout);
     if (killTimeout) clearTimeout(killTimeout);
-    await rm2(tempDir, { recursive: true, force: true });
-    await preparedSubagents.cleanup();
+    if (abortHandler) options.abortSignal?.removeEventListener("abort", abortHandler);
+    await rm2(tempDir, { recursive: true, force: true }).catch(() => {
+    });
+    await preparedSubagents.cleanup().catch(() => {
+    });
   }
-}
-async function runAgents(options) {
-  const maxParallel = Math.max(
-    1,
-    Math.min(options.maxParallel ?? Math.min(options.agents.length, 4), 8)
-  );
-  const results = new Array(options.agents.length);
-  let next = 0;
-  async function worker() {
-    while (next < options.agents.length) {
-      const index = next;
-      next += 1;
-      const agent = options.agents[index];
-      if (!agent) continue;
-      results[index] = await runAgent({
-        ...options,
-        ...agent,
-        model: agent.model ?? options.defaultModel,
-        modelPreset: agent.modelPreset ?? options.modelPreset,
-        reasoningEffort: agent.reasoningEffort ?? options.defaultReasoningEffort,
-        prompt: agent.prompt,
-        name: agent.name ?? `agent-${index + 1}`
-      });
-    }
-  }
-  await Promise.all(Array.from({ length: Math.min(maxParallel, options.agents.length) }, worker));
-  return results;
 }
 async function probeCodexVersion(codexBin, env = process.env) {
   const binary = resolveCodexBinary({ explicitPath: codexBin, env });
@@ -21790,6 +21863,281 @@ async function probeCodexVersion(codexBin, env = process.env) {
   return { binary, ...version2 };
 }
 
+// src/jobs.ts
+var AbortError = class extends Error {
+  constructor(message = "Operation was cancelled.") {
+    super(message);
+    this.name = "AbortError";
+  }
+};
+function readPositiveInt(value, fallback, max) {
+  const parsed = Number(value);
+  if (!Number.isInteger(parsed) || parsed < 1) return fallback;
+  return Math.min(parsed, max);
+}
+function projectKeyForOptions(options) {
+  return options.projectDir?.trim() || options.cwd?.trim() || process.env.CLAUDE_PROJECT_DIR?.trim() || "__default__";
+}
+function statusFromAgentResult(result) {
+  if (result.status === "cancelled") return "cancelled";
+  return result.ok ? "completed" : "failed";
+}
+function statusFromAgentResults(results) {
+  if (results.every((result) => result.ok)) return "completed";
+  if (results.some((result) => result.status === "cancelled")) return "cancelled";
+  return "failed";
+}
+function snapshot(job) {
+  return {
+    id: job.id,
+    kind: job.kind,
+    status: job.status,
+    createdAt: job.createdAt,
+    updatedAt: job.updatedAt,
+    startedAt: job.startedAt,
+    completedAt: job.completedAt,
+    queuedMs: job.queuedMs,
+    result: job.result,
+    error: job.error
+  };
+}
+var AgentRunQueue = class {
+  constructor(maxGlobal = readPositiveInt(process.env.CODEX_SUBAGENTS_MAX_GLOBAL_PROCESSES, 4, 32), maxPerProject = readPositiveInt(process.env.CODEX_SUBAGENTS_MAX_PROJECT_PROCESSES, 2, 32)) {
+    this.maxGlobal = maxGlobal;
+    this.maxPerProject = maxPerProject;
+  }
+  maxGlobal;
+  maxPerProject;
+  pending = [];
+  active = 0;
+  projectActive = /* @__PURE__ */ new Map();
+  stats() {
+    return {
+      active: this.active,
+      pending: this.pending.length,
+      maxGlobal: this.maxGlobal,
+      maxPerProject: this.maxPerProject
+    };
+  }
+  enqueue(run, options = {}) {
+    if (options.signal?.aborted) {
+      return Promise.reject(new AbortError("Codex run was cancelled before it entered the queue."));
+    }
+    return new Promise((resolve, reject) => {
+      const task = {
+        id: `queue-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`,
+        projectKey: options.projectKey ?? "__default__",
+        enqueuedAt: Date.now(),
+        run,
+        resolve,
+        reject,
+        signal: options.signal,
+        onStart: options.onStart
+      };
+      const abortPending = () => {
+        const index = this.pending.indexOf(task);
+        if (index >= 0) {
+          this.pending.splice(index, 1);
+          reject(new AbortError("Codex run was cancelled while queued."));
+        }
+      };
+      options.signal?.addEventListener("abort", abortPending, { once: true });
+      this.pending.push(task);
+      this.tryStart();
+    });
+  }
+  canStart(projectKey) {
+    return this.active < this.maxGlobal && (this.projectActive.get(projectKey) ?? 0) < this.maxPerProject;
+  }
+  tryStart() {
+    while (this.active < this.maxGlobal) {
+      const index = this.pending.findIndex((task2) => this.canStart(task2.projectKey));
+      if (index < 0) return;
+      const [task] = this.pending.splice(index, 1);
+      if (!task) return;
+      if (task.signal?.aborted) {
+        task.reject(new AbortError("Codex run was cancelled while queued."));
+        continue;
+      }
+      const queuedMs = Date.now() - task.enqueuedAt;
+      this.active += 1;
+      this.projectActive.set(task.projectKey, (this.projectActive.get(task.projectKey) ?? 0) + 1);
+      task.onStart?.(queuedMs);
+      Promise.resolve().then(task.run).then((value) => task.resolve({ value, queuedMs })).catch((error2) => task.reject(error2)).finally(() => {
+        this.active -= 1;
+        const projectCount = (this.projectActive.get(task.projectKey) ?? 1) - 1;
+        if (projectCount > 0) this.projectActive.set(task.projectKey, projectCount);
+        else this.projectActive.delete(task.projectKey);
+        this.tryStart();
+      });
+    }
+  }
+};
+var agentRunQueue = new AgentRunQueue();
+async function runQueuedAgent(options, queueOptions = {}) {
+  const controller = new AbortController();
+  const abort = () => controller.abort();
+  options.abortSignal?.addEventListener("abort", abort, { once: true });
+  queueOptions.signal?.addEventListener("abort", abort, { once: true });
+  if (options.abortSignal?.aborted || queueOptions.signal?.aborted) controller.abort();
+  try {
+    const { value, queuedMs } = await agentRunQueue.enqueue(
+      () => runAgent({ ...options, abortSignal: controller.signal }),
+      {
+        signal: controller.signal,
+        projectKey: queueOptions.projectKey ?? projectKeyForOptions(options),
+        onStart: queueOptions.onStart
+      }
+    );
+    return {
+      ...value,
+      queue: { queuedMs }
+    };
+  } finally {
+    options.abortSignal?.removeEventListener("abort", abort);
+    queueOptions.signal?.removeEventListener("abort", abort);
+  }
+}
+async function runQueuedAgents(options, queueOptions = {}) {
+  const maxParallel = Math.max(
+    1,
+    Math.min(options.maxParallel ?? Math.min(options.agents.length, 4), 8)
+  );
+  const results = new Array(options.agents.length);
+  let next = 0;
+  async function worker() {
+    while (next < options.agents.length) {
+      const index = next;
+      next += 1;
+      const agent = options.agents[index];
+      if (!agent) continue;
+      results[index] = await runQueuedAgent(
+        {
+          ...options,
+          ...agent,
+          model: agent.model ?? options.defaultModel,
+          modelPreset: agent.modelPreset ?? options.modelPreset,
+          reasoningEffort: agent.reasoningEffort ?? options.defaultReasoningEffort,
+          prompt: agent.prompt,
+          name: agent.name ?? `agent-${index + 1}`
+        },
+        queueOptions
+      );
+    }
+  }
+  await Promise.all(Array.from({ length: Math.min(maxParallel, options.agents.length) }, worker));
+  return results;
+}
+var CodexJobManager = class {
+  jobs = /* @__PURE__ */ new Map();
+  ttlMs = readPositiveInt(process.env.CODEX_SUBAGENTS_JOB_TTL_SECONDS, 3600, 86400) * 1e3;
+  startAgent(options) {
+    return this.start("agent", async (job) => {
+      const result = await runQueuedAgent(options, {
+        signal: job.controller.signal,
+        onStart: (queuedMs) => {
+          job.status = "running";
+          job.startedAt = (/* @__PURE__ */ new Date()).toISOString();
+          job.queuedMs = queuedMs;
+          job.updatedAt = job.startedAt;
+        }
+      });
+      return result;
+    });
+  }
+  startAgents(options) {
+    return this.start("agents", async (job) => {
+      job.status = "running";
+      job.startedAt = (/* @__PURE__ */ new Date()).toISOString();
+      job.updatedAt = job.startedAt;
+      const results = await runQueuedAgents(options, {
+        signal: job.controller.signal
+      });
+      return {
+        ok: results.every((result) => result.ok),
+        agents: results
+      };
+    });
+  }
+  get(id) {
+    this.prune();
+    const job = this.jobs.get(id);
+    return job ? snapshot(job) : void 0;
+  }
+  cancel(id) {
+    const job = this.jobs.get(id);
+    if (!job) return void 0;
+    if (!job.completedAt && job.status !== "cancelled") {
+      job.status = "cancelling";
+      job.updatedAt = (/* @__PURE__ */ new Date()).toISOString();
+      job.controller.abort();
+    }
+    return snapshot(job);
+  }
+  async wait(id, timeoutMs) {
+    const job = this.jobs.get(id);
+    if (!job) return void 0;
+    if (job.completedAt) return snapshot(job);
+    await new Promise((resolve) => {
+      const timeout = setTimeout(resolve, timeoutMs);
+      const waiter = () => {
+        clearTimeout(timeout);
+        resolve();
+      };
+      job.waiters.add(waiter);
+    });
+    return snapshot(job);
+  }
+  stats() {
+    this.prune();
+    return {
+      ...agentRunQueue.stats(),
+      jobs: this.jobs.size
+    };
+  }
+  start(kind, run) {
+    this.prune();
+    const now = (/* @__PURE__ */ new Date()).toISOString();
+    const job = {
+      id: `job-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`,
+      kind,
+      status: "queued",
+      createdAt: now,
+      updatedAt: now,
+      controller: new AbortController(),
+      waiters: /* @__PURE__ */ new Set()
+    };
+    this.jobs.set(job.id, job);
+    void run(job).then((result) => {
+      job.result = result;
+      if (kind === "agent") {
+        job.status = statusFromAgentResult(result);
+      } else {
+        const agents = result.agents ?? [];
+        job.status = statusFromAgentResults(agents);
+      }
+    }).catch((error2) => {
+      job.error = error2 instanceof Error ? error2.message : String(error2);
+      job.status = error2 instanceof AbortError ? "cancelled" : "failed";
+    }).finally(() => {
+      const nowDone = (/* @__PURE__ */ new Date()).toISOString();
+      job.completedAt = nowDone;
+      job.updatedAt = nowDone;
+      for (const waiter of job.waiters) waiter();
+      job.waiters.clear();
+    });
+    return snapshot(job);
+  }
+  prune() {
+    const cutoff = Date.now() - this.ttlMs;
+    for (const [id, job] of this.jobs) {
+      if (!job.completedAt) continue;
+      if (Date.parse(job.completedAt) < cutoff) this.jobs.delete(id);
+    }
+  }
+};
+var jobManager = new CodexJobManager();
+
 // src/index.ts
 var usageGuide = [
   "Claude Code integration guide for codex-subagents:",
@@ -21799,6 +22147,7 @@ var usageGuide = [
   "Tool choice:",
   "- Use run_agent for one delegated Codex task.",
   "- Use run_agents when the work can be split into independent concurrent tasks, for example separate reviewers for API flow, tests, security, performance, UI, docs, or migration risk.",
+  "- Use start_agent_run or start_agents_run for slow or broad Codex work; poll with get_agent_run, wait with wait_agent_run, and cancel with cancel_agent_run.",
   "- Use codex_status only for diagnostics or when you need to confirm the Codex binary/version.",
   "- Use codex_usage_guide if you are unsure how to structure a Codex delegation.",
   "",
@@ -21955,6 +22304,50 @@ function toRunOptions(args) {
     } : void 0
   };
 }
+function toParallelRunOptions(args) {
+  return {
+    ...toRunOptions({
+      ...args,
+      prompt: "shared-options"
+    }),
+    agents: args.agents.map((agent) => ({
+      prompt: agent.prompt,
+      name: agent.name,
+      model: agent.model ?? args.model,
+      modelPreset: agent.model_preset ?? args.model_preset,
+      reasoningEffort: agent.reasoning_effort ?? args.reasoning_effort,
+      sandbox: agent.sandbox ?? args.sandbox,
+      serviceTier: agent.service_tier ?? args.service_tier,
+      modelVerbosity: agent.model_verbosity ?? args.model_verbosity,
+      reasoningSummary: agent.reasoning_summary ?? args.reasoning_summary,
+      cwd: agent.cwd ?? args.cwd,
+      projectDir: agent.project_dir ?? args.project_dir,
+      codexBin: agent.codex_bin ?? args.codex_bin,
+      profile: agent.profile ?? args.profile,
+      timeoutMs: agent.timeout_ms ?? args.timeout_ms,
+      maxOutputChars: agent.max_output_chars ?? args.max_output_chars,
+      includeEvents: agent.include_events ?? args.include_events,
+      ephemeral: agent.ephemeral ?? args.ephemeral,
+      skipGitRepoCheck: agent.skip_git_repo_check ?? args.skip_git_repo_check,
+      ignoreRules: agent.ignore_rules ?? args.ignore_rules,
+      isolatedCodexHome: agent.isolated_codex_home ?? args.isolated_codex_home,
+      codexSubagents: toCodexSubagents(agent.codex_subagents ?? args.codex_subagents),
+      subagentTasks: agent.subagent_tasks ?? args.subagent_tasks,
+      subagentRuntime: agent.subagent_runtime ? {
+        maxThreads: agent.subagent_runtime.max_threads,
+        maxDepth: agent.subagent_runtime.max_depth,
+        jobMaxRuntimeSeconds: agent.subagent_runtime.job_max_runtime_seconds
+      } : args.subagent_runtime ? {
+        maxThreads: args.subagent_runtime.max_threads,
+        maxDepth: args.subagent_runtime.max_depth,
+        jobMaxRuntimeSeconds: args.subagent_runtime.job_max_runtime_seconds
+      } : void 0
+    })),
+    maxParallel: args.max_parallel,
+    defaultModel: args.model,
+    defaultReasoningEffort: args.reasoning_effort
+  };
+}
 server.registerTool(
   "codex_usage_guide",
   {
@@ -22012,7 +22405,7 @@ server.registerTool(
   },
   async (args) => {
     try {
-      const result = await runAgent(toRunOptions(args));
+      const result = await runQueuedAgent(toRunOptions(args));
       return jsonResult({ agent: result }, !result.ok);
     } catch (error2) {
       return jsonResult(
@@ -22021,6 +22414,26 @@ server.registerTool(
         },
         true
       );
+    }
+  }
+);
+server.registerTool(
+  "start_agent_run",
+  {
+    title: "Start one Codex agent run",
+    description: "Start one Codex agent asynchronously and return a job_id immediately. Use this for long or potentially slow Codex work so the MCP request does not need to stay open.",
+    inputSchema: {
+      prompt: external_exports.string().min(1).describe("Concrete instructions for the Codex agent."),
+      name: external_exports.string().trim().min(1).optional().describe("Optional label for this agent run."),
+      ...commonInputSchema
+    }
+  },
+  async (args) => {
+    try {
+      const job = jobManager.startAgent(toRunOptions(args));
+      return jsonResult({ job });
+    } catch (error2) {
+      return jsonResult({ error: error2 instanceof Error ? error2.message : String(error2) }, true);
     }
   }
 );
@@ -22066,48 +22479,7 @@ server.registerTool(
   },
   async (args) => {
     try {
-      const results = await runAgents({
-        ...toRunOptions({
-          ...args,
-          prompt: "shared-options"
-        }),
-        agents: args.agents.map((agent) => ({
-          prompt: agent.prompt,
-          name: agent.name,
-          model: agent.model ?? args.model,
-          modelPreset: agent.model_preset ?? args.model_preset,
-          reasoningEffort: agent.reasoning_effort ?? args.reasoning_effort,
-          sandbox: agent.sandbox ?? args.sandbox,
-          serviceTier: agent.service_tier ?? args.service_tier,
-          modelVerbosity: agent.model_verbosity ?? args.model_verbosity,
-          reasoningSummary: agent.reasoning_summary ?? args.reasoning_summary,
-          cwd: agent.cwd ?? args.cwd,
-          projectDir: agent.project_dir ?? args.project_dir,
-          codexBin: agent.codex_bin ?? args.codex_bin,
-          profile: agent.profile ?? args.profile,
-          timeoutMs: agent.timeout_ms ?? args.timeout_ms,
-          maxOutputChars: agent.max_output_chars ?? args.max_output_chars,
-          includeEvents: agent.include_events ?? args.include_events,
-          ephemeral: agent.ephemeral ?? args.ephemeral,
-          skipGitRepoCheck: agent.skip_git_repo_check ?? args.skip_git_repo_check,
-          ignoreRules: agent.ignore_rules ?? args.ignore_rules,
-          isolatedCodexHome: agent.isolated_codex_home ?? args.isolated_codex_home,
-          codexSubagents: toCodexSubagents(agent.codex_subagents ?? args.codex_subagents),
-          subagentTasks: agent.subagent_tasks ?? args.subagent_tasks,
-          subagentRuntime: agent.subagent_runtime ? {
-            maxThreads: agent.subagent_runtime.max_threads,
-            maxDepth: agent.subagent_runtime.max_depth,
-            jobMaxRuntimeSeconds: agent.subagent_runtime.job_max_runtime_seconds
-          } : args.subagent_runtime ? {
-            maxThreads: args.subagent_runtime.max_threads,
-            maxDepth: args.subagent_runtime.max_depth,
-            jobMaxRuntimeSeconds: args.subagent_runtime.job_max_runtime_seconds
-          } : void 0
-        })),
-        maxParallel: args.max_parallel,
-        defaultModel: args.model,
-        defaultReasoningEffort: args.reasoning_effort
-      });
+      const results = await runQueuedAgents(toParallelRunOptions(args));
       const ok = results.every((result) => result.ok);
       return jsonResult(
         {
@@ -22124,6 +22496,73 @@ server.registerTool(
         true
       );
     }
+  }
+);
+server.registerTool(
+  "start_agents_run",
+  {
+    title: "Start parallel Codex agents",
+    description: "Start multiple Codex agents asynchronously and return a job_id immediately. Use for broad or slow parallel Codex reviews; poll with get_agent_run or wait_agent_run.",
+    inputSchema: {
+      agents: external_exports.array(parallelAgentSchema).min(1).max(12).describe("Independent Codex agent tasks."),
+      max_parallel: external_exports.number().int().min(1).max(8).default(4),
+      ...commonInputSchema
+    }
+  },
+  async (args) => {
+    try {
+      const job = jobManager.startAgents(toParallelRunOptions(args));
+      return jsonResult({ job });
+    } catch (error2) {
+      return jsonResult({ error: error2 instanceof Error ? error2.message : String(error2) }, true);
+    }
+  }
+);
+var jobIdSchema = external_exports.string().trim().min(1).describe("Job id returned by start_agent_run or start_agents_run.");
+server.registerTool(
+  "get_agent_run",
+  {
+    title: "Get Codex run job",
+    description: "Return current status and result, if available, for an asynchronous Codex job.",
+    inputSchema: {
+      job_id: jobIdSchema
+    }
+  },
+  async (args) => {
+    const job = jobManager.get(args.job_id);
+    if (!job) return jsonResult({ error: `Unknown job_id: ${args.job_id}` }, true);
+    return jsonResult({ job });
+  }
+);
+server.registerTool(
+  "wait_agent_run",
+  {
+    title: "Wait for Codex run job",
+    description: "Wait up to timeout_ms for an asynchronous Codex job to complete. Returns the current job state if it is still running.",
+    inputSchema: {
+      job_id: jobIdSchema,
+      timeout_ms: external_exports.number().int().positive().max(3e5).default(3e4)
+    }
+  },
+  async (args) => {
+    const job = await jobManager.wait(args.job_id, args.timeout_ms);
+    if (!job) return jsonResult({ error: `Unknown job_id: ${args.job_id}` }, true);
+    return jsonResult({ job }, job.status === "failed" || job.status === "cancelled");
+  }
+);
+server.registerTool(
+  "cancel_agent_run",
+  {
+    title: "Cancel Codex run job",
+    description: "Cancel a queued or running asynchronous Codex job. Running Codex child processes are terminated with SIGTERM and then SIGKILL if needed.",
+    inputSchema: {
+      job_id: jobIdSchema
+    }
+  },
+  async (args) => {
+    const job = jobManager.cancel(args.job_id);
+    if (!job) return jsonResult({ error: `Unknown job_id: ${args.job_id}` }, true);
+    return jsonResult({ job });
   }
 );
 server.registerTool(
@@ -22153,7 +22592,8 @@ server.registerTool(
           spark: "gpt-5.3-codex-spark"
         },
         pluginCodexBin: cleanOption(process.env.CODEX_SUBAGENTS_CODEX_BIN),
-        claudeProjectDir: cleanOption(process.env.CLAUDE_PROJECT_DIR)
+        claudeProjectDir: cleanOption(process.env.CLAUDE_PROJECT_DIR),
+        queue: jobManager.stats()
       });
     } catch (error2) {
       return jsonResult(
@@ -22230,6 +22670,12 @@ server.registerPrompt(
   })
 );
 async function main() {
+  process.on("unhandledRejection", (error2) => {
+    console.error("codex-subagents unhandled rejection", error2);
+  });
+  process.on("uncaughtException", (error2) => {
+    console.error("codex-subagents uncaught exception", error2);
+  });
   const transport = new StdioServerTransport();
   await server.connect(transport);
 }

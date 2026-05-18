@@ -104,6 +104,76 @@ try {
     throw new Error(`nested subagent smoke failed: ${JSON.stringify(nested.structuredContent)}`);
   }
 
+  const asyncStart = await client.callTool(
+    {
+      name: "start_agent_run",
+      arguments: {
+        prompt: "async smoke DELAY_MS=20",
+        project_dir: projectDir,
+      },
+    },
+    CallToolResultSchema,
+  );
+  const asyncJobId = asyncStart.structuredContent?.job?.id;
+  if (!asyncJobId) {
+    throw new Error(`start_agent_run did not return a job id: ${JSON.stringify(asyncStart.structuredContent)}`);
+  }
+
+  const asyncWait = await client.callTool(
+    {
+      name: "wait_agent_run",
+      arguments: {
+        job_id: asyncJobId,
+        timeout_ms: 5_000,
+      },
+    },
+    CallToolResultSchema,
+  );
+  if (
+    asyncWait.structuredContent?.job?.status !== "completed" ||
+    asyncWait.structuredContent?.job?.result?.ok !== true
+  ) {
+    throw new Error(`wait_agent_run did not complete async job: ${JSON.stringify(asyncWait.structuredContent)}`);
+  }
+
+  const cancelStart = await client.callTool(
+    {
+      name: "start_agent_run",
+      arguments: {
+        prompt: "cancel smoke HANG_FOREVER IGNORE_SIGTERM",
+        project_dir: projectDir,
+        timeout_ms: 30_000,
+      },
+    },
+    CallToolResultSchema,
+  );
+  const cancelJobId = cancelStart.structuredContent?.job?.id;
+  if (!cancelJobId) {
+    throw new Error(`cancel start did not return a job id: ${JSON.stringify(cancelStart.structuredContent)}`);
+  }
+  await client.callTool(
+    {
+      name: "cancel_agent_run",
+      arguments: {
+        job_id: cancelJobId,
+      },
+    },
+    CallToolResultSchema,
+  );
+  const cancelWait = await client.callTool(
+    {
+      name: "wait_agent_run",
+      arguments: {
+        job_id: cancelJobId,
+        timeout_ms: 10_000,
+      },
+    },
+    CallToolResultSchema,
+  );
+  if (cancelWait.structuredContent?.job?.status !== "cancelled") {
+    throw new Error(`cancel_agent_run did not cancel job: ${JSON.stringify(cancelWait.structuredContent)}`);
+  }
+
   console.log("MCP smoke test passed");
 } finally {
   await transport.close();

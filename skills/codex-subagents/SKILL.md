@@ -20,6 +20,8 @@ For one delegated task, call `run_agent`. Make the prompt self-contained: includ
 
 For independent tasks that can run concurrently, call `run_agents` with one agent object per task. Split by ownership such as API flow, tests, security, performance, UI, docs, or migration risk. Keep prompts concrete and bounded, and set `max_parallel` to the smaller of the useful agent count and `4` unless the user asks for more.
 
+For slow, broad, or potentially flaky Codex work, prefer `start_agent_run` or `start_agents_run` instead of the blocking tools. Poll with `get_agent_run`, wait with `wait_agent_run`, and cancel with `cancel_agent_run` when the work is no longer needed. The async tools keep the MCP request responsive and use the same global Codex process queue.
+
 When Claude wants Codex to work in the same repository or folder as the active Claude Code session, pass that folder as `project_dir`. Use `cwd` only as a compatibility alias.
 
 Prefer `reasoning_effort: "medium"` for exploration and `high` or `xhigh` only when the task is complex enough to justify the extra latency and token usage. Do not use `minimal`; the plugin rejects it because Codex currently auto-attaches `web_search`, which the API does not allow with minimal reasoning.

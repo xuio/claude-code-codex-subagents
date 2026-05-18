@@ -47,6 +47,7 @@ export interface AgentRunOptions {
   skipGitRepoCheck?: boolean;
   ignoreRules?: boolean;
   isolatedCodexHome?: boolean;
+  abortSignal?: AbortSignal;
   env?: NodeJS.ProcessEnv;
   codexSubagents?: CodexSubagentDefinition[];
   subagentTasks?: SubagentTask[];
@@ -66,7 +67,7 @@ export interface CodexEventSummary {
 export interface AgentRunResult {
   name?: string;
   ok: boolean;
-  status: "completed" | "failed" | "timeout";
+  status: "completed" | "failed" | "timeout" | "cancelled";
   durationMs: number;
   codexBinary: ResolvedCodexBinary;
   cwd: string;
@@ -88,6 +89,9 @@ export interface AgentRunResult {
   eventSummary: CodexEventSummary;
   commandPreview: string[];
   validationError?: string;
+  queue?: {
+    queuedMs: number;
+  };
   codexSubagents: {
     customAgents: string[];
     requestedTasks: number;
@@ -337,6 +341,74 @@ function validationFailureResult(options: {
   };
 }
 
+function baseFailureResult(options: {
+  started: number;
+  codexBinary: ResolvedCodexBinary;
+  cwd: string;
+  runOptions: AgentRunOptions;
+  env: NodeJS.ProcessEnv;
+  message: string;
+  status?: "failed" | "timeout" | "cancelled";
+  exitCode?: number | null;
+  signal?: NodeJS.Signals | null;
+}): AgentRunResult {
+  const message = options.message;
+
+  return {
+    name: options.runOptions.name,
+    ok: false,
+    status: options.status ?? "failed",
+    durationMs: Date.now() - options.started,
+    codexBinary: options.codexBinary,
+    cwd: options.cwd,
+    model: resolveRequestedModel(options.runOptions, options.env),
+    modelPreset: options.runOptions.modelPreset,
+    reasoningEffort: options.runOptions.reasoningEffort ?? defaultReasoningEffort(options.env),
+    sandbox: options.runOptions.sandbox ?? "read-only",
+    serviceTier: options.runOptions.serviceTier,
+    exitCode: options.exitCode ?? null,
+    signal: options.signal ?? null,
+    finalMessage: "",
+    stderr: message,
+    stdoutTail: "",
+    truncated: {
+      stdoutChars: 0,
+      stderrChars: 0,
+      finalMessageChars: 0,
+    },
+    eventSummary: {
+      counts: {},
+      commands: [],
+      errors: [message],
+    },
+    commandPreview: [],
+    codexSubagents: {
+      customAgents: options.runOptions.codexSubagents?.map((agent) => agent.name) ?? [],
+      requestedTasks: options.runOptions.subagentTasks?.length ?? 0,
+      tempCodexHomeUsed: false,
+    },
+  };
+}
+
+function killChildProcess(child: ReturnType<typeof spawn>, signal: NodeJS.Signals): void {
+  if (child.exitCode !== null || child.killed) return;
+
+  try {
+    if (process.platform !== "win32" && child.pid) {
+      process.kill(-child.pid, signal);
+      return;
+    }
+  } catch {
+    // Fall back to killing the direct child below.
+  }
+
+  try {
+    child.kill(signal);
+  } catch {
+    // Ignore kill races; the close event decides the final state.
+  }
+}
+
 function parseJsonLine(line: string, summary: CodexEventSummary): void {
   if (!line.trim()) return;
 
@@ -396,6 +468,17 @@ export async function runAgent(options: AgentRunOptions): Promise<AgentRunResult
     explicitPath: options.codexBin,
     env: mergedEnv,
   });
+  if (options.abortSignal?.aborted) {
+    return baseFailureResult({
+      started,
+      codexBinary,
+      cwd,
+      runOptions: options,
+      env: mergedEnv,
+      message: "Codex run was cancelled before it started.",
+      status: "cancelled",
+    });
+  }
   try {
     validateRunConfiguration(options, mergedEnv);
   } catch (error) {
@@ -431,8 +514,10 @@ export async function runAgent(options: AgentRunOptions): Promise<AgentRunResult
   };
   let pendingLine = "";
   let timedOut = false;
+  let cancelled = false;
   let timeout: NodeJS.Timeout | undefined;
   let killTimeout: NodeJS.Timeout | undefined;
+  let abortHandler: (() => void) | undefined;
 
   try {
     const child = spawn(codexBinary.path, args, {
@@ -440,14 +525,27 @@ export async function runAgent(options: AgentRunOptions): Promise<AgentRunResult
       env: childEnv,
       stdio: ["pipe", "pipe", "pipe"],
       shell: false,
+      detached: process.platform !== "win32",
     });
+
+    const requestKill = (reason: "timeout" | "cancelled") => {
+      if (reason === "timeout") timedOut = true;
+      else cancelled = true;
+
+      killChildProcess(child, "SIGTERM");
+      if (!killTimeout) {
+        killTimeout = setTimeout(() => killChildProcess(child, "SIGKILL"), 2_000);
+        killTimeout.unref();
+      }
+    };
+
+    abortHandler = () => requestKill("cancelled");
+    options.abortSignal?.addEventListener("abort", abortHandler, { once: true });
+    if (options.abortSignal?.aborted) requestKill("cancelled");
 
     const timeoutMs = options.timeoutMs ?? 600_000;
     timeout = setTimeout(() => {
-      timedOut = true;
-      child.kill("SIGTERM");
-      killTimeout = setTimeout(() => child.kill("SIGKILL"), 2_000);
-      killTimeout.unref();
+      requestKill("timeout");
     }, timeoutMs);
     timeout.unref();
 
@@ -467,13 +565,26 @@ export async function runAgent(options: AgentRunOptions): Promise<AgentRunResult
     child.stderr.setEncoding("utf8");
     child.stderr.on("data", (chunk: string) => stderr.append(chunk));
 
-    child.stdin.end(`${preparedSubagents.promptPrefix}${options.prompt}`);
+    child.stdin.on("error", (error: Error) => {
+      summary.errors.push(`Codex stdin error: ${error.message}`);
+    });
 
-    const { exitCode, signal } = await new Promise<{
+    try {
+      child.stdin.end(`${preparedSubagents.promptPrefix}${options.prompt}`);
+    } catch (error) {
+      summary.errors.push(
+        `Codex stdin write failed: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
+
+    const { exitCode, signal, spawnError } = await new Promise<{
       exitCode: number | null;
       signal: NodeJS.Signals | null;
-    }>((resolve, reject) => {
-      child.once("error", reject);
+      spawnError?: Error;
+    }>((resolve) => {
+      child.once("error", (error) => {
+        resolve({ exitCode: null, signal: null, spawnError: error });
+      });
       child.once("close", (code, signalValue) => {
         resolve({ exitCode: code, signal: signalValue });
       });
@@ -483,6 +594,19 @@ export async function runAgent(options: AgentRunOptions): Promise<AgentRunResult
 
     if (timeout) clearTimeout(timeout);
     if (killTimeout) clearTimeout(killTimeout);
+    if (abortHandler) options.abortSignal?.removeEventListener("abort", abortHandler);
+
+    if (spawnError) {
+      return baseFailureResult({
+        started,
+        codexBinary,
+        cwd,
+        runOptions: options,
+        env: childEnv,
+        message: `Failed to start Codex: ${spawnError.message}`,
+        status: "failed",
+      });
+    }
 
     let finalMessage = summary.lastAgentMessage ?? "";
     try {
@@ -492,7 +616,13 @@ export async function runAgent(options: AgentRunOptions): Promise<AgentRunResult
     }
 
     const final = truncate(finalMessage, maxOutputChars);
-    const status = timedOut ? "timeout" : exitCode === 0 ? "completed" : "failed";
+    const status = cancelled
+      ? "cancelled"
+      : timedOut
+        ? "timeout"
+        : exitCode === 0
+          ? "completed"
+          : "failed";
 
     return {
       name: options.name,
@@ -527,8 +657,9 @@ export async function runAgent(options: AgentRunOptions): Promise<AgentRunResult
   } finally {
     if (timeout) clearTimeout(timeout);
     if (killTimeout) clearTimeout(killTimeout);
-    await rm(tempDir, { recursive: true, force: true });
-    await preparedSubagents.cleanup();
+    if (abortHandler) options.abortSignal?.removeEventListener("abort", abortHandler);
+    await rm(tempDir, { recursive: true, force: true }).catch(() => {});
+    await preparedSubagents.cleanup().catch(() => {});
   }
 }
 

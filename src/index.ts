@@ -9,12 +9,11 @@ import {
   probeCodexVersion,
   reasoningEfforts,
   reasoningSummaries,
-  runAgent,
-  runAgents,
   sandboxModes,
   serviceTiers,
 } from "./runner.js";
 import { cleanOption } from "./binary.js";
+import { jobManager, runQueuedAgent, runQueuedAgents } from "./jobs.js";
 import { modelPresets } from "./subagents.js";
 
 const usageGuide = [
@@ -25,6 +24,7 @@ const usageGuide = [
   "Tool choice:",
   "- Use run_agent for one delegated Codex task.",
   "- Use run_agents when the work can be split into independent concurrent tasks, for example separate reviewers for API flow, tests, security, performance, UI, docs, or migration risk.",
+  "- Use start_agent_run or start_agents_run for slow or broad Codex work; poll with get_agent_run, wait with wait_agent_run, and cancel with cancel_agent_run.",
   "- Use codex_status only for diagnostics or when you need to confirm the Codex binary/version.",
   "- Use codex_usage_guide if you are unsure how to structure a Codex delegation.",
   "",
@@ -340,6 +340,92 @@ function toRunOptions(args: {
   };
 }
 
+type ParallelAgentInput = {
+  prompt: string;
+  name?: string;
+  model?: string;
+  model_preset?: (typeof modelPresets)[number];
+  reasoning_effort?: (typeof reasoningEfforts)[number];
+  sandbox?: (typeof sandboxModes)[number];
+  service_tier?: (typeof serviceTiers)[number];
+  model_verbosity?: (typeof modelVerbosities)[number];
+  reasoning_summary?: (typeof reasoningSummaries)[number];
+  cwd?: string;
+  project_dir?: string;
+  codex_bin?: string;
+  profile?: string;
+  timeout_ms?: number;
+  max_output_chars?: number;
+  include_events?: boolean;
+  ephemeral?: boolean;
+  skip_git_repo_check?: boolean;
+  ignore_rules?: boolean;
+  isolated_codex_home?: boolean;
+  codex_subagents?: Parameters<typeof toCodexSubagents>[0];
+  subagent_tasks?: Array<{ agent: string; prompt: string; name?: string }>;
+  subagent_runtime?: {
+    max_threads?: number;
+    max_depth?: number;
+    job_max_runtime_seconds?: number;
+  };
+};
+
+type SharedRunInput = Omit<Parameters<typeof toRunOptions>[0], "prompt">;
+
+type ParallelToolInput = SharedRunInput & {
+  agents: ParallelAgentInput[];
+  max_parallel?: number;
+};
+
+function toParallelRunOptions(args: ParallelToolInput) {
+  return {
+    ...toRunOptions({
+      ...args,
+      prompt: "shared-options",
+    }),
+    agents: args.agents.map((agent) => ({
+      prompt: agent.prompt,
+      name: agent.name,
+      model: agent.model ?? args.model,
+      modelPreset: agent.model_preset ?? args.model_preset,
+      reasoningEffort: agent.reasoning_effort ?? args.reasoning_effort,
+      sandbox: agent.sandbox ?? args.sandbox,
+      serviceTier: agent.service_tier ?? args.service_tier,
+      modelVerbosity: agent.model_verbosity ?? args.model_verbosity,
+      reasoningSummary: agent.reasoning_summary ?? args.reasoning_summary,
+      cwd: agent.cwd ?? args.cwd,
+      projectDir: agent.project_dir ?? args.project_dir,
+      codexBin: agent.codex_bin ?? args.codex_bin,
+      profile: agent.profile ?? args.profile,
+      timeoutMs: agent.timeout_ms ?? args.timeout_ms,
+      maxOutputChars: agent.max_output_chars ?? args.max_output_chars,
+      includeEvents: agent.include_events ?? args.include_events,
+      ephemeral: agent.ephemeral ?? args.ephemeral,
+      skipGitRepoCheck: agent.skip_git_repo_check ?? args.skip_git_repo_check,
+      ignoreRules: agent.ignore_rules ?? args.ignore_rules,
+      isolatedCodexHome: agent.isolated_codex_home ?? args.isolated_codex_home,
+      codexSubagents: toCodexSubagents(agent.codex_subagents ?? args.codex_subagents),
+      subagentTasks: agent.subagent_tasks ?? args.subagent_tasks,
+      subagentRuntime: agent.subagent_runtime
+        ? {
+            maxThreads: agent.subagent_runtime.max_threads,
+            maxDepth: agent.subagent_runtime.max_depth,
+            jobMaxRuntimeSeconds: agent.subagent_runtime.job_max_runtime_seconds,
+          }
+        : args.subagent_runtime
+          ? {
+              maxThreads: args.subagent_runtime.max_threads,
+              maxDepth: args.subagent_runtime.max_depth,
+              jobMaxRuntimeSeconds: args.subagent_runtime.job_max_runtime_seconds,
+            }
+          : undefined,
+    })),
+    maxParallel: args.max_parallel,
+    defaultModel: args.model,
+    defaultReasoningEffort: args.reasoning_effort,
+  };
+}
+
 server.registerTool(
   "codex_usage_guide",
   {
@@ -405,7 +491,7 @@ server.registerTool(
   },
   async (args) => {
     try {
-      const result = await runAgent(toRunOptions(args));
+      const result = await runQueuedAgent(toRunOptions(args));
       return jsonResult({ agent: result }, !result.ok);
     } catch (error) {
       return jsonResult(
@@ -414,6 +500,31 @@ server.registerTool(
         },
         true,
       );
+    }
+  },
+);
+
+server.registerTool(
+  "start_agent_run",
+  {
+    title: "Start one Codex agent run",
+    description:
+      "Start one Codex agent asynchronously and return a job_id immediately. Use this for long or potentially slow Codex work so the MCP request does not need to stay open.",
+    inputSchema: {
+      prompt: z
+        .string()
+        .min(1)
+        .describe("Concrete instructions for the Codex agent."),
+      name: z.string().trim().min(1).optional().describe("Optional label for this agent run."),
+      ...commonInputSchema,
+    },
+  },
+  async (args) => {
+    try {
+      const job = jobManager.startAgent(toRunOptions(args));
+      return jsonResult({ job });
+    } catch (error) {
+      return jsonResult({ error: error instanceof Error ? error.message : String(error) }, true);
     }
   },
 );
@@ -475,52 +586,7 @@ server.registerTool(
   },
   async (args) => {
     try {
-      const results = await runAgents({
-        ...toRunOptions({
-          ...args,
-          prompt: "shared-options",
-        }),
-        agents: args.agents.map((agent) => ({
-          prompt: agent.prompt,
-          name: agent.name,
-          model: agent.model ?? args.model,
-          modelPreset: agent.model_preset ?? args.model_preset,
-          reasoningEffort: agent.reasoning_effort ?? args.reasoning_effort,
-          sandbox: agent.sandbox ?? args.sandbox,
-          serviceTier: agent.service_tier ?? args.service_tier,
-          modelVerbosity: agent.model_verbosity ?? args.model_verbosity,
-          reasoningSummary: agent.reasoning_summary ?? args.reasoning_summary,
-          cwd: agent.cwd ?? args.cwd,
-          projectDir: agent.project_dir ?? args.project_dir,
-          codexBin: agent.codex_bin ?? args.codex_bin,
-          profile: agent.profile ?? args.profile,
-          timeoutMs: agent.timeout_ms ?? args.timeout_ms,
-          maxOutputChars: agent.max_output_chars ?? args.max_output_chars,
-          includeEvents: agent.include_events ?? args.include_events,
-          ephemeral: agent.ephemeral ?? args.ephemeral,
-          skipGitRepoCheck: agent.skip_git_repo_check ?? args.skip_git_repo_check,
-          ignoreRules: agent.ignore_rules ?? args.ignore_rules,
-          isolatedCodexHome: agent.isolated_codex_home ?? args.isolated_codex_home,
-          codexSubagents: toCodexSubagents(agent.codex_subagents ?? args.codex_subagents),
-          subagentTasks: agent.subagent_tasks ?? args.subagent_tasks,
-          subagentRuntime: agent.subagent_runtime
-            ? {
-                maxThreads: agent.subagent_runtime.max_threads,
-                maxDepth: agent.subagent_runtime.max_depth,
-                jobMaxRuntimeSeconds: agent.subagent_runtime.job_max_runtime_seconds,
-              }
-            : args.subagent_runtime
-              ? {
-                  maxThreads: args.subagent_runtime.max_threads,
-                  maxDepth: args.subagent_runtime.max_depth,
-                  jobMaxRuntimeSeconds: args.subagent_runtime.job_max_runtime_seconds,
-                }
-              : undefined,
-        })),
-        maxParallel: args.max_parallel,
-        defaultModel: args.model,
-        defaultReasoningEffort: args.reasoning_effort,
-      });
+      const results = await runQueuedAgents(toParallelRunOptions(args));
       const ok = results.every((result) => result.ok);
       return jsonResult(
         {
@@ -537,6 +603,85 @@ server.registerTool(
         true,
       );
     }
+  },
+);
+
+server.registerTool(
+  "start_agents_run",
+  {
+    title: "Start parallel Codex agents",
+    description:
+      "Start multiple Codex agents asynchronously and return a job_id immediately. Use for broad or slow parallel Codex reviews; poll with get_agent_run or wait_agent_run.",
+    inputSchema: {
+      agents: z
+        .array(parallelAgentSchema)
+        .min(1)
+        .max(12)
+        .describe("Independent Codex agent tasks."),
+      max_parallel: z.number().int().min(1).max(8).default(4),
+      ...commonInputSchema,
+    },
+  },
+  async (args) => {
+    try {
+      const job = jobManager.startAgents(toParallelRunOptions(args));
+      return jsonResult({ job });
+    } catch (error) {
+      return jsonResult({ error: error instanceof Error ? error.message : String(error) }, true);
+    }
+  },
+);
+
+const jobIdSchema = z.string().trim().min(1).describe("Job id returned by start_agent_run or start_agents_run.");
+
+server.registerTool(
+  "get_agent_run",
+  {
+    title: "Get Codex run job",
+    description: "Return current status and result, if available, for an asynchronous Codex job.",
+    inputSchema: {
+      job_id: jobIdSchema,
+    },
+  },
+  async (args) => {
+    const job = jobManager.get(args.job_id);
+    if (!job) return jsonResult({ error: `Unknown job_id: ${args.job_id}` }, true);
+    return jsonResult({ job });
+  },
+);
+
+server.registerTool(
+  "wait_agent_run",
+  {
+    title: "Wait for Codex run job",
+    description:
+      "Wait up to timeout_ms for an asynchronous Codex job to complete. Returns the current job state if it is still running.",
+    inputSchema: {
+      job_id: jobIdSchema,
+      timeout_ms: z.number().int().positive().max(300_000).default(30_000),
+    },
+  },
+  async (args) => {
+    const job = await jobManager.wait(args.job_id, args.timeout_ms);
+    if (!job) return jsonResult({ error: `Unknown job_id: ${args.job_id}` }, true);
+    return jsonResult({ job }, job.status === "failed" || job.status === "cancelled");
+  },
+);
+
+server.registerTool(
+  "cancel_agent_run",
+  {
+    title: "Cancel Codex run job",
+    description:
+      "Cancel a queued or running asynchronous Codex job. Running Codex child processes are terminated with SIGTERM and then SIGKILL if needed.",
+    inputSchema: {
+      job_id: jobIdSchema,
+    },
+  },
+  async (args) => {
+    const job = jobManager.cancel(args.job_id);
+    if (!job) return jsonResult({ error: `Unknown job_id: ${args.job_id}` }, true);
+    return jsonResult({ job });
   },
 );
 
@@ -569,6 +714,7 @@ server.registerTool(
         },
         pluginCodexBin: cleanOption(process.env.CODEX_SUBAGENTS_CODEX_BIN),
         claudeProjectDir: cleanOption(process.env.CLAUDE_PROJECT_DIR),
+        queue: jobManager.stats(),
       });
     } catch (error) {
       return jsonResult(
@@ -651,6 +797,13 @@ server.registerPrompt(
 );
 
 async function main(): Promise<void> {
+  process.on("unhandledRejection", (error) => {
+    console.error("codex-subagents unhandled rejection", error);
+  });
+  process.on("uncaughtException", (error) => {
+    console.error("codex-subagents uncaught exception", error);
+  });
+
   const transport = new StdioServerTransport();
   await server.connect(transport);
 }

@@ -1,0 +1,383 @@
+import {
+  type AgentRunOptions,
+  type AgentRunResult,
+  type ParallelRunOptions,
+  runAgent,
+} from "./runner.js";
+
+export class AbortError extends Error {
+  constructor(message = "Operation was cancelled.") {
+    super(message);
+    this.name = "AbortError";
+  }
+}
+
+type JobKind = "agent" | "agents";
+type JobStatus = "queued" | "running" | "cancelling" | "completed" | "failed" | "cancelled";
+
+interface QueueTask<T> {
+  id: string;
+  projectKey: string;
+  enqueuedAt: number;
+  run: () => Promise<T>;
+  resolve: (value: { value: T; queuedMs: number }) => void;
+  reject: (error: unknown) => void;
+  signal?: AbortSignal;
+  onStart?: (queuedMs: number) => void;
+}
+
+interface QueueRunOptions {
+  signal?: AbortSignal;
+  projectKey?: string;
+  onStart?: (queuedMs: number) => void;
+}
+
+interface JobRecord {
+  id: string;
+  kind: JobKind;
+  status: JobStatus;
+  createdAt: string;
+  updatedAt: string;
+  startedAt?: string;
+  completedAt?: string;
+  queuedMs?: number;
+  result?: unknown;
+  error?: string;
+  controller: AbortController;
+  waiters: Set<() => void>;
+}
+
+export interface JobSnapshot {
+  id: string;
+  kind: JobKind;
+  status: JobStatus;
+  createdAt: string;
+  updatedAt: string;
+  startedAt?: string;
+  completedAt?: string;
+  queuedMs?: number;
+  result?: unknown;
+  error?: string;
+}
+
+export interface QueueStats {
+  active: number;
+  pending: number;
+  maxGlobal: number;
+  maxPerProject: number;
+}
+
+function readPositiveInt(value: string | undefined, fallback: number, max: number): number {
+  const parsed = Number(value);
+  if (!Number.isInteger(parsed) || parsed < 1) return fallback;
+  return Math.min(parsed, max);
+}
+
+function projectKeyForOptions(options: Pick<AgentRunOptions, "projectDir" | "cwd">): string {
+  return options.projectDir?.trim() || options.cwd?.trim() || process.env.CLAUDE_PROJECT_DIR?.trim() || "__default__";
+}
+
+function statusFromAgentResult(result: AgentRunResult): JobStatus {
+  if (result.status === "cancelled") return "cancelled";
+  return result.ok ? "completed" : "failed";
+}
+
+function statusFromAgentResults(results: AgentRunResult[]): JobStatus {
+  if (results.every((result) => result.ok)) return "completed";
+  if (results.some((result) => result.status === "cancelled")) return "cancelled";
+  return "failed";
+}
+
+function snapshot(job: JobRecord): JobSnapshot {
+  return {
+    id: job.id,
+    kind: job.kind,
+    status: job.status,
+    createdAt: job.createdAt,
+    updatedAt: job.updatedAt,
+    startedAt: job.startedAt,
+    completedAt: job.completedAt,
+    queuedMs: job.queuedMs,
+    result: job.result,
+    error: job.error,
+  };
+}
+
+class AgentRunQueue {
+  private pending: Array<QueueTask<unknown>> = [];
+  private active = 0;
+  private readonly projectActive = new Map<string, number>();
+
+  constructor(
+    private readonly maxGlobal = readPositiveInt(process.env.CODEX_SUBAGENTS_MAX_GLOBAL_PROCESSES, 4, 32),
+    private readonly maxPerProject = readPositiveInt(process.env.CODEX_SUBAGENTS_MAX_PROJECT_PROCESSES, 2, 32),
+  ) {}
+
+  stats(): QueueStats {
+    return {
+      active: this.active,
+      pending: this.pending.length,
+      maxGlobal: this.maxGlobal,
+      maxPerProject: this.maxPerProject,
+    };
+  }
+
+  enqueue<T>(run: () => Promise<T>, options: QueueRunOptions = {}): Promise<{ value: T; queuedMs: number }> {
+    if (options.signal?.aborted) {
+      return Promise.reject(new AbortError("Codex run was cancelled before it entered the queue."));
+    }
+
+    return new Promise((resolve, reject) => {
+      const task: QueueTask<T> = {
+        id: `queue-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`,
+        projectKey: options.projectKey ?? "__default__",
+        enqueuedAt: Date.now(),
+        run,
+        resolve,
+        reject,
+        signal: options.signal,
+        onStart: options.onStart,
+      };
+
+      const abortPending = () => {
+        const index = this.pending.indexOf(task as QueueTask<unknown>);
+        if (index >= 0) {
+          this.pending.splice(index, 1);
+          reject(new AbortError("Codex run was cancelled while queued."));
+        }
+      };
+
+      options.signal?.addEventListener("abort", abortPending, { once: true });
+      this.pending.push(task as QueueTask<unknown>);
+      this.tryStart();
+    });
+  }
+
+  private canStart(projectKey: string): boolean {
+    return this.active < this.maxGlobal && (this.projectActive.get(projectKey) ?? 0) < this.maxPerProject;
+  }
+
+  private tryStart(): void {
+    while (this.active < this.maxGlobal) {
+      const index = this.pending.findIndex((task) => this.canStart(task.projectKey));
+      if (index < 0) return;
+
+      const [task] = this.pending.splice(index, 1);
+      if (!task) return;
+      if (task.signal?.aborted) {
+        task.reject(new AbortError("Codex run was cancelled while queued."));
+        continue;
+      }
+
+      const queuedMs = Date.now() - task.enqueuedAt;
+      this.active += 1;
+      this.projectActive.set(task.projectKey, (this.projectActive.get(task.projectKey) ?? 0) + 1);
+      task.onStart?.(queuedMs);
+
+      Promise.resolve()
+        .then(task.run)
+        .then((value) => task.resolve({ value, queuedMs }))
+        .catch((error) => task.reject(error))
+        .finally(() => {
+          this.active -= 1;
+          const projectCount = (this.projectActive.get(task.projectKey) ?? 1) - 1;
+          if (projectCount > 0) this.projectActive.set(task.projectKey, projectCount);
+          else this.projectActive.delete(task.projectKey);
+          this.tryStart();
+        });
+    }
+  }
+}
+
+export const agentRunQueue = new AgentRunQueue();
+
+export async function runQueuedAgent(
+  options: AgentRunOptions,
+  queueOptions: QueueRunOptions = {},
+): Promise<AgentRunResult> {
+  const controller = new AbortController();
+  const abort = () => controller.abort();
+  options.abortSignal?.addEventListener("abort", abort, { once: true });
+  queueOptions.signal?.addEventListener("abort", abort, { once: true });
+  if (options.abortSignal?.aborted || queueOptions.signal?.aborted) controller.abort();
+
+  try {
+    const { value, queuedMs } = await agentRunQueue.enqueue(
+      () => runAgent({ ...options, abortSignal: controller.signal }),
+      {
+        signal: controller.signal,
+        projectKey: queueOptions.projectKey ?? projectKeyForOptions(options),
+        onStart: queueOptions.onStart,
+      },
+    );
+    return {
+      ...value,
+      queue: { queuedMs },
+    };
+  } finally {
+    options.abortSignal?.removeEventListener("abort", abort);
+    queueOptions.signal?.removeEventListener("abort", abort);
+  }
+}
+
+export async function runQueuedAgents(
+  options: ParallelRunOptions,
+  queueOptions: QueueRunOptions = {},
+): Promise<AgentRunResult[]> {
+  const maxParallel = Math.max(
+    1,
+    Math.min(options.maxParallel ?? Math.min(options.agents.length, 4), 8),
+  );
+  const results: AgentRunResult[] = new Array(options.agents.length);
+  let next = 0;
+
+  async function worker(): Promise<void> {
+    while (next < options.agents.length) {
+      const index = next;
+      next += 1;
+      const agent = options.agents[index];
+      if (!agent) continue;
+      results[index] = await runQueuedAgent(
+        {
+          ...options,
+          ...agent,
+          model: agent.model ?? options.defaultModel,
+          modelPreset: agent.modelPreset ?? options.modelPreset,
+          reasoningEffort: agent.reasoningEffort ?? options.defaultReasoningEffort,
+          prompt: agent.prompt,
+          name: agent.name ?? `agent-${index + 1}`,
+        },
+        queueOptions,
+      );
+    }
+  }
+
+  await Promise.all(Array.from({ length: Math.min(maxParallel, options.agents.length) }, worker));
+  return results;
+}
+
+class CodexJobManager {
+  private readonly jobs = new Map<string, JobRecord>();
+  private readonly ttlMs = readPositiveInt(process.env.CODEX_SUBAGENTS_JOB_TTL_SECONDS, 3600, 86_400) * 1000;
+
+  startAgent(options: AgentRunOptions): JobSnapshot {
+    return this.start("agent", async (job) => {
+      const result = await runQueuedAgent(options, {
+        signal: job.controller.signal,
+        onStart: (queuedMs) => {
+          job.status = "running";
+          job.startedAt = new Date().toISOString();
+          job.queuedMs = queuedMs;
+          job.updatedAt = job.startedAt;
+        },
+      });
+      return result;
+    });
+  }
+
+  startAgents(options: ParallelRunOptions): JobSnapshot {
+    return this.start("agents", async (job) => {
+      job.status = "running";
+      job.startedAt = new Date().toISOString();
+      job.updatedAt = job.startedAt;
+      const results = await runQueuedAgents(options, {
+        signal: job.controller.signal,
+      });
+      return {
+        ok: results.every((result) => result.ok),
+        agents: results,
+      };
+    });
+  }
+
+  get(id: string): JobSnapshot | undefined {
+    this.prune();
+    const job = this.jobs.get(id);
+    return job ? snapshot(job) : undefined;
+  }
+
+  cancel(id: string): JobSnapshot | undefined {
+    const job = this.jobs.get(id);
+    if (!job) return undefined;
+    if (!job.completedAt && job.status !== "cancelled") {
+      job.status = "cancelling";
+      job.updatedAt = new Date().toISOString();
+      job.controller.abort();
+    }
+    return snapshot(job);
+  }
+
+  async wait(id: string, timeoutMs: number): Promise<JobSnapshot | undefined> {
+    const job = this.jobs.get(id);
+    if (!job) return undefined;
+    if (job.completedAt) return snapshot(job);
+
+    await new Promise<void>((resolve) => {
+      const timeout = setTimeout(resolve, timeoutMs);
+      const waiter = () => {
+        clearTimeout(timeout);
+        resolve();
+      };
+      job.waiters.add(waiter);
+    });
+
+    return snapshot(job);
+  }
+
+  stats(): QueueStats & { jobs: number } {
+    this.prune();
+    return {
+      ...agentRunQueue.stats(),
+      jobs: this.jobs.size,
+    };
+  }
+
+  private start(kind: JobKind, run: (job: JobRecord) => Promise<unknown>): JobSnapshot {
+    this.prune();
+    const now = new Date().toISOString();
+    const job: JobRecord = {
+      id: `job-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`,
+      kind,
+      status: "queued",
+      createdAt: now,
+      updatedAt: now,
+      controller: new AbortController(),
+      waiters: new Set(),
+    };
+    this.jobs.set(job.id, job);
+
+    void run(job)
+      .then((result) => {
+        job.result = result;
+        if (kind === "agent") {
+          job.status = statusFromAgentResult(result as AgentRunResult);
+        } else {
+          const agents = (result as { agents?: AgentRunResult[] }).agents ?? [];
+          job.status = statusFromAgentResults(agents);
+        }
+      })
+      .catch((error) => {
+        job.error = error instanceof Error ? error.message : String(error);
+        job.status = error instanceof AbortError ? "cancelled" : "failed";
+      })
+      .finally(() => {
+        const nowDone = new Date().toISOString();
+        job.completedAt = nowDone;
+        job.updatedAt = nowDone;
+        for (const waiter of job.waiters) waiter();
+        job.waiters.clear();
+      });
+
+    return snapshot(job);
+  }
+
+  private prune(): void {
+    const cutoff = Date.now() - this.ttlMs;
+    for (const [id, job] of this.jobs) {
+      if (!job.completedAt) continue;
+      if (Date.parse(job.completedAt) < cutoff) this.jobs.delete(id);
+    }
+  }
+}
+
+export const jobManager = new CodexJobManager();

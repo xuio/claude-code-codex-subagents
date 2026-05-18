@@ -319,6 +319,39 @@ describe("runAgent", () => {
     expect(result.ok).toBe(false);
     expect(result.status).toBe("timeout");
   });
+
+  it("cancels stubborn Codex processes with an abort signal", async () => {
+    const projectDir = await tempDir("codex-subagents-repo-");
+    const controller = new AbortController();
+    setTimeout(() => controller.abort(), 50).unref();
+
+    const result = await runAgent({
+      prompt: "HANG_FOREVER IGNORE_SIGTERM",
+      projectDir,
+      codexBin: fakeCodex,
+      timeoutMs: 30_000,
+      abortSignal: controller.signal,
+    });
+
+    expect(result.ok).toBe(false);
+    expect(result.status).toBe("cancelled");
+  });
+
+  it("survives malformed JSONL and truncates large stdout/stderr", async () => {
+    const projectDir = await tempDir("codex-subagents-repo-");
+
+    const result = await runAgent({
+      prompt: "MALFORMED_JSONL BIG_STDOUT_CHARS=5000 BIG_STDERR_CHARS=5000",
+      projectDir,
+      codexBin: fakeCodex,
+      maxOutputChars: 1000,
+    });
+
+    expect(result.ok).toBe(true);
+    expect(result.eventSummary.errors.some((error) => error.includes("Unparseable Codex JSONL"))).toBe(true);
+    expect(result.truncated.stdoutChars).toBeGreaterThan(0);
+    expect(result.truncated.stderrChars).toBeGreaterThan(0);
+  });
 });
 
 describe("runAgents", () => {

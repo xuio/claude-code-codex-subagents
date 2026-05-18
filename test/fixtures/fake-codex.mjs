@@ -30,6 +30,10 @@ for await (const chunk of process.stdin) {
   prompt += chunk;
 }
 
+if (prompt.includes("IGNORE_SIGTERM")) {
+  process.on("SIGTERM", () => {});
+}
+
 if (process.env.FAKE_CODEX_RECORD_DIR) {
   mkdirSync(process.env.FAKE_CODEX_RECORD_DIR, { recursive: true });
   const agentDir = process.env.CODEX_HOME ? join(process.env.CODEX_HOME, "agents") : undefined;
@@ -54,6 +58,24 @@ if (process.env.FAKE_CODEX_RECORD_DIR) {
       agentFiles,
     })}\n`,
   );
+}
+
+const stdoutMatch = prompt.match(/BIG_STDOUT_CHARS=(\d+)/);
+if (stdoutMatch) {
+  process.stdout.write("x".repeat(Number(stdoutMatch[1])));
+}
+
+const stderrMatch = prompt.match(/BIG_STDERR_CHARS=(\d+)/);
+if (stderrMatch) {
+  process.stderr.write("e".repeat(Number(stderrMatch[1])));
+}
+
+if (prompt.includes("MALFORMED_JSONL")) {
+  process.stdout.write("this is not json\n");
+}
+
+if (prompt.includes("HANG_FOREVER")) {
+  await new Promise(() => {});
 }
 
 const delayMatch = prompt.match(/DELAY_MS=(\d+)/);
