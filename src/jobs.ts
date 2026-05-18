@@ -23,13 +23,14 @@ interface QueueTask<T> {
   resolve: (value: { value: T; queuedMs: number }) => void;
   reject: (error: unknown) => void;
   signal?: AbortSignal;
-  onStart?: (queuedMs: number) => void;
+  onStart?: (queuedMs: number) => void | Promise<void>;
 }
 
 interface QueueRunOptions {
   signal?: AbortSignal;
   projectKey?: string;
-  onStart?: (queuedMs: number) => void;
+  onStart?: (queuedMs: number, label?: string) => void | Promise<void>;
+  onComplete?: (result: AgentRunResult, index?: number, total?: number) => void | Promise<void>;
 }
 
 interface JobRecord {
@@ -103,6 +104,14 @@ function snapshot(job: JobRecord): JobSnapshot {
   };
 }
 
+async function callQueueCallback(callback: () => void | Promise<void>): Promise<void> {
+  try {
+    await callback();
+  } catch {
+    // Queue callbacks are observational; callback failures must not change run results.
+  }
+}
+
 class AgentRunQueue {
   private pending: Array<QueueTask<unknown>> = [];
   private active = 0;
@@ -172,7 +181,7 @@ class AgentRunQueue {
       const queuedMs = Date.now() - task.enqueuedAt;
       this.active += 1;
       this.projectActive.set(task.projectKey, (this.projectActive.get(task.projectKey) ?? 0) + 1);
-      task.onStart?.(queuedMs);
+      void callQueueCallback(() => task.onStart?.(queuedMs));
 
       Promise.resolve()
         .then(task.run)
@@ -207,9 +216,10 @@ export async function runQueuedAgent(
       {
         signal: controller.signal,
         projectKey: queueOptions.projectKey ?? projectKeyForOptions(options),
-        onStart: queueOptions.onStart,
+        onStart: (queuedMs) => queueOptions.onStart?.(queuedMs, options.name),
       },
     );
+    await callQueueCallback(() => queueOptions.onComplete?.(value));
     return {
       ...value,
       queue: { queuedMs },
@@ -237,7 +247,7 @@ export async function runQueuedAgents(
       next += 1;
       const agent = options.agents[index];
       if (!agent) continue;
-      results[index] = await runQueuedAgent(
+      const result = await runQueuedAgent(
         {
           ...options,
           ...agent,
@@ -247,8 +257,14 @@ export async function runQueuedAgents(
           prompt: agent.prompt,
           name: agent.name ?? `agent-${index + 1}`,
         },
-        queueOptions,
+        {
+          ...queueOptions,
+          onStart: (queuedMs) => queueOptions.onStart?.(queuedMs, agent.name ?? `agent-${index + 1}`),
+          onComplete: undefined,
+        },
       );
+      results[index] = result;
+      await callQueueCallback(() => queueOptions.onComplete?.(result, index, options.agents.length));
     }
   }
 

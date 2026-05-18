@@ -21901,6 +21901,12 @@ function snapshot(job) {
     error: job.error
   };
 }
+async function callQueueCallback(callback) {
+  try {
+    await callback();
+  } catch {
+  }
+}
 var AgentRunQueue = class {
   constructor(maxGlobal = readPositiveInt(process.env.CODEX_SUBAGENTS_MAX_GLOBAL_PROCESSES, 4, 32), maxPerProject = readPositiveInt(process.env.CODEX_SUBAGENTS_MAX_PROJECT_PROCESSES, 2, 32)) {
     this.maxGlobal = maxGlobal;
@@ -21962,7 +21968,7 @@ var AgentRunQueue = class {
       const queuedMs = Date.now() - task.enqueuedAt;
       this.active += 1;
       this.projectActive.set(task.projectKey, (this.projectActive.get(task.projectKey) ?? 0) + 1);
-      task.onStart?.(queuedMs);
+      void callQueueCallback(() => task.onStart?.(queuedMs));
       Promise.resolve().then(task.run).then((value) => task.resolve({ value, queuedMs })).catch((error2) => task.reject(error2)).finally(() => {
         this.active -= 1;
         const projectCount = (this.projectActive.get(task.projectKey) ?? 1) - 1;
@@ -21986,9 +21992,10 @@ async function runQueuedAgent(options, queueOptions = {}) {
       {
         signal: controller.signal,
         projectKey: queueOptions.projectKey ?? projectKeyForOptions(options),
-        onStart: queueOptions.onStart
+        onStart: (queuedMs2) => queueOptions.onStart?.(queuedMs2, options.name)
       }
     );
+    await callQueueCallback(() => queueOptions.onComplete?.(value));
     return {
       ...value,
       queue: { queuedMs }
@@ -22011,7 +22018,7 @@ async function runQueuedAgents(options, queueOptions = {}) {
       next += 1;
       const agent = options.agents[index];
       if (!agent) continue;
-      results[index] = await runQueuedAgent(
+      const result = await runQueuedAgent(
         {
           ...options,
           ...agent,
@@ -22021,8 +22028,14 @@ async function runQueuedAgents(options, queueOptions = {}) {
           prompt: agent.prompt,
           name: agent.name ?? `agent-${index + 1}`
         },
-        queueOptions
+        {
+          ...queueOptions,
+          onStart: (queuedMs) => queueOptions.onStart?.(queuedMs, agent.name ?? `agent-${index + 1}`),
+          onComplete: void 0
+        }
       );
+      results[index] = result;
+      await callQueueCallback(() => queueOptions.onComplete?.(result, index, options.agents.length));
     }
   }
   await Promise.all(Array.from({ length: Math.min(maxParallel, options.agents.length) }, worker));
@@ -22273,6 +22286,40 @@ function jsonResult(value, isError = false) {
     ]
   };
 }
+function createProgressReporter(extra) {
+  const progressToken = extra?._meta?.progressToken;
+  let progress = 0;
+  let pending = Promise.resolve();
+  async function send(message, options = {}) {
+    if (progressToken === void 0 || !extra) return;
+    pending = pending.catch(() => {
+    }).then(async () => {
+      const requested = options.progress ?? progress + 1;
+      progress = Math.max(progress + 1, requested);
+      await extra.sendNotification({
+        method: "notifications/progress",
+        params: {
+          progressToken,
+          progress,
+          ...options.total === void 0 ? {} : { total: options.total },
+          message
+        }
+      });
+    }).catch(() => {
+    });
+    await pending;
+  }
+  async function flush() {
+    if (progressToken === void 0 || !extra) return;
+    await pending;
+    await new Promise((resolve) => setTimeout(resolve, 0));
+  }
+  return { send, flush };
+}
+async function reportAgentResult(progress, result) {
+  const status = result.status ?? (result.ok ? "completed" : "failed");
+  await progress.send(result.ok ? "Codex run completed" : `Codex run ${status}`);
+}
 function toRunOptions(args) {
   return {
     prompt: args.prompt,
@@ -22403,11 +22450,20 @@ server.registerTool(
       ...commonInputSchema
     }
   },
-  async (args) => {
+  async (args, extra) => {
+    const progress = createProgressReporter(extra);
     try {
-      const result = await runQueuedAgent(toRunOptions(args));
+      await progress.send("Queued Codex run");
+      const result = await runQueuedAgent(toRunOptions(args), {
+        onStart: (queuedMs) => {
+          void progress.send(`Started Codex run after ${queuedMs}ms queued`);
+        }
+      });
+      await reportAgentResult(progress, result);
+      await progress.flush();
       return jsonResult({ agent: result }, !result.ok);
     } catch (error2) {
+      await progress.flush();
       return jsonResult(
         {
           error: error2 instanceof Error ? error2.message : String(error2)
@@ -22428,11 +22484,16 @@ server.registerTool(
       ...commonInputSchema
     }
   },
-  async (args) => {
+  async (args, extra) => {
+    const progress = createProgressReporter(extra);
     try {
+      await progress.send("Queued asynchronous Codex run");
       const job = jobManager.startAgent(toRunOptions(args));
+      await progress.send(`Started Codex job ${job.id}`);
+      await progress.flush();
       return jsonResult({ job });
     } catch (error2) {
+      await progress.flush();
       return jsonResult({ error: error2 instanceof Error ? error2.message : String(error2) }, true);
     }
   }
@@ -22477,10 +22538,27 @@ server.registerTool(
       ...commonInputSchema
     }
   },
-  async (args) => {
+  async (args, extra) => {
+    const progress = createProgressReporter(extra);
     try {
-      const results = await runQueuedAgents(toParallelRunOptions(args));
+      const total = args.agents.length * 2 + 1;
+      let completed = 0;
+      let failed = 0;
+      await progress.send(`Queued ${args.agents.length} Codex agents`, { total });
+      const results = await runQueuedAgents(toParallelRunOptions(args), {
+        onStart: (queuedMs, label) => {
+          void progress.send(`Started ${label ?? "Codex agent"} after ${queuedMs}ms queued`, { total });
+        },
+        onComplete: async (result) => {
+          completed += 1;
+          if (!result.ok) failed += 1;
+          const last = completed === args.agents.length;
+          const message = last ? failed === 0 ? `Parallel Codex run completed (${completed}/${args.agents.length})` : `Parallel Codex run finished with errors (${completed}/${args.agents.length})` : `${result.ok ? "Completed" : "Finished"} ${result.name ?? "Codex agent"} (${completed}/${args.agents.length})`;
+          await progress.send(message, last ? { progress: total, total } : { total });
+        }
+      });
       const ok = results.every((result) => result.ok);
+      await progress.flush();
       return jsonResult(
         {
           ok,
@@ -22489,6 +22567,7 @@ server.registerTool(
         !ok
       );
     } catch (error2) {
+      await progress.flush();
       return jsonResult(
         {
           error: error2 instanceof Error ? error2.message : String(error2)
@@ -22509,11 +22588,16 @@ server.registerTool(
       ...commonInputSchema
     }
   },
-  async (args) => {
+  async (args, extra) => {
+    const progress = createProgressReporter(extra);
     try {
+      await progress.send(`Queued asynchronous run for ${args.agents.length} Codex agents`);
       const job = jobManager.startAgents(toParallelRunOptions(args));
+      await progress.send(`Started Codex job ${job.id}`);
+      await progress.flush();
       return jsonResult({ job });
     } catch (error2) {
+      await progress.flush();
       return jsonResult({ error: error2 instanceof Error ? error2.message : String(error2) }, true);
     }
   }
@@ -22528,9 +22612,15 @@ server.registerTool(
       job_id: jobIdSchema
     }
   },
-  async (args) => {
+  async (args, extra) => {
+    const progress = createProgressReporter(extra);
+    await progress.send(`Checking Codex job ${args.job_id}`);
+    await progress.flush();
     const job = jobManager.get(args.job_id);
-    if (!job) return jsonResult({ error: `Unknown job_id: ${args.job_id}` }, true);
+    if (!job) {
+      await progress.flush();
+      return jsonResult({ error: `Unknown job_id: ${args.job_id}` }, true);
+    }
     return jsonResult({ job });
   }
 );
@@ -22544,9 +22634,24 @@ server.registerTool(
       timeout_ms: external_exports.number().int().positive().max(3e5).default(3e4)
     }
   },
-  async (args) => {
-    const job = await jobManager.wait(args.job_id, args.timeout_ms);
+  async (args, extra) => {
+    const progress = createProgressReporter(extra);
+    await progress.send(`Waiting for Codex job ${args.job_id}`);
+    const started = Date.now();
+    let job = jobManager.get(args.job_id);
+    while (job && !job.completedAt && Date.now() - started < args.timeout_ms) {
+      const remaining = args.timeout_ms - (Date.now() - started);
+      await new Promise((resolve) => setTimeout(resolve, Math.min(1e3, Math.max(1, remaining))));
+      job = jobManager.get(args.job_id);
+      if (job) await progress.send(`Codex job ${job.status}`);
+    }
+    if (job && !job.completedAt) {
+      const waitedJob = await jobManager.wait(args.job_id, 1);
+      job = waitedJob ?? job;
+    }
     if (!job) return jsonResult({ error: `Unknown job_id: ${args.job_id}` }, true);
+    if (job.completedAt) await progress.send(`Codex job ${job.status}`);
+    await progress.flush();
     return jsonResult({ job }, job.status === "failed" || job.status === "cancelled");
   }
 );
@@ -22559,7 +22664,10 @@ server.registerTool(
       job_id: jobIdSchema
     }
   },
-  async (args) => {
+  async (args, extra) => {
+    const progress = createProgressReporter(extra);
+    await progress.send(`Cancelling Codex job ${args.job_id}`);
+    await progress.flush();
     const job = jobManager.cancel(args.job_id);
     if (!job) return jsonResult({ error: `Unknown job_id: ${args.job_id}` }, true);
     return jsonResult({ job });

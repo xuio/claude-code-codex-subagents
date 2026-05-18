@@ -1,6 +1,7 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
-import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
+import type { RequestHandlerExtra } from "@modelcontextprotocol/sdk/shared/protocol.js";
+import type { CallToolResult, ServerNotification, ServerRequest } from "@modelcontextprotocol/sdk/types.js";
 import { z } from "zod";
 import {
   defaultModel,
@@ -15,6 +16,9 @@ import {
 import { cleanOption } from "./binary.js";
 import { jobManager, runQueuedAgent, runQueuedAgents } from "./jobs.js";
 import { modelPresets } from "./subagents.js";
+
+type ToolExtra = RequestHandlerExtra<ServerRequest, ServerNotification>;
+type ProgressReporter = ReturnType<typeof createProgressReporter>;
 
 const usageGuide = [
   "Claude Code integration guide for codex-subagents:",
@@ -278,6 +282,50 @@ function jsonResult(value: Record<string, unknown>, isError = false): CallToolRe
   };
 }
 
+function createProgressReporter(extra: ToolExtra | undefined) {
+  const progressToken = extra?._meta?.progressToken;
+  let progress = 0;
+  let pending = Promise.resolve();
+
+  async function send(message: string, options: { progress?: number; total?: number } = {}) {
+    if (progressToken === undefined || !extra) return;
+
+    pending = pending
+      .catch(() => {})
+      .then(async () => {
+        const requested = options.progress ?? progress + 1;
+        progress = Math.max(progress + 1, requested);
+        await extra.sendNotification({
+          method: "notifications/progress",
+          params: {
+            progressToken,
+            progress,
+            ...(options.total === undefined ? {} : { total: options.total }),
+            message,
+          },
+        });
+      })
+      .catch(() => {
+        // Progress is best-effort; a failed notification must not fail the tool call.
+      });
+
+    await pending;
+  }
+
+  async function flush() {
+    if (progressToken === undefined || !extra) return;
+    await pending;
+    await new Promise((resolve) => setTimeout(resolve, 0));
+  }
+
+  return { send, flush };
+}
+
+async function reportAgentResult(progress: ProgressReporter, result: { ok?: boolean; status?: string }) {
+  const status = result.status ?? (result.ok ? "completed" : "failed");
+  await progress.send(result.ok ? "Codex run completed" : `Codex run ${status}`);
+}
+
 function toRunOptions(args: {
   prompt: string;
   name?: string;
@@ -489,11 +537,20 @@ server.registerTool(
       ...commonInputSchema,
     },
   },
-  async (args) => {
+  async (args, extra) => {
+    const progress = createProgressReporter(extra);
     try {
-      const result = await runQueuedAgent(toRunOptions(args));
+      await progress.send("Queued Codex run");
+      const result = await runQueuedAgent(toRunOptions(args), {
+        onStart: (queuedMs) => {
+          void progress.send(`Started Codex run after ${queuedMs}ms queued`);
+        },
+      });
+      await reportAgentResult(progress, result);
+      await progress.flush();
       return jsonResult({ agent: result }, !result.ok);
     } catch (error) {
+      await progress.flush();
       return jsonResult(
         {
           error: error instanceof Error ? error.message : String(error),
@@ -519,11 +576,16 @@ server.registerTool(
       ...commonInputSchema,
     },
   },
-  async (args) => {
+  async (args, extra) => {
+    const progress = createProgressReporter(extra);
     try {
+      await progress.send("Queued asynchronous Codex run");
       const job = jobManager.startAgent(toRunOptions(args));
+      await progress.send(`Started Codex job ${job.id}`);
+      await progress.flush();
       return jsonResult({ job });
     } catch (error) {
+      await progress.flush();
       return jsonResult({ error: error instanceof Error ? error.message : String(error) }, true);
     }
   },
@@ -584,10 +646,31 @@ server.registerTool(
       ...commonInputSchema,
     },
   },
-  async (args) => {
+  async (args, extra) => {
+    const progress = createProgressReporter(extra);
     try {
-      const results = await runQueuedAgents(toParallelRunOptions(args));
+      const total = args.agents.length * 2 + 1;
+      let completed = 0;
+      let failed = 0;
+      await progress.send(`Queued ${args.agents.length} Codex agents`, { total });
+      const results = await runQueuedAgents(toParallelRunOptions(args), {
+        onStart: (queuedMs, label) => {
+          void progress.send(`Started ${label ?? "Codex agent"} after ${queuedMs}ms queued`, { total });
+        },
+        onComplete: async (result) => {
+          completed += 1;
+          if (!result.ok) failed += 1;
+          const last = completed === args.agents.length;
+          const message = last
+            ? failed === 0
+              ? `Parallel Codex run completed (${completed}/${args.agents.length})`
+              : `Parallel Codex run finished with errors (${completed}/${args.agents.length})`
+            : `${result.ok ? "Completed" : "Finished"} ${result.name ?? "Codex agent"} (${completed}/${args.agents.length})`;
+          await progress.send(message, last ? { progress: total, total } : { total });
+        },
+      });
       const ok = results.every((result) => result.ok);
+      await progress.flush();
       return jsonResult(
         {
           ok,
@@ -596,6 +679,7 @@ server.registerTool(
         !ok,
       );
     } catch (error) {
+      await progress.flush();
       return jsonResult(
         {
           error: error instanceof Error ? error.message : String(error),
@@ -622,11 +706,16 @@ server.registerTool(
       ...commonInputSchema,
     },
   },
-  async (args) => {
+  async (args, extra) => {
+    const progress = createProgressReporter(extra);
     try {
+      await progress.send(`Queued asynchronous run for ${args.agents.length} Codex agents`);
       const job = jobManager.startAgents(toParallelRunOptions(args));
+      await progress.send(`Started Codex job ${job.id}`);
+      await progress.flush();
       return jsonResult({ job });
     } catch (error) {
+      await progress.flush();
       return jsonResult({ error: error instanceof Error ? error.message : String(error) }, true);
     }
   },
@@ -643,9 +732,15 @@ server.registerTool(
       job_id: jobIdSchema,
     },
   },
-  async (args) => {
+  async (args, extra) => {
+    const progress = createProgressReporter(extra);
+    await progress.send(`Checking Codex job ${args.job_id}`);
+    await progress.flush();
     const job = jobManager.get(args.job_id);
-    if (!job) return jsonResult({ error: `Unknown job_id: ${args.job_id}` }, true);
+    if (!job) {
+      await progress.flush();
+      return jsonResult({ error: `Unknown job_id: ${args.job_id}` }, true);
+    }
     return jsonResult({ job });
   },
 );
@@ -661,9 +756,24 @@ server.registerTool(
       timeout_ms: z.number().int().positive().max(300_000).default(30_000),
     },
   },
-  async (args) => {
-    const job = await jobManager.wait(args.job_id, args.timeout_ms);
+  async (args, extra) => {
+    const progress = createProgressReporter(extra);
+    await progress.send(`Waiting for Codex job ${args.job_id}`);
+    const started = Date.now();
+    let job = jobManager.get(args.job_id);
+    while (job && !job.completedAt && Date.now() - started < args.timeout_ms) {
+      const remaining = args.timeout_ms - (Date.now() - started);
+      await new Promise((resolve) => setTimeout(resolve, Math.min(1_000, Math.max(1, remaining))));
+      job = jobManager.get(args.job_id);
+      if (job) await progress.send(`Codex job ${job.status}`);
+    }
+    if (job && !job.completedAt) {
+      const waitedJob = await jobManager.wait(args.job_id, 1);
+      job = waitedJob ?? job;
+    }
     if (!job) return jsonResult({ error: `Unknown job_id: ${args.job_id}` }, true);
+    if (job.completedAt) await progress.send(`Codex job ${job.status}`);
+    await progress.flush();
     return jsonResult({ job }, job.status === "failed" || job.status === "cancelled");
   },
 );
@@ -678,7 +788,10 @@ server.registerTool(
       job_id: jobIdSchema,
     },
   },
-  async (args) => {
+  async (args, extra) => {
+    const progress = createProgressReporter(extra);
+    await progress.send(`Cancelling Codex job ${args.job_id}`);
+    await progress.flush();
     const job = jobManager.cancel(args.job_id);
     if (!job) return jsonResult({ error: `Unknown job_id: ${args.job_id}` }, true);
     return jsonResult({ job });

@@ -16,6 +16,7 @@ The plugin lets Claude Code launch one Codex agent or several Codex agents in pa
 - Prompt delivery: stdin, not command-line arguments.
 - Codex home: uses the user's Codex home by default; pass `isolated_codex_home: true` to use a temporary Codex home with auth but without inherited `config.toml` MCP servers.
 - Concurrency: Codex processes run through a global queue. Defaults are `CODEX_SUBAGENTS_MAX_GLOBAL_PROCESSES=4` and `CODEX_SUBAGENTS_MAX_PROJECT_PROCESSES=2`.
+- Progress: long-running tools emit MCP `notifications/progress` events when the client supplies a progress token.
 
 Optional environment overrides:
 
@@ -67,9 +68,11 @@ npm run test:claude-desktop
 
 `test:ci` is the GitHub-safe suite. It uses the fake Codex binary and does not require Claude Code, the Codex desktop app, or live model credentials.
 
-`test:comprehensive` runs the TypeScript build, unit tests, stdio MCP smoke test, reliability matrix, MCP stress test, Codex desktop runtime probe, Claude plugin validation, and desktop-shipped Claude Code CLI plugin/auth checks. The runtime probe validates local Codex capabilities without invoking a model.
+`test:comprehensive` runs the TypeScript build, unit tests, stdio MCP smoke test, reliability matrix, MCP stress test, MCP progress notification test, Codex desktop runtime probe, Claude plugin validation, and desktop-shipped Claude Code CLI plugin/auth checks. The runtime probe validates local Codex capabilities without invoking a model.
 
 `test:stress` uses the fake Codex binary to exercise queued async jobs, noisy output, malformed JSONL, and truncation behavior.
+
+`test:progress` verifies that SDK clients receive monotonically increasing MCP progress notifications from blocking, async start, parallel, and wait-style tool calls.
 
 `test:claude-orchestration` is an opt-in live Claude Code test. It loads the plugin inside Claude Code, lets Claude call the plugin MCP tools, and uses the fake Codex binary so no Codex model tokens are spent. It is kept out of `test:comprehensive` because it does spend Claude tokens.
 
@@ -108,6 +111,8 @@ After startup, ask Claude to use Codex subagents, or invoke the plugin skill:
 Each agent accepts model, reasoning effort, sandbox, project directory, timeout, isolated Codex home, and output-size controls. Pass `project_dir` when Claude Code wants Codex to inspect the same repository or subdirectory Claude is currently working in. If `project_dir` is omitted, the server uses `CLAUDE_PROJECT_DIR` when Claude Code provides it. Omit model to use Codex's configured default or the plugin's optional configured default model.
 
 Prefer `start_agent_run` or `start_agents_run` for work that may run longer than a normal MCP request. The async job API keeps Claude responsive, supports cancellation, and avoids request failures caused by long-running Codex subprocesses.
+
+When a client supports MCP progress tokens, `run_agent`, `run_agents`, `start_agent_run`, `start_agents_run`, `get_agent_run`, `wait_agent_run`, and `cancel_agent_run` send progress notifications. SDK clients should pass an `onprogress` handler and enable timeout reset on progress for long waits.
 
 ## License
 
