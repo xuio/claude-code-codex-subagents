@@ -75,7 +75,9 @@ if (prompt.includes("MALFORMED_JSONL")) {
 }
 
 if (prompt.includes("HANG_FOREVER")) {
-  await new Promise(() => {});
+  await new Promise(() => {
+    setInterval(() => {}, 1000);
+  });
 }
 
 const delayMatch = prompt.match(/DELAY_MS=(\d+)/);
