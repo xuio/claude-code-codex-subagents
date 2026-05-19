@@ -111,6 +111,10 @@ if (prompt.includes("RUN_COMMAND_EVENT")) {
 }
 
 let finalMessage = `fake codex result for: ${prompt.trim()}`;
+const finalMatch = prompt.match(/BIG_FINAL_CHARS=(\d+)/);
+if (finalMatch) {
+  finalMessage = "f".repeat(Number(finalMatch[1]));
+}
 if (prompt.includes("JSON_FINAL=review_findings")) {
   finalMessage = JSON.stringify({
     summary: "fake structured review",

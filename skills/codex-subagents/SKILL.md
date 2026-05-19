@@ -20,6 +20,7 @@ Default behavior:
 - Supports structured results with `output_contract` or `output_schema`; use these when Claude must merge, compare, or aggregate Codex outputs.
 - Redacts secret-looking output by default and does not forward secret-looking environment variables unless `forward_sensitive_env` is explicitly true.
 - Writes very verbose JSONL logs to stderr by default, including raw MCP JSON-RPC frames, tool arguments/results, prompt outputs, progress notifications, queue/job/session lifecycle, and Codex stdin/stdout/stderr traffic.
+- Compacts large tool responses before returning them to Claude; when `mcpResponse.compacted` is true, use the returned summary first and inspect server logs only if the omitted raw tail is necessary.
 
 For one delegated task, call `run_agent`. Make the prompt self-contained: include the scope, the expected read-only behavior, and the output shape Claude needs. For code review and exploration, ask for concise findings with file paths and line references.
 

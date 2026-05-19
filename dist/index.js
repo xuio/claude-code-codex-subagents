@@ -22788,6 +22788,147 @@ var CodexJobManager = class {
 };
 var jobManager = new CodexJobManager();
 
+// src/response.ts
+var singleAgentLimits = {
+  finalMessageChars: 12e3,
+  stdioChars: 1500,
+  summaryMessageChars: 1e3,
+  structuredStringChars: 4e3
+};
+var partialLimits = {
+  finalMessageChars: 2e3,
+  stdioChars: 1e3,
+  summaryMessageChars: 1e3,
+  structuredStringChars: 2e3
+};
+function truncateString(text, maxChars) {
+  if (!text) return { text: "", omittedChars: 0 };
+  if (text.length <= maxChars) return { text, omittedChars: 0 };
+  return {
+    text: `${text.slice(0, maxChars)}
+
+[truncated ${text.length - maxChars} chars from MCP response; full traffic is in server logs]`,
+    omittedChars: text.length - maxChars
+  };
+}
+function compactUnknown(value, maxStringChars2, depth = 0) {
+  if (typeof value === "string") return truncateString(value, maxStringChars2).text;
+  if (typeof value !== "object" || value === null) return value;
+  if (depth >= 6) return "[MaxDepth]";
+  if (Array.isArray(value)) {
+    const items = value.slice(0, 80).map((item) => compactUnknown(item, maxStringChars2, depth + 1));
+    if (value.length > items.length) items.push(`[truncated ${value.length - items.length} array items]`);
+    return items;
+  }
+  return Object.fromEntries(
+    Object.entries(value).map(([key, child]) => [
+      key,
+      compactUnknown(child, maxStringChars2, depth + 1)
+    ])
+  );
+}
+function compactSummary(summary, limits) {
+  return {
+    counts: summary.counts,
+    threadId: summary.threadId,
+    usage: compactUnknown(summary.usage, limits.structuredStringChars),
+    commands: summary.commands.slice(0, 20).map((command) => ({
+      command: truncateString(command.command, 500).text,
+      status: command.status
+    })),
+    errors: summary.errors.slice(0, 10).map((error2) => truncateString(error2, limits.stdioChars).text),
+    lastAgentMessage: summary.lastAgentMessage ? truncateString(summary.lastAgentMessage, limits.summaryMessageChars).text : void 0,
+    events: summary.events ? compactUnknown(summary.events, limits.structuredStringChars) : void 0
+  };
+}
+function compactedAgentLimits(agentCount) {
+  if (agentCount <= 1) return singleAgentLimits;
+  return {
+    ...singleAgentLimits,
+    finalMessageChars: Math.max(1500, Math.min(6e3, Math.floor(18e3 / agentCount))),
+    stdioChars: 800,
+    summaryMessageChars: 600,
+    structuredStringChars: 2e3
+  };
+}
+function compactAgentResultForMcp(result, limits = singleAgentLimits) {
+  const finalMessage = truncateString(result.finalMessage, limits.finalMessageChars);
+  const stdoutTail = truncateString(result.stdoutTail, limits.stdioChars);
+  const stderr = truncateString(result.stderr, limits.stdioChars);
+  const compacted = finalMessage.omittedChars > 0 || stdoutTail.omittedChars > 0 || stderr.omittedChars > 0;
+  return {
+    ...result,
+    finalMessage: finalMessage.text,
+    stderr: stderr.text,
+    stdoutTail: stdoutTail.text,
+    eventSummary: compactSummary(result.eventSummary, limits),
+    structuredOutput: compactUnknown(result.structuredOutput, limits.structuredStringChars),
+    commandPreview: result.commandPreview.slice(0, 40).map((arg) => truncateString(arg, 1e3).text),
+    mcpResponse: {
+      compacted,
+      finalMessageOmittedChars: finalMessage.omittedChars,
+      stdoutTailOmittedChars: stdoutTail.omittedChars,
+      stderrOmittedChars: stderr.omittedChars,
+      note: compacted ? "MCP response was compacted to keep Claude responsive; full raw traffic is in server stderr logs." : void 0
+    }
+  };
+}
+function compactAgentResultsForMcp(results) {
+  const limits = compactedAgentLimits(results.length);
+  return results.map((result) => compactAgentResultForMcp(result, limits));
+}
+function compactPartialForMcp(partial2) {
+  const stdoutTail = truncateString(partial2.stdoutTail, partialLimits.stdioChars);
+  const stderrTail = truncateString(partial2.stderrTail, partialLimits.stdioChars);
+  return {
+    ...partial2,
+    stdoutTail: stdoutTail.text,
+    stderrTail: stderrTail.text,
+    lastAgentMessage: partial2.lastAgentMessage ? truncateString(partial2.lastAgentMessage, partialLimits.finalMessageChars).text : void 0,
+    eventSummary: compactSummary(partial2.eventSummary, partialLimits)
+  };
+}
+function compactJobSnapshotForMcp(job) {
+  return {
+    ...job,
+    result: compactRunValue(job.result),
+    partial: isPartial(job.partial) ? compactPartialForMcp(job.partial) : compactUnknown(job.partial, 2e3)
+  };
+}
+function compactSessionSnapshotForMcp(session) {
+  return {
+    ...session,
+    lastResult: compactRunValue(session.lastResult),
+    partial: isPartial(session.partial) ? compactPartialForMcp(session.partial) : compactUnknown(session.partial, 2e3)
+  };
+}
+function compactRunValue(value) {
+  if (isAgentResult(value)) return compactAgentResultForMcp(value);
+  if (Array.isArray(value) && value.every(isAgentResult)) return compactAgentResultsForMcp(value);
+  if (isParallelResult(value)) {
+    return {
+      ...value,
+      agents: compactAgentResultsForMcp(value.agents)
+    };
+  }
+  return compactUnknown(value, 4e3);
+}
+function isAgentResult(value) {
+  return Boolean(
+    value && typeof value === "object" && "ok" in value && "status" in value && "finalMessage" in value && "eventSummary" in value
+  );
+}
+function isPartial(value) {
+  return Boolean(
+    value && typeof value === "object" && "status" in value && "stdoutTail" in value && "stderrTail" in value && "eventSummary" in value
+  );
+}
+function isParallelResult(value) {
+  return Boolean(
+    value && typeof value === "object" && Array.isArray(value.agents) && value.agents.every(isAgentResult)
+  );
+}
+
 // src/sessions.ts
 function snapshot2(session) {
   return {
@@ -23371,7 +23512,7 @@ server.registerTool(
         });
         await reportAgentResult(progress, result);
         await progress.flush();
-        return jsonResult({ agent: result }, !result.ok);
+        return jsonResult({ agent: compactAgentResultForMcp(result) }, !result.ok);
       } catch (error2) {
         await progress.flush();
         logger.error("run_agent.failed", { error: errorForLog(error2) });
@@ -23487,7 +23628,7 @@ server.registerTool(
         return jsonResult(
           {
             ok,
-            agents: results
+            agents: compactAgentResultsForMcp(results)
           },
           !ok
         );
@@ -23541,7 +23682,7 @@ server.registerTool(
           {
             ok: aggregation.ok,
             aggregation,
-            agents: results
+            agents: compactAgentResultsForMcp(results)
           },
           !aggregation.ok
         );
@@ -23601,7 +23742,7 @@ server.registerTool(
         await progress.flush();
         return jsonResult({ error: `Unknown job_id: ${args.job_id}` }, true);
       }
-      return jsonResult({ job });
+      return jsonResult({ job: compactJobSnapshotForMcp(job) });
     });
   }
 );
@@ -23634,7 +23775,10 @@ server.registerTool(
       if (!job) return jsonResult({ error: `Unknown job_id: ${args.job_id}` }, true);
       if (job.completedAt) await progress.send(`Codex job ${job.status}`);
       await progress.flush();
-      return jsonResult({ job }, job.status === "failed" || job.status === "cancelled");
+      return jsonResult(
+        { job: compactJobSnapshotForMcp(job) },
+        job.status === "failed" || job.status === "cancelled"
+      );
     });
   }
 );
@@ -23654,7 +23798,7 @@ server.registerTool(
       await progress.flush();
       const job = jobManager.cancel(args.job_id);
       if (!job) return jsonResult({ error: `Unknown job_id: ${args.job_id}` }, true);
-      return jsonResult({ job });
+      return jsonResult({ job: compactJobSnapshotForMcp(job) });
     });
   }
 );
@@ -23685,7 +23829,10 @@ server.registerTool(
         );
         await reportAgentResult(progress, result);
         await progress.flush();
-        return jsonResult({ session, agent: result }, !result.ok);
+        return jsonResult(
+          { session: compactSessionSnapshotForMcp(session), agent: compactAgentResultForMcp(result) },
+          !result.ok
+        );
       } catch (error2) {
         await progress.flush();
         logger.error("start_session.failed", { error: errorForLog(error2) });
@@ -23713,11 +23860,17 @@ server.registerTool(
         const { session, result, error: error2 } = await sessionManager.send(args.session_id, args.prompt, toRunOptions(args));
         if (error2 || !session || !result) {
           await progress.flush();
-          return jsonResult({ error: error2, session }, true);
+          return jsonResult(
+            { error: error2, session: session ? compactSessionSnapshotForMcp(session) : session },
+            true
+          );
         }
         await reportAgentResult(progress, result);
         await progress.flush();
-        return jsonResult({ session, agent: result }, !result.ok);
+        return jsonResult(
+          { session: compactSessionSnapshotForMcp(session), agent: compactAgentResultForMcp(result) },
+          !result.ok
+        );
       } catch (error2) {
         await progress.flush();
         logger.error("send_session_prompt.failed", { error: errorForLog(error2) });
@@ -23738,7 +23891,7 @@ server.registerTool(
   async (args, extra) => loggedToolCall("get_session", args, extra, async () => {
     const session = sessionManager.get(args.session_id);
     if (!session) return jsonResult({ error: `Unknown session_id: ${args.session_id}` }, true);
-    return jsonResult({ session });
+    return jsonResult({ session: compactSessionSnapshotForMcp(session) });
   })
 );
 server.registerTool(
@@ -23752,7 +23905,7 @@ server.registerTool(
     "list_sessions",
     args,
     extra,
-    async () => jsonResult({ sessions: sessionManager.list() })
+    async () => jsonResult({ sessions: sessionManager.list().map(compactSessionSnapshotForMcp) })
   )
 );
 server.registerTool(
@@ -23767,7 +23920,7 @@ server.registerTool(
   async (args, extra) => loggedToolCall("cancel_session", args, extra, async () => {
     const session = sessionManager.cancel(args.session_id);
     if (!session) return jsonResult({ error: `Unknown session_id: ${args.session_id}` }, true);
-    return jsonResult({ session });
+    return jsonResult({ session: compactSessionSnapshotForMcp(session) });
   })
 );
 server.registerTool(

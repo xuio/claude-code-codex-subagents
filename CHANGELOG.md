@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.1.1
+
+- Compacted large MCP tool responses so successful long Codex runs do not surface as Claude Code tool-result overflow errors.
+
 ## 0.1.0
 
 - Initial Claude Code plugin for launching Codex agents through a daemonless stdio MCP server.

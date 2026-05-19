@@ -19,6 +19,12 @@ import { aggregateAgentResults } from "./aggregate.js";
 import { cleanOption } from "./binary.js";
 import { jobManager, runQueuedAgent, runQueuedAgents } from "./jobs.js";
 import { errorForLog, logger, makeLogId, summarizeRawTrafficForLog } from "./logging.js";
+import {
+  compactAgentResultForMcp,
+  compactAgentResultsForMcp,
+  compactJobSnapshotForMcp,
+  compactSessionSnapshotForMcp,
+} from "./response.js";
 import { sessionManager } from "./sessions.js";
 import { modelPresets } from "./subagents.js";
 
@@ -727,7 +733,7 @@ server.registerTool(
         });
         await reportAgentResult(progress, result);
         await progress.flush();
-        return jsonResult({ agent: result }, !result.ok);
+        return jsonResult({ agent: compactAgentResultForMcp(result) }, !result.ok);
       } catch (error) {
         await progress.flush();
         logger.error("run_agent.failed", { error: errorForLog(error) });
@@ -869,7 +875,7 @@ server.registerTool(
         return jsonResult(
           {
             ok,
-            agents: results,
+            agents: compactAgentResultsForMcp(results),
           },
           !ok,
         );
@@ -931,7 +937,7 @@ server.registerTool(
           {
             ok: aggregation.ok,
             aggregation,
-            agents: results,
+            agents: compactAgentResultsForMcp(results),
           },
           !aggregation.ok,
         );
@@ -999,7 +1005,7 @@ server.registerTool(
         await progress.flush();
         return jsonResult({ error: `Unknown job_id: ${args.job_id}` }, true);
       }
-      return jsonResult({ job });
+      return jsonResult({ job: compactJobSnapshotForMcp(job) });
     });
   },
 );
@@ -1034,7 +1040,10 @@ server.registerTool(
       if (!job) return jsonResult({ error: `Unknown job_id: ${args.job_id}` }, true);
       if (job.completedAt) await progress.send(`Codex job ${job.status}`);
       await progress.flush();
-      return jsonResult({ job }, job.status === "failed" || job.status === "cancelled");
+      return jsonResult(
+        { job: compactJobSnapshotForMcp(job) },
+        job.status === "failed" || job.status === "cancelled",
+      );
     });
   },
 );
@@ -1056,7 +1065,7 @@ server.registerTool(
       await progress.flush();
       const job = jobManager.cancel(args.job_id);
       if (!job) return jsonResult({ error: `Unknown job_id: ${args.job_id}` }, true);
-      return jsonResult({ job });
+      return jsonResult({ job: compactJobSnapshotForMcp(job) });
     });
   },
 );
@@ -1090,7 +1099,10 @@ server.registerTool(
         );
         await reportAgentResult(progress, result);
         await progress.flush();
-        return jsonResult({ session, agent: result }, !result.ok);
+        return jsonResult(
+          { session: compactSessionSnapshotForMcp(session), agent: compactAgentResultForMcp(result) },
+          !result.ok,
+        );
       } catch (error) {
         await progress.flush();
         logger.error("start_session.failed", { error: errorForLog(error) });
@@ -1120,11 +1132,17 @@ server.registerTool(
         const { session, result, error } = await sessionManager.send(args.session_id, args.prompt, toRunOptions(args));
         if (error || !session || !result) {
           await progress.flush();
-          return jsonResult({ error, session }, true);
+          return jsonResult(
+            { error, session: session ? compactSessionSnapshotForMcp(session) : session },
+            true,
+          );
         }
         await reportAgentResult(progress, result);
         await progress.flush();
-        return jsonResult({ session, agent: result }, !result.ok);
+        return jsonResult(
+          { session: compactSessionSnapshotForMcp(session), agent: compactAgentResultForMcp(result) },
+          !result.ok,
+        );
       } catch (error) {
         await progress.flush();
         logger.error("send_session_prompt.failed", { error: errorForLog(error) });
@@ -1147,7 +1165,7 @@ server.registerTool(
     loggedToolCall("get_session", args, extra, async () => {
       const session = sessionManager.get(args.session_id);
       if (!session) return jsonResult({ error: `Unknown session_id: ${args.session_id}` }, true);
-      return jsonResult({ session });
+      return jsonResult({ session: compactSessionSnapshotForMcp(session) });
     }),
 );
 
@@ -1160,7 +1178,7 @@ server.registerTool(
   },
   async (args, extra) =>
     loggedToolCall("list_sessions", args, extra, async () =>
-      jsonResult({ sessions: sessionManager.list() }),
+      jsonResult({ sessions: sessionManager.list().map(compactSessionSnapshotForMcp) }),
     ),
 );
 
@@ -1178,7 +1196,7 @@ server.registerTool(
     loggedToolCall("cancel_session", args, extra, async () => {
       const session = sessionManager.cancel(args.session_id);
       if (!session) return jsonResult({ error: `Unknown session_id: ${args.session_id}` }, true);
-      return jsonResult({ session });
+      return jsonResult({ session: compactSessionSnapshotForMcp(session) });
     }),
 );
 

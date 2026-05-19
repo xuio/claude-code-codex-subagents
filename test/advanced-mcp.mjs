@@ -149,6 +149,50 @@ try {
     fullAccess.structuredContent,
   );
 
+  const hugeOutput = await callTool("run_agent", {
+    prompt: "huge output BIG_FINAL_CHARS=80000 BIG_STDOUT_CHARS=80000 BIG_STDERR_CHARS=80000",
+    project_dir: projectDir,
+  });
+  const hugeAgent = hugeOutput.structuredContent?.agent;
+  assert(hugeAgent?.ok, "huge output run should succeed", hugeOutput.structuredContent);
+  assert(hugeAgent?.mcpResponse?.compacted === true, "huge output should be compacted for Claude", hugeAgent);
+  assert(
+    JSON.stringify(hugeOutput.structuredContent).length < 30_000,
+    "huge output MCP response should stay comfortably below Claude overflow limits",
+    { length: JSON.stringify(hugeOutput.structuredContent).length, compact: hugeAgent?.mcpResponse },
+  );
+
+  const hugeParallel = await callTool("run_agents", {
+    agents: [
+      { name: "huge-one", prompt: "huge parallel one BIG_FINAL_CHARS=80000", project_dir: projectDir },
+      { name: "huge-two", prompt: "huge parallel two BIG_FINAL_CHARS=80000", project_dir: projectDir },
+      { name: "huge-three", prompt: "huge parallel three BIG_FINAL_CHARS=80000", project_dir: projectDir },
+    ],
+    max_parallel: 3,
+  });
+  assert(hugeParallel.structuredContent?.ok, "huge parallel run should succeed", hugeParallel.structuredContent);
+  assert(
+    JSON.stringify(hugeParallel.structuredContent).length < 45_000,
+    "huge parallel MCP response should stay below Claude overflow limits",
+    { length: JSON.stringify(hugeParallel.structuredContent).length },
+  );
+
+  const hugeAsyncStart = await callTool("start_agent_run", {
+    prompt: "huge async BIG_FINAL_CHARS=80000 BIG_STDOUT_CHARS=80000",
+    project_dir: projectDir,
+  });
+  const hugeAsyncJobId = hugeAsyncStart.structuredContent?.job?.id;
+  assert(hugeAsyncJobId, "huge async run should return a job id", hugeAsyncStart.structuredContent);
+  const hugeAsyncWait = await callTool("wait_agent_run", { job_id: hugeAsyncJobId, timeout_ms: 5_000 });
+  const hugeAsyncAgent = hugeAsyncWait.structuredContent?.job?.result;
+  assert(hugeAsyncAgent?.ok, "huge async job should complete", hugeAsyncWait.structuredContent);
+  assert(hugeAsyncAgent?.mcpResponse?.compacted === true, "huge async job result should be compacted", hugeAsyncAgent);
+  assert(
+    JSON.stringify(hugeAsyncWait.structuredContent).length < 30_000,
+    "huge async MCP response should stay below Claude overflow limits",
+    { length: JSON.stringify(hugeAsyncWait.structuredContent).length },
+  );
+
   const calls = (await readFile(path.join(recordDir, "calls.jsonl"), "utf8"))
     .trim()
     .split("\n")

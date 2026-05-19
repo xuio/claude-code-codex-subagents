@@ -19,6 +19,7 @@ The plugin lets Claude Code launch one Codex agent or several Codex agents in pa
 - Concurrency: Codex processes run through a global queue. Defaults are `CODEX_SUBAGENTS_MAX_GLOBAL_PROCESSES=4` and `CODEX_SUBAGENTS_MAX_PROJECT_PROCESSES=2`.
 - Progress: long-running tools emit MCP `notifications/progress` events when the client supplies a progress token.
 - Logging: verbose JSONL logs are written to stderr by default. The logs include raw MCP JSON-RPC frames, tool arguments/results, prompt outputs, progress notifications, queue/job/session lifecycle, and Codex stdin/stdout/stderr traffic.
+- MCP responses: long Codex outputs are compacted before returning to Claude so successful runs do not trip Claude Code's tool-result size limits. The full raw traffic remains available in the verbose server logs.
 - Security: secret-looking output is redacted before it is returned to Claude, and secret-looking environment variables are not forwarded to Codex unless `forward_sensitive_env` is explicitly true.
 - Sessions: `start_session` and `send_session_prompt` use Codex's recorded thread id so a Codex subagent can keep context across multiple prompts without a background daemon.
 
