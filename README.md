@@ -18,6 +18,7 @@ The plugin lets Claude Code launch one Codex agent or several Codex agents in pa
 - Codex home: uses the user's Codex home by default; pass `isolated_codex_home: true` to use a temporary Codex home with auth but without inherited `config.toml` MCP servers.
 - Concurrency: Codex processes run through a global queue. Defaults are `CODEX_SUBAGENTS_MAX_GLOBAL_PROCESSES=4` and `CODEX_SUBAGENTS_MAX_PROJECT_PROCESSES=2`.
 - Progress: long-running tools emit MCP `notifications/progress` events when the client supplies a progress token.
+- Logging: verbose JSONL logs are written to stderr by default. The logs include raw MCP JSON-RPC frames, tool arguments/results, prompt outputs, progress notifications, queue/job/session lifecycle, and Codex stdin/stdout/stderr traffic.
 - Security: secret-looking output is redacted before it is returned to Claude, and secret-looking environment variables are not forwarded to Codex unless `forward_sensitive_env` is explicitly true.
 - Sessions: `start_session` and `send_session_prompt` use Codex's recorded thread id so a Codex subagent can keep context across multiple prompts without a background daemon.
 
@@ -29,6 +30,8 @@ Optional environment overrides:
 - `CODEX_SUBAGENTS_MAX_GLOBAL_PROCESSES`: maximum Codex child processes across this MCP server.
 - `CODEX_SUBAGENTS_MAX_PROJECT_PROCESSES`: maximum Codex child processes per project key.
 - `CODEX_SUBAGENTS_JOB_TTL_SECONDS`: completed async job retention window. Defaults to one hour.
+- `CODEX_SUBAGENTS_LOG_LEVEL`: `debug`, `info`, `warn`, `error`, or `silent`. Defaults to `debug`.
+- `CODEX_SUBAGENTS_LOG_MAX_STRING_CHARS`: maximum string payload retained per log field before truncation metadata is used. Defaults to `20000`.
 
 ## Spark And Nested Subagents
 

@@ -22,6 +22,11 @@ const transport = new StdioClientTransport({
   },
   stderr: "pipe",
 });
+let serverLogs = "";
+transport.stderr?.setEncoding("utf8");
+transport.stderr?.on("data", (chunk) => {
+  serverLogs += chunk;
+});
 
 function assert(condition, message, details) {
   if (!condition) {
@@ -174,6 +179,17 @@ try {
     "secret environment values should not be passed as command arguments",
     calls,
   );
+
+  await new Promise((resolve) => setTimeout(resolve, 50));
+  assert(serverLogs.includes('"event":"mcp.transport.inbound"'), "stderr logs should include raw MCP inbound frames", serverLogs);
+  assert(serverLogs.includes('"event":"mcp.transport.outbound"'), "stderr logs should include raw MCP outbound frames", serverLogs);
+  assert(serverLogs.includes('"method":"initialize"'), "raw MCP protocol logs should include initialize traffic", serverLogs);
+  assert(serverLogs.includes('"event":"mcp.tool.call"'), "stderr logs should include MCP tool calls", serverLogs);
+  assert(serverLogs.includes('"event":"mcp.tool.result"'), "stderr logs should include MCP tool results", serverLogs);
+  assert(serverLogs.includes('"event":"codex.stdin"'), "stderr logs should include Codex stdin traffic", serverLogs);
+  assert(serverLogs.includes('"event":"codex.stdout"'), "stderr logs should include Codex stdout traffic", serverLogs);
+  assert(serverLogs.includes('"event":"mcp.progress"'), "stderr logs should include progress communication", serverLogs);
+  assert(serverLogs.includes("LEAK_SECRET"), "raw MCP traffic logs should include unredacted prompts", serverLogs);
 
   console.log("Advanced MCP test passed");
 } finally {

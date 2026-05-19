@@ -19,6 +19,7 @@ const transport = new StdioClientTransport({
   },
   stderr: "pipe",
 });
+transport.stderr?.resume();
 
 try {
   await client.connect(transport);

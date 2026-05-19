@@ -9,6 +9,13 @@ import {
   parseStructuredOutput,
   schemaForOutputContract,
 } from "./contracts.js";
+import {
+  errorForLog,
+  logger,
+  makeLogId,
+  summarizeCommandArgs,
+  summarizeRawTrafficForLog,
+} from "./logging.js";
 import { redactJsonValue, redactSensitiveText, sanitizeChildEnv } from "./redaction.js";
 import {
   codexSubagentConfigOverrides,
@@ -536,8 +543,48 @@ function truncate(text: string, maxChars: number): { text: string; truncatedChar
 }
 
 export async function runAgent(options: AgentRunOptions): Promise<AgentRunResult> {
+  const runId = makeLogId("run");
   const started = Date.now();
   const maxOutputChars = options.maxOutputChars ?? 60_000;
+  logger.rawDebug("agent.run.start", {
+    runId,
+    options: summarizeRawTrafficForLog({
+      prompt: options.prompt,
+      name: options.name,
+      model: options.model,
+      modelPreset: options.modelPreset,
+      reasoningEffort: options.reasoningEffort,
+      sandbox: options.sandbox,
+      dangerouslyBypassApprovalsAndSandbox: options.dangerouslyBypassApprovalsAndSandbox,
+      serviceTier: options.serviceTier,
+      modelVerbosity: options.modelVerbosity,
+      reasoningSummary: options.reasoningSummary,
+      cwd: options.cwd,
+      projectDir: options.projectDir,
+      codexBin: options.codexBin,
+      profile: options.profile,
+      timeoutMs: options.timeoutMs,
+      maxOutputChars: options.maxOutputChars,
+      includeEvents: options.includeEvents,
+      ephemeral: options.ephemeral,
+      skipGitRepoCheck: options.skipGitRepoCheck,
+      ignoreRules: options.ignoreRules,
+      isolatedCodexHome: options.isolatedCodexHome,
+      mcpConfigPolicy: options.mcpConfigPolicy,
+      codexMcpServers: options.codexMcpServers,
+      forwardSensitiveEnv: options.forwardSensitiveEnv,
+      idleTimeoutMs: options.idleTimeoutMs,
+      spawnTimeoutMs: options.spawnTimeoutMs,
+      terminateGraceMs: options.terminateGraceMs,
+      outputContract: options.outputContract,
+      outputSchema: options.outputSchema,
+      resumeSessionId: options.resumeSessionId,
+      resumeLast: options.resumeLast,
+      codexSubagents: options.codexSubagents,
+      subagentTasks: options.subagentTasks,
+      subagentRuntime: options.subagentRuntime,
+    }),
+  });
   const mergedEnv = {
     ...process.env,
     ...options.env,
@@ -547,7 +594,9 @@ export async function runAgent(options: AgentRunOptions): Promise<AgentRunResult
     explicitPath: options.codexBin,
     env: mergedEnv,
   });
+  logger.debug("agent.run.resolved", { runId, cwd, codexBinary });
   if (options.abortSignal?.aborted) {
+    logger.warn("agent.run.cancelled_before_start", { runId });
     return baseFailureResult({
       started,
       codexBinary,
@@ -562,6 +611,7 @@ export async function runAgent(options: AgentRunOptions): Promise<AgentRunResult
     validateRunConfiguration(options, mergedEnv);
   } catch (error) {
     if (error instanceof RunValidationError) {
+      logger.error("agent.run.validation_failed", { runId, error: errorForLog(error) });
       return validationFailureResult({
         started,
         error,
@@ -583,6 +633,11 @@ export async function runAgent(options: AgentRunOptions): Promise<AgentRunResult
     codexMcpServers: options.codexMcpServers,
     projectDir: cwd,
   });
+  logger.debug("agent.run.subagents_prepared", {
+    runId,
+    customAgents: preparedSubagents.names,
+    tempCodexHomeUsed: Boolean(preparedSubagents.tempCodexHome),
+  });
   const childEnv = sanitizeChildEnv({ ...mergedEnv, ...preparedSubagents.env }, options.forwardSensitiveEnv);
   const outputPath = path.join(tempDir, "last-message.md");
   const outputSchema = schemaForOutputContract(options.outputContract, options.outputSchema);
@@ -592,6 +647,12 @@ export async function runAgent(options: AgentRunOptions): Promise<AgentRunResult
       : undefined;
   if (outputSchemaPath) await writeFile(outputSchemaPath, JSON.stringify(outputSchema), "utf8");
   const args = buildCodexExecArgs({ ...options, cwd, outputSchemaPath }, outputPath, childEnv);
+  logger.rawDebug("codex.spawn", {
+    runId,
+    binary: codexBinary,
+    cwd,
+    args: summarizeCommandArgs(args),
+  });
   const stdout = new LimitedText(maxOutputChars);
   const stderr = new LimitedText(Math.min(maxOutputChars, 20_000));
   const summary: CodexEventSummary = {
@@ -619,6 +680,7 @@ export async function runAgent(options: AgentRunOptions): Promise<AgentRunResult
       shell: false,
       detached: process.platform !== "win32",
     });
+    logger.debug("codex.process.created", { runId, childPid: child.pid });
 
     const makeSnapshot = (status: AgentRunPartial["status"]): AgentRunPartial => ({
       name: options.name,
@@ -642,6 +704,7 @@ export async function runAgent(options: AgentRunOptions): Promise<AgentRunResult
     };
 
     const requestKill = (reason: "timeout" | "idle_timeout" | "spawn_timeout" | "cancelled") => {
+      logger.warn("codex.process.kill_requested", { runId, reason });
       if (reason === "timeout" || reason === "idle_timeout" || reason === "spawn_timeout") {
         timedOut = true;
         timeoutReason = reason;
@@ -672,6 +735,7 @@ export async function runAgent(options: AgentRunOptions): Promise<AgentRunResult
     spawnTimeout = setTimeout(() => requestKill("spawn_timeout"), options.spawnTimeoutMs ?? 10_000);
     spawnTimeout.unref();
     child.once("spawn", () => {
+      logger.debug("codex.process.spawned", { runId, childPid: child.pid });
       if (spawnTimeout) clearTimeout(spawnTimeout);
       publishSnapshot(true);
     });
@@ -682,6 +746,10 @@ export async function runAgent(options: AgentRunOptions): Promise<AgentRunResult
 
     child.stdout.setEncoding("utf8");
     child.stdout.on("data", (chunk: string) => {
+      logger.rawDebug("codex.stdout", {
+        runId,
+        chunk: summarizeRawTrafficForLog(chunk),
+      });
       resetIdleTimeout();
       stdout.append(chunk);
       publishSnapshot(true);
@@ -698,18 +766,29 @@ export async function runAgent(options: AgentRunOptions): Promise<AgentRunResult
 
     child.stderr.setEncoding("utf8");
     child.stderr.on("data", (chunk: string) => {
+      logger.rawDebug("codex.stderr", {
+        runId,
+        chunk: summarizeRawTrafficForLog(chunk),
+      });
       resetIdleTimeout();
       stderr.append(chunk);
       publishSnapshot(true);
     });
 
     child.stdin.on("error", (error: Error) => {
+      logger.error("codex.stdin.error", { runId, error: errorForLog(error) });
       summary.errors.push(`Codex stdin error: ${error.message}`);
     });
 
     try {
-      child.stdin.end(`${preparedSubagents.promptPrefix}${options.prompt}`);
+      const prompt = `${preparedSubagents.promptPrefix}${options.prompt}`;
+      logger.rawDebug("codex.stdin", {
+        runId,
+        prompt: summarizeRawTrafficForLog(prompt),
+      });
+      child.stdin.end(prompt);
     } catch (error) {
+      logger.error("codex.stdin.write_failed", { runId, error: errorForLog(error) });
       summary.errors.push(
         `Codex stdin write failed: ${error instanceof Error ? error.message : String(error)}`,
       );
@@ -721,9 +800,11 @@ export async function runAgent(options: AgentRunOptions): Promise<AgentRunResult
       spawnError?: Error;
     }>((resolve) => {
       child.once("error", (error) => {
+        logger.error("codex.process.error", { runId, error: errorForLog(error) });
         resolve({ exitCode: null, signal: null, spawnError: error });
       });
       child.once("close", (code, signalValue) => {
+        logger.debug("codex.process.closed", { runId, exitCode: code, signal: signalValue });
         resolve({ exitCode: code, signal: signalValue });
       });
     });
@@ -738,6 +819,7 @@ export async function runAgent(options: AgentRunOptions): Promise<AgentRunResult
     if (abortHandler) options.abortSignal?.removeEventListener("abort", abortHandler);
 
     if (spawnError) {
+      logger.error("agent.run.spawn_failed", { runId, error: errorForLog(spawnError) });
       return baseFailureResult({
         started,
         codexBinary,
@@ -773,6 +855,25 @@ export async function runAgent(options: AgentRunOptions): Promise<AgentRunResult
         : exitCode === 0
           ? "completed"
           : "failed";
+    logger[status === "completed" ? "rawInfo" : "rawError"]("agent.run.finish", {
+      runId,
+      status,
+      durationMs: Date.now() - started,
+      exitCode,
+      signal,
+      timeoutReason,
+      finalMessage: summarizeRawTrafficForLog(finalMessage),
+      stderr: summarizeRawTrafficForLog(stderr.text()),
+      stdoutTail: summarizeRawTrafficForLog(stdout.text()),
+      eventSummary: summarizeRawTrafficForLog(summary),
+      structuredOutput: summarizeRawTrafficForLog(structured.value),
+      structuredOutputError: structured.error,
+      truncated: {
+        stdoutChars: stdout.truncated(),
+        stderrChars: stderr.truncated(),
+        finalMessageChars: final.truncatedChars,
+      },
+    });
 
     return {
       name: options.name,

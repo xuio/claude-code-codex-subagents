@@ -1,4 +1,5 @@
 import { runQueuedAgent } from "./jobs.js";
+import { errorForLog, logger, summarizeRawTrafficForLog } from "./logging.js";
 import type { AgentRunOptions, AgentRunPartial, AgentRunResult } from "./runner.js";
 
 type SessionStatus = "active" | "running" | "failed" | "cancelled";
@@ -76,6 +77,10 @@ export class CodexSessionManager {
       },
     };
     this.sessions.set(session.id, session);
+    logger.rawDebug("session.start", {
+      session: summarizeRawTrafficForLog(snapshot(session)),
+      prompt: options.prompt,
+    });
     const result = await this.runTurn(session, { ...options, ephemeral: false });
     return { session: snapshot(session), result };
   }
@@ -86,15 +91,27 @@ export class CodexSessionManager {
     overrides: Omit<AgentRunOptions, "prompt" | "abortSignal" | "onSnapshot"> = {},
   ): Promise<{ session?: CodexSessionSnapshot; result?: AgentRunResult; error?: string }> {
     const session = this.sessions.get(id);
-    if (!session) return { error: `Unknown session_id: ${id}` };
-    if (session.controller) return { session: snapshot(session), error: `Session is already running: ${id}` };
+    if (!session) {
+      logger.warn("session.send_unknown", { sessionId: id });
+      return { error: `Unknown session_id: ${id}` };
+    }
+    if (session.controller) {
+      logger.warn("session.send_already_running", { sessionId: id });
+      return { session: snapshot(session), error: `Session is already running: ${id}` };
+    }
     if (!session.codexThreadId) {
+      logger.warn("session.send_missing_thread", { sessionId: id });
       return {
         session: snapshot(session),
         error: `Session has no Codex thread id yet; start_session must complete successfully before send_session_prompt.`,
       };
     }
 
+    logger.rawDebug("session.send", {
+      sessionId: id,
+      prompt,
+      overrides: summarizeRawTrafficForLog(overrides),
+    });
     const result = await this.runTurn(session, {
       ...session.baseOptions,
       ...overrides,
@@ -107,7 +124,11 @@ export class CodexSessionManager {
 
   cancel(id: string): CodexSessionSnapshot | undefined {
     const session = this.sessions.get(id);
-    if (!session) return undefined;
+    if (!session) {
+      logger.warn("session.cancel_unknown", { sessionId: id });
+      return undefined;
+    }
+    logger.warn("session.cancel", { sessionId: id, active: Boolean(session.controller) });
     if (session.controller) {
       session.status = "cancelled";
       session.updatedAt = new Date().toISOString();
@@ -126,6 +147,12 @@ export class CodexSessionManager {
     session.updatedAt = new Date().toISOString();
     session.error = undefined;
     session.partial = undefined;
+    logger.rawDebug("session.turn.start", {
+      session: summarizeRawTrafficForLog(snapshot(session)),
+      prompt: options.prompt,
+      resumeSessionId: options.resumeSessionId,
+      resumeLast: options.resumeLast,
+    });
 
     try {
       const result = await runQueuedAgent(
@@ -137,6 +164,10 @@ export class CodexSessionManager {
           onSnapshot: (partial) => {
             session.partial = partial;
             session.updatedAt = new Date().toISOString();
+            logger.rawDebug("session.turn.partial", {
+              sessionId: session.id,
+              partial: summarizeRawTrafficForLog(partial),
+            });
           },
         },
       );
@@ -146,11 +177,19 @@ export class CodexSessionManager {
       session.projectDir = result.cwd;
       session.status = result.ok ? "active" : result.status === "cancelled" ? "cancelled" : "failed";
       session.updatedAt = new Date().toISOString();
+      logger.rawInfo("session.turn.finish", {
+        session: summarizeRawTrafficForLog(snapshot(session)),
+        result: summarizeRawTrafficForLog(result),
+      });
       return result;
     } catch (error) {
       session.status = controller.signal.aborted ? "cancelled" : "failed";
       session.error = error instanceof Error ? error.message : String(error);
       session.updatedAt = new Date().toISOString();
+      logger.error("session.turn.failed", {
+        sessionId: session.id,
+        error: errorForLog(error),
+      });
       throw error;
     } finally {
       session.controller = undefined;

@@ -21,6 +21,7 @@ const transport = new StdioClientTransport({
   },
   stderr: "pipe",
 });
+transport.stderr?.resume();
 
 function assert(condition, message, details) {
   if (!condition) {

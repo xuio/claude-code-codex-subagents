@@ -4400,11 +4400,11 @@ var require_core = __commonJS({
     Ajv2.ValidationError = validation_error_1.default;
     Ajv2.MissingRefError = ref_error_1.default;
     exports.default = Ajv2;
-    function checkOptions(checkOpts, options, msg, log = "error") {
+    function checkOptions(checkOpts, options, msg, log2 = "error") {
       for (const key in checkOpts) {
         const opt = key;
         if (opt in options)
-          this.logger[log](`${msg}: option ${key}. ${checkOpts[opt]}`);
+          this.logger[log2](`${msg}: option ${key}. ${checkOpts[opt]}`);
       }
     }
     function getSchEnv(keyRef) {
@@ -4451,13 +4451,13 @@ var require_core = __commonJS({
     }, warn() {
     }, error() {
     } };
-    function getLogger(logger) {
-      if (logger === false)
+    function getLogger(logger2) {
+      if (logger2 === false)
         return noLogs;
-      if (logger === void 0)
+      if (logger2 === void 0)
         return console;
-      if (logger.log && logger.warn && logger.error)
-        return logger;
+      if (logger2.log && logger2.warn && logger2.error)
+        return logger2;
       throw new Error("logger must implement log, warn and error methods");
     }
     var KEYWORD_NAME = /^[a-z_$][a-z0-9_$:-]*$/i;
@@ -21314,6 +21314,9 @@ function parseStructuredOutput(text) {
   }
 }
 
+// src/logging.ts
+import { createHash, randomUUID } from "node:crypto";
+
 // src/redaction.ts
 var privateKeyPattern = new RegExp(
   [
@@ -21383,6 +21386,106 @@ function sanitizeChildEnv(env, forwardSensitiveEnv = false) {
   }
   return sanitized;
 }
+
+// src/logging.ts
+var logLevels = ["debug", "info", "warn", "error", "silent"];
+var levelWeight = {
+  debug: 10,
+  info: 20,
+  warn: 30,
+  error: 40,
+  silent: Number.POSITIVE_INFINITY
+};
+var logWriter = (line) => {
+  process.stderr.write(`${line}
+`);
+};
+function configuredLogLevel(env = process.env) {
+  const raw = (env.CODEX_SUBAGENTS_LOG_LEVEL ?? env.CODEX_SUBAGENTS_LOG ?? "debug").trim().toLowerCase();
+  if (["0", "false", "off", "none", "quiet", "silent"].includes(raw)) return "silent";
+  if (logLevels.includes(raw)) return raw;
+  return "debug";
+}
+function makeLogId(prefix) {
+  return `${prefix}-${Date.now().toString(36)}-${randomUUID().slice(0, 8)}`;
+}
+function fingerprint(text) {
+  return {
+    chars: text.length,
+    sha256: createHash("sha256").update(text).digest("hex").slice(0, 16)
+  };
+}
+function maxStringChars(env = process.env) {
+  const parsed = Number(env.CODEX_SUBAGENTS_LOG_MAX_STRING_CHARS);
+  if (!Number.isInteger(parsed) || parsed < 1) return 2e4;
+  return Math.min(parsed, 1e6);
+}
+function shortenRaw(text, max = maxStringChars()) {
+  if (text.length <= max) return text;
+  return {
+    ...fingerprint(text),
+    preview: text.slice(0, max)
+  };
+}
+function summarizeRawTrafficForLog(value, depth = 0) {
+  if (typeof value === "string") return shortenRaw(value);
+  if (typeof value !== "object" || value === null) return value;
+  if (depth >= 8) return "[MaxDepth]";
+  if (Array.isArray(value)) {
+    return value.map((item) => summarizeRawTrafficForLog(item, depth + 1));
+  }
+  return Object.fromEntries(
+    Object.entries(value).map(([childKey, childValue]) => [
+      childKey,
+      summarizeRawTrafficForLog(childValue, depth + 1)
+    ])
+  );
+}
+function summarizeCommandArgs(args) {
+  return args.map((arg) => shortenRaw(arg));
+}
+function errorForLog(error2) {
+  if (error2 instanceof Error) {
+    return redactJsonValue({
+      name: error2.name,
+      message: error2.message,
+      stack: error2.stack
+    });
+  }
+  return redactJsonValue({ message: String(error2) });
+}
+function writeLog(level, event, fields = {}, options = {}) {
+  if (levelWeight[level] < levelWeight[configuredLogLevel()]) return;
+  const entry = {
+    ts: (/* @__PURE__ */ new Date()).toISOString(),
+    level,
+    component: "codex-subagents",
+    pid: process.pid,
+    event,
+    ...fields
+  };
+  const payload = options.redact === false ? entry : redactJsonValue(entry);
+  try {
+    logWriter(JSON.stringify(payload));
+  } catch {
+  }
+}
+function log(level, event, fields = {}) {
+  writeLog(level, event, fields, { redact: true });
+}
+function logRaw(level, event, fields = {}) {
+  writeLog(level, event, fields, { redact: false });
+}
+var logger = {
+  debug: (event, fields) => log("debug", event, fields),
+  info: (event, fields) => log("info", event, fields),
+  warn: (event, fields) => log("warn", event, fields),
+  error: (event, fields) => log("error", event, fields),
+  rawDebug: (event, fields) => logRaw("debug", event, fields),
+  rawInfo: (event, fields) => logRaw("info", event, fields),
+  rawWarn: (event, fields) => logRaw("warn", event, fields),
+  rawError: (event, fields) => logRaw("error", event, fields)
+};
 
 // src/subagents.ts
 import { lstat, mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
@@ -21930,8 +22033,48 @@ function truncate(text, maxChars) {
   return { text: text.slice(0, maxChars), truncatedChars: text.length - maxChars };
 }
 async function runAgent(options) {
+  const runId = makeLogId("run");
   const started = Date.now();
   const maxOutputChars = options.maxOutputChars ?? 6e4;
+  logger.rawDebug("agent.run.start", {
+    runId,
+    options: summarizeRawTrafficForLog({
+      prompt: options.prompt,
+      name: options.name,
+      model: options.model,
+      modelPreset: options.modelPreset,
+      reasoningEffort: options.reasoningEffort,
+      sandbox: options.sandbox,
+      dangerouslyBypassApprovalsAndSandbox: options.dangerouslyBypassApprovalsAndSandbox,
+      serviceTier: options.serviceTier,
+      modelVerbosity: options.modelVerbosity,
+      reasoningSummary: options.reasoningSummary,
+      cwd: options.cwd,
+      projectDir: options.projectDir,
+      codexBin: options.codexBin,
+      profile: options.profile,
+      timeoutMs: options.timeoutMs,
+      maxOutputChars: options.maxOutputChars,
+      includeEvents: options.includeEvents,
+      ephemeral: options.ephemeral,
+      skipGitRepoCheck: options.skipGitRepoCheck,
+      ignoreRules: options.ignoreRules,
+      isolatedCodexHome: options.isolatedCodexHome,
+      mcpConfigPolicy: options.mcpConfigPolicy,
+      codexMcpServers: options.codexMcpServers,
+      forwardSensitiveEnv: options.forwardSensitiveEnv,
+      idleTimeoutMs: options.idleTimeoutMs,
+      spawnTimeoutMs: options.spawnTimeoutMs,
+      terminateGraceMs: options.terminateGraceMs,
+      outputContract: options.outputContract,
+      outputSchema: options.outputSchema,
+      resumeSessionId: options.resumeSessionId,
+      resumeLast: options.resumeLast,
+      codexSubagents: options.codexSubagents,
+      subagentTasks: options.subagentTasks,
+      subagentRuntime: options.subagentRuntime
+    })
+  });
   const mergedEnv = {
     ...process.env,
     ...options.env
@@ -21941,7 +22084,9 @@ async function runAgent(options) {
     explicitPath: options.codexBin,
     env: mergedEnv
   });
+  logger.debug("agent.run.resolved", { runId, cwd, codexBinary });
   if (options.abortSignal?.aborted) {
+    logger.warn("agent.run.cancelled_before_start", { runId });
     return baseFailureResult({
       started,
       codexBinary,
@@ -21956,6 +22101,7 @@ async function runAgent(options) {
     validateRunConfiguration(options, mergedEnv);
   } catch (error2) {
     if (error2 instanceof RunValidationError) {
+      logger.error("agent.run.validation_failed", { runId, error: errorForLog(error2) });
       return validationFailureResult({
         started,
         error: error2,
@@ -21977,12 +22123,23 @@ async function runAgent(options) {
     codexMcpServers: options.codexMcpServers,
     projectDir: cwd
   });
+  logger.debug("agent.run.subagents_prepared", {
+    runId,
+    customAgents: preparedSubagents.names,
+    tempCodexHomeUsed: Boolean(preparedSubagents.tempCodexHome)
+  });
   const childEnv = sanitizeChildEnv({ ...mergedEnv, ...preparedSubagents.env }, options.forwardSensitiveEnv);
   const outputPath = path3.join(tempDir, "last-message.md");
   const outputSchema = schemaForOutputContract(options.outputContract, options.outputSchema);
   const outputSchemaPath = outputSchema && !options.resumeSessionId && !options.resumeLast ? path3.join(tempDir, "output-schema.json") : void 0;
   if (outputSchemaPath) await writeFile2(outputSchemaPath, JSON.stringify(outputSchema), "utf8");
   const args = buildCodexExecArgs({ ...options, cwd, outputSchemaPath }, outputPath, childEnv);
+  logger.rawDebug("codex.spawn", {
+    runId,
+    binary: codexBinary,
+    cwd,
+    args: summarizeCommandArgs(args)
+  });
   const stdout = new LimitedText(maxOutputChars);
   const stderr = new LimitedText(Math.min(maxOutputChars, 2e4));
   const summary = {
@@ -22009,6 +22166,7 @@ async function runAgent(options) {
       shell: false,
       detached: process.platform !== "win32"
     });
+    logger.debug("codex.process.created", { runId, childPid: child.pid });
     const makeSnapshot = (status2) => ({
       name: options.name,
       status: status2,
@@ -22027,6 +22185,7 @@ async function runAgent(options) {
       options.onSnapshot(makeSnapshot(cancelled ? "cancelled" : timedOut ? "timeout" : "running"));
     };
     const requestKill = (reason) => {
+      logger.warn("codex.process.kill_requested", { runId, reason });
       if (reason === "timeout" || reason === "idle_timeout" || reason === "spawn_timeout") {
         timedOut = true;
         timeoutReason = reason;
@@ -22054,6 +22213,7 @@ async function runAgent(options) {
     spawnTimeout = setTimeout(() => requestKill("spawn_timeout"), options.spawnTimeoutMs ?? 1e4);
     spawnTimeout.unref();
     child.once("spawn", () => {
+      logger.debug("codex.process.spawned", { runId, childPid: child.pid });
       if (spawnTimeout) clearTimeout(spawnTimeout);
       publishSnapshot(true);
     });
@@ -22063,6 +22223,10 @@ async function runAgent(options) {
     timeout.unref();
     child.stdout.setEncoding("utf8");
     child.stdout.on("data", (chunk) => {
+      logger.rawDebug("codex.stdout", {
+        runId,
+        chunk: summarizeRawTrafficForLog(chunk)
+      });
       resetIdleTimeout();
       stdout.append(chunk);
       publishSnapshot(true);
@@ -22078,25 +22242,38 @@ async function runAgent(options) {
     });
     child.stderr.setEncoding("utf8");
     child.stderr.on("data", (chunk) => {
+      logger.rawDebug("codex.stderr", {
+        runId,
+        chunk: summarizeRawTrafficForLog(chunk)
+      });
       resetIdleTimeout();
       stderr.append(chunk);
       publishSnapshot(true);
     });
     child.stdin.on("error", (error2) => {
+      logger.error("codex.stdin.error", { runId, error: errorForLog(error2) });
       summary.errors.push(`Codex stdin error: ${error2.message}`);
     });
     try {
-      child.stdin.end(`${preparedSubagents.promptPrefix}${options.prompt}`);
+      const prompt = `${preparedSubagents.promptPrefix}${options.prompt}`;
+      logger.rawDebug("codex.stdin", {
+        runId,
+        prompt: summarizeRawTrafficForLog(prompt)
+      });
+      child.stdin.end(prompt);
     } catch (error2) {
+      logger.error("codex.stdin.write_failed", { runId, error: errorForLog(error2) });
       summary.errors.push(
         `Codex stdin write failed: ${error2 instanceof Error ? error2.message : String(error2)}`
       );
     }
     const { exitCode, signal, spawnError } = await new Promise((resolve) => {
       child.once("error", (error2) => {
+        logger.error("codex.process.error", { runId, error: errorForLog(error2) });
         resolve({ exitCode: null, signal: null, spawnError: error2 });
       });
       child.once("close", (code, signalValue) => {
+        logger.debug("codex.process.closed", { runId, exitCode: code, signal: signalValue });
         resolve({ exitCode: code, signal: signalValue });
       });
     });
@@ -22108,6 +22285,7 @@ async function runAgent(options) {
     if (killTimeout) clearTimeout(killTimeout);
     if (abortHandler) options.abortSignal?.removeEventListener("abort", abortHandler);
     if (spawnError) {
+      logger.error("agent.run.spawn_failed", { runId, error: errorForLog(spawnError) });
       return baseFailureResult({
         started,
         codexBinary,
@@ -22131,6 +22309,25 @@ async function runAgent(options) {
     const redactedSummary = cloneEventSummary(summary);
     const redactedStructuredOutput = structured.value === void 0 ? void 0 : redactJsonValue(structured.value);
     const status = cancelled ? "cancelled" : timedOut ? "timeout" : exitCode === 0 ? "completed" : "failed";
+    logger[status === "completed" ? "rawInfo" : "rawError"]("agent.run.finish", {
+      runId,
+      status,
+      durationMs: Date.now() - started,
+      exitCode,
+      signal,
+      timeoutReason,
+      finalMessage: summarizeRawTrafficForLog(finalMessage),
+      stderr: summarizeRawTrafficForLog(stderr.text()),
+      stdoutTail: summarizeRawTrafficForLog(stdout.text()),
+      eventSummary: summarizeRawTrafficForLog(summary),
+      structuredOutput: summarizeRawTrafficForLog(structured.value),
+      structuredOutputError: structured.error,
+      truncated: {
+        stdoutChars: stdout.truncated(),
+        stderrChars: stderr.truncated(),
+        finalMessageChars: final.truncatedChars
+      }
+    });
     return {
       name: options.name,
       ok: status === "completed",
@@ -22308,6 +22505,7 @@ var AgentRunQueue = class {
   }
   enqueue(run, options = {}) {
     if (options.signal?.aborted) {
+      logger.warn("queue.enqueue_rejected_cancelled", { projectKey: options.projectKey ?? "__default__" });
       return Promise.reject(new AbortError("Codex run was cancelled before it entered the queue."));
     }
     return new Promise((resolve, reject) => {
@@ -22325,11 +22523,17 @@ var AgentRunQueue = class {
         const index = this.pending.indexOf(task);
         if (index >= 0) {
           this.pending.splice(index, 1);
+          logger.warn("queue.cancelled_while_pending", { queueTaskId: task.id, projectKey: task.projectKey });
           reject(new AbortError("Codex run was cancelled while queued."));
         }
       };
       options.signal?.addEventListener("abort", abortPending, { once: true });
       this.pending.push(task);
+      logger.debug("queue.enqueued", {
+        queueTaskId: task.id,
+        projectKey: task.projectKey,
+        stats: this.stats()
+      });
       this.tryStart();
     });
   }
@@ -22343,18 +22547,40 @@ var AgentRunQueue = class {
       const [task] = this.pending.splice(index, 1);
       if (!task) return;
       if (task.signal?.aborted) {
+        logger.warn("queue.cancelled_before_start", { queueTaskId: task.id, projectKey: task.projectKey });
         task.reject(new AbortError("Codex run was cancelled while queued."));
         continue;
       }
       const queuedMs = Date.now() - task.enqueuedAt;
       this.active += 1;
       this.projectActive.set(task.projectKey, (this.projectActive.get(task.projectKey) ?? 0) + 1);
+      logger.debug("queue.started", {
+        queueTaskId: task.id,
+        projectKey: task.projectKey,
+        queuedMs,
+        stats: this.stats()
+      });
       void callQueueCallback(() => task.onStart?.(queuedMs));
-      Promise.resolve().then(task.run).then((value) => task.resolve({ value, queuedMs })).catch((error2) => task.reject(error2)).finally(() => {
+      Promise.resolve().then(task.run).then((value) => {
+        logger.debug("queue.completed", { queueTaskId: task.id, projectKey: task.projectKey });
+        task.resolve({ value, queuedMs });
+      }).catch((error2) => {
+        logger.error("queue.failed", {
+          queueTaskId: task.id,
+          projectKey: task.projectKey,
+          error: errorForLog(error2)
+        });
+        task.reject(error2);
+      }).finally(() => {
         this.active -= 1;
         const projectCount = (this.projectActive.get(task.projectKey) ?? 1) - 1;
         if (projectCount > 0) this.projectActive.set(task.projectKey, projectCount);
         else this.projectActive.delete(task.projectKey);
+        logger.debug("queue.released", {
+          queueTaskId: task.id,
+          projectKey: task.projectKey,
+          stats: this.stats()
+        });
         this.tryStart();
       });
     }
@@ -22517,6 +22743,9 @@ var CodexJobManager = class {
       waiters: /* @__PURE__ */ new Set()
     };
     this.jobs.set(job.id, job);
+    logger.rawDebug("job.started", {
+      job: summarizeRawTrafficForLog(snapshot(job))
+    });
     void run(job).then((result) => {
       job.result = result;
       if (kind === "agent") {
@@ -22525,9 +22754,21 @@ var CodexJobManager = class {
         const agents = result.agents ?? [];
         job.status = statusFromAgentResults(agents);
       }
+      logger.rawInfo("job.finished", {
+        jobId: job.id,
+        kind: job.kind,
+        status: job.status,
+        result: summarizeRawTrafficForLog(result)
+      });
     }).catch((error2) => {
       job.error = error2 instanceof Error ? error2.message : String(error2);
       job.status = error2 instanceof AbortError ? "cancelled" : "failed";
+      logger.error("job.failed", {
+        jobId: job.id,
+        kind: job.kind,
+        status: job.status,
+        error: errorForLog(error2)
+      });
     }).finally(() => {
       const nowDone = (/* @__PURE__ */ new Date()).toISOString();
       job.completedAt = nowDone;
@@ -22593,19 +22834,35 @@ var CodexSessionManager = class {
       }
     };
     this.sessions.set(session.id, session);
+    logger.rawDebug("session.start", {
+      session: summarizeRawTrafficForLog(snapshot2(session)),
+      prompt: options.prompt
+    });
     const result = await this.runTurn(session, { ...options, ephemeral: false });
     return { session: snapshot2(session), result };
   }
   async send(id, prompt, overrides = {}) {
     const session = this.sessions.get(id);
-    if (!session) return { error: `Unknown session_id: ${id}` };
-    if (session.controller) return { session: snapshot2(session), error: `Session is already running: ${id}` };
+    if (!session) {
+      logger.warn("session.send_unknown", { sessionId: id });
+      return { error: `Unknown session_id: ${id}` };
+    }
+    if (session.controller) {
+      logger.warn("session.send_already_running", { sessionId: id });
+      return { session: snapshot2(session), error: `Session is already running: ${id}` };
+    }
     if (!session.codexThreadId) {
+      logger.warn("session.send_missing_thread", { sessionId: id });
       return {
         session: snapshot2(session),
         error: `Session has no Codex thread id yet; start_session must complete successfully before send_session_prompt.`
       };
     }
+    logger.rawDebug("session.send", {
+      sessionId: id,
+      prompt,
+      overrides: summarizeRawTrafficForLog(overrides)
+    });
     const result = await this.runTurn(session, {
       ...session.baseOptions,
       ...overrides,
@@ -22617,7 +22874,11 @@ var CodexSessionManager = class {
   }
   cancel(id) {
     const session = this.sessions.get(id);
-    if (!session) return void 0;
+    if (!session) {
+      logger.warn("session.cancel_unknown", { sessionId: id });
+      return void 0;
+    }
+    logger.warn("session.cancel", { sessionId: id, active: Boolean(session.controller) });
     if (session.controller) {
       session.status = "cancelled";
       session.updatedAt = (/* @__PURE__ */ new Date()).toISOString();
@@ -22635,6 +22896,12 @@ var CodexSessionManager = class {
     session.updatedAt = (/* @__PURE__ */ new Date()).toISOString();
     session.error = void 0;
     session.partial = void 0;
+    logger.rawDebug("session.turn.start", {
+      session: summarizeRawTrafficForLog(snapshot2(session)),
+      prompt: options.prompt,
+      resumeSessionId: options.resumeSessionId,
+      resumeLast: options.resumeLast
+    });
     try {
       const result = await runQueuedAgent(
         {
@@ -22645,6 +22912,10 @@ var CodexSessionManager = class {
           onSnapshot: (partial2) => {
             session.partial = partial2;
             session.updatedAt = (/* @__PURE__ */ new Date()).toISOString();
+            logger.rawDebug("session.turn.partial", {
+              sessionId: session.id,
+              partial: summarizeRawTrafficForLog(partial2)
+            });
           }
         }
       );
@@ -22654,11 +22925,19 @@ var CodexSessionManager = class {
       session.projectDir = result.cwd;
       session.status = result.ok ? "active" : result.status === "cancelled" ? "cancelled" : "failed";
       session.updatedAt = (/* @__PURE__ */ new Date()).toISOString();
+      logger.rawInfo("session.turn.finish", {
+        session: summarizeRawTrafficForLog(snapshot2(session)),
+        result: summarizeRawTrafficForLog(result)
+      });
       return result;
     } catch (error2) {
       session.status = controller.signal.aborted ? "cancelled" : "failed";
       session.error = error2 instanceof Error ? error2.message : String(error2);
       session.updatedAt = (/* @__PURE__ */ new Date()).toISOString();
+      logger.error("session.turn.failed", {
+        sessionId: session.id,
+        error: errorForLog(error2)
+      });
       throw error2;
     } finally {
       session.controller = void 0;
@@ -22823,11 +23102,45 @@ function jsonResult(value, isError = false) {
     ]
   };
 }
+async function loggedToolCall(tool, args, extra, run) {
+  const toolCallId = makeLogId("tool");
+  const started = Date.now();
+  logger.rawDebug("mcp.tool.call", {
+    toolCallId,
+    tool,
+    hasProgressToken: extra?._meta?.progressToken !== void 0,
+    arguments: summarizeRawTrafficForLog(args)
+  });
+  try {
+    const result = await run(toolCallId);
+    logger[result.isError ? "rawError" : "rawDebug"]("mcp.tool.result", {
+      toolCallId,
+      tool,
+      durationMs: Date.now() - started,
+      isError: Boolean(result.isError),
+      result: summarizeRawTrafficForLog(result)
+    });
+    return result;
+  } catch (error2) {
+    logger.error("mcp.tool.exception", {
+      toolCallId,
+      tool,
+      durationMs: Date.now() - started,
+      error: errorForLog(error2)
+    });
+    return jsonResult({ error: error2 instanceof Error ? error2.message : String(error2) }, true);
+  }
+}
 function createProgressReporter(extra) {
   const progressToken = extra?._meta?.progressToken;
   let progress = 0;
   let pending = Promise.resolve();
   async function send(message, options = {}) {
+    logger.rawDebug("mcp.progress", {
+      hasProgressToken: progressToken !== void 0,
+      message,
+      options
+    });
     if (progressToken === void 0 || !extra) return;
     pending = pending.catch(() => {
     }).then(async () => {
@@ -22842,7 +23155,17 @@ function createProgressReporter(extra) {
           message
         }
       });
-    }).catch(() => {
+      logger.rawDebug("mcp.notification.sent", {
+        method: "notifications/progress",
+        params: {
+          progressToken,
+          progress,
+          ...options.total === void 0 ? {} : { total: options.total },
+          message
+        }
+      });
+    }).catch((error2) => {
+      logger.error("mcp.notification.failed", { error: errorForLog(error2) });
     });
     await pending;
   }
@@ -22852,6 +23175,32 @@ function createProgressReporter(extra) {
     await new Promise((resolve) => setTimeout(resolve, 0));
   }
   return { send, flush };
+}
+function installTransportLogging(transport) {
+  const previousOnMessage = transport.onmessage;
+  transport.onmessage = (message) => {
+    logger.rawDebug("mcp.transport.inbound", {
+      message: summarizeRawTrafficForLog(message)
+    });
+    previousOnMessage?.(message);
+  };
+  const previousOnError = transport.onerror;
+  transport.onerror = (error2) => {
+    logger.error("mcp.transport.error", { error: errorForLog(error2) });
+    previousOnError?.(error2);
+  };
+  const send = transport.send.bind(transport);
+  transport.send = async (message) => {
+    logger.rawDebug("mcp.transport.outbound", {
+      message: summarizeRawTrafficForLog(message)
+    });
+    try {
+      await send(message);
+    } catch (error2) {
+      logger.error("mcp.transport.send_failed", { error: errorForLog(error2) });
+      throw error2;
+    }
+  };
 }
 async function reportAgentResult(progress, result) {
   const status = result.status ?? (result.ok ? "completed" : "failed");
@@ -22957,40 +23306,45 @@ server.registerTool(
     description: "Read the operating guide for this MCP server. Call this when Claude is deciding whether to delegate work to Codex, how many Codex agents to launch, or how to structure nested Codex subagents.",
     inputSchema: {}
   },
-  async () => jsonResult({
-    guide: usageGuide,
-    examples: {
-      single: {
-        tool: "run_agent",
-        arguments: {
-          prompt: "Inspect the authentication flow read-only. Return the top risks with file paths and line references.",
-          project_dir: "/path/to/project",
-          model_preset: "spark",
-          reasoning_effort: "medium"
-        }
-      },
-      parallel: {
-        tool: "run_agents",
-        arguments: {
-          agents: [
-            {
-              name: "api",
-              prompt: "Review API flow read-only. Return concrete findings with paths.",
-              project_dir: "/path/to/project"
-            },
-            {
-              name: "tests",
-              prompt: "Review test coverage gaps read-only. Return concrete findings with paths.",
-              project_dir: "/path/to/project"
-            }
-          ],
-          max_parallel: 2,
-          model_preset: "spark",
-          reasoning_effort: "medium"
+  async (args, extra) => loggedToolCall(
+    "codex_usage_guide",
+    args,
+    extra,
+    async () => jsonResult({
+      guide: usageGuide,
+      examples: {
+        single: {
+          tool: "run_agent",
+          arguments: {
+            prompt: "Inspect the authentication flow read-only. Return the top risks with file paths and line references.",
+            project_dir: "/path/to/project",
+            model_preset: "spark",
+            reasoning_effort: "medium"
+          }
+        },
+        parallel: {
+          tool: "run_agents",
+          arguments: {
+            agents: [
+              {
+                name: "api",
+                prompt: "Review API flow read-only. Return concrete findings with paths.",
+                project_dir: "/path/to/project"
+              },
+              {
+                name: "tests",
+                prompt: "Review test coverage gaps read-only. Return concrete findings with paths.",
+                project_dir: "/path/to/project"
+              }
+            ],
+            max_parallel: 2,
+            model_preset: "spark",
+            reasoning_effort: "medium"
+          }
         }
       }
-    }
-  })
+    })
+  )
 );
 server.registerTool(
   "run_agent",
@@ -23006,26 +23360,29 @@ server.registerTool(
     }
   },
   async (args, extra) => {
-    const progress = createProgressReporter(extra);
-    try {
-      await progress.send("Queued Codex run");
-      const result = await runQueuedAgent(toRunOptions(args), {
-        onStart: (queuedMs) => {
-          void progress.send(`Started Codex run after ${queuedMs}ms queued`);
-        }
-      });
-      await reportAgentResult(progress, result);
-      await progress.flush();
-      return jsonResult({ agent: result }, !result.ok);
-    } catch (error2) {
-      await progress.flush();
-      return jsonResult(
-        {
-          error: error2 instanceof Error ? error2.message : String(error2)
-        },
-        true
-      );
-    }
+    return loggedToolCall("run_agent", args, extra, async () => {
+      const progress = createProgressReporter(extra);
+      try {
+        await progress.send("Queued Codex run");
+        const result = await runQueuedAgent(toRunOptions(args), {
+          onStart: (queuedMs) => {
+            void progress.send(`Started Codex run after ${queuedMs}ms queued`);
+          }
+        });
+        await reportAgentResult(progress, result);
+        await progress.flush();
+        return jsonResult({ agent: result }, !result.ok);
+      } catch (error2) {
+        await progress.flush();
+        logger.error("run_agent.failed", { error: errorForLog(error2) });
+        return jsonResult(
+          {
+            error: error2 instanceof Error ? error2.message : String(error2)
+          },
+          true
+        );
+      }
+    });
   }
 );
 server.registerTool(
@@ -23040,17 +23397,20 @@ server.registerTool(
     }
   },
   async (args, extra) => {
-    const progress = createProgressReporter(extra);
-    try {
-      await progress.send("Queued asynchronous Codex run");
-      const job = jobManager.startAgent(toRunOptions(args));
-      await progress.send(`Started Codex job ${job.id}`);
-      await progress.flush();
-      return jsonResult({ job });
-    } catch (error2) {
-      await progress.flush();
-      return jsonResult({ error: error2 instanceof Error ? error2.message : String(error2) }, true);
-    }
+    return loggedToolCall("start_agent_run", args, extra, async () => {
+      const progress = createProgressReporter(extra);
+      try {
+        await progress.send("Queued asynchronous Codex run");
+        const job = jobManager.startAgent(toRunOptions(args));
+        await progress.send(`Started Codex job ${job.id}`);
+        await progress.flush();
+        return jsonResult({ job });
+      } catch (error2) {
+        await progress.flush();
+        logger.error("start_agent_run.failed", { error: errorForLog(error2) });
+        return jsonResult({ error: error2 instanceof Error ? error2.message : String(error2) }, true);
+      }
+    });
   }
 );
 var parallelAgentSchema = external_exports.object({
@@ -23103,42 +23463,45 @@ server.registerTool(
     }
   },
   async (args, extra) => {
-    const progress = createProgressReporter(extra);
-    try {
-      const total = args.agents.length * 2 + 1;
-      let completed = 0;
-      let failed = 0;
-      await progress.send(`Queued ${args.agents.length} Codex agents`, { total });
-      const results = await runQueuedAgents(toParallelRunOptions(args), {
-        onStart: (queuedMs, label) => {
-          void progress.send(`Started ${label ?? "Codex agent"} after ${queuedMs}ms queued`, { total });
-        },
-        onComplete: async (result) => {
-          completed += 1;
-          if (!result.ok) failed += 1;
-          const last = completed === args.agents.length;
-          const message = last ? failed === 0 ? `Parallel Codex run completed (${completed}/${args.agents.length})` : `Parallel Codex run finished with errors (${completed}/${args.agents.length})` : `${result.ok ? "Completed" : "Finished"} ${result.name ?? "Codex agent"} (${completed}/${args.agents.length})`;
-          await progress.send(message, last ? { progress: total, total } : { total });
-        }
-      });
-      const ok = results.every((result) => result.ok);
-      await progress.flush();
-      return jsonResult(
-        {
-          ok,
-          agents: results
-        },
-        !ok
-      );
-    } catch (error2) {
-      await progress.flush();
-      return jsonResult(
-        {
-          error: error2 instanceof Error ? error2.message : String(error2)
-        },
-        true
-      );
-    }
+    return loggedToolCall("run_agents", args, extra, async () => {
+      const progress = createProgressReporter(extra);
+      try {
+        const total = args.agents.length * 2 + 1;
+        let completed = 0;
+        let failed = 0;
+        await progress.send(`Queued ${args.agents.length} Codex agents`, { total });
+        const results = await runQueuedAgents(toParallelRunOptions(args), {
+          onStart: (queuedMs, label) => {
+            void progress.send(`Started ${label ?? "Codex agent"} after ${queuedMs}ms queued`, { total });
+          },
+          onComplete: async (result) => {
+            completed += 1;
+            if (!result.ok) failed += 1;
+            const last = completed === args.agents.length;
+            const message = last ? failed === 0 ? `Parallel Codex run completed (${completed}/${args.agents.length})` : `Parallel Codex run finished with errors (${completed}/${args.agents.length})` : `${result.ok ? "Completed" : "Finished"} ${result.name ?? "Codex agent"} (${completed}/${args.agents.length})`;
+            await progress.send(message, last ? { progress: total, total } : { total });
+          }
+        });
+        const ok = results.every((result) => result.ok);
+        await progress.flush();
+        return jsonResult(
+          {
+            ok,
+            agents: results
+          },
+          !ok
+        );
+      } catch (error2) {
+        await progress.flush();
+        logger.error("run_agents.failed", { error: errorForLog(error2) });
+        return jsonResult(
+          {
+            error: error2 instanceof Error ? error2.message : String(error2)
+          },
+          true
+        );
+      }
+    });
   }
 );
 server.registerTool(
@@ -23153,38 +23516,41 @@ server.registerTool(
     }
   },
   async (args, extra) => {
-    const progress = createProgressReporter(extra);
-    try {
-      const total = args.agents.length * 2 + 1;
-      let completed = 0;
-      await progress.send(`Queued ${args.agents.length} Codex agents for aggregation`, { total });
-      const results = await runQueuedAgents(toParallelRunOptions(args), {
-        onStart: (queuedMs, label) => {
-          void progress.send(`Started ${label ?? "Codex agent"} after ${queuedMs}ms queued`, { total });
-        },
-        onComplete: async () => {
-          completed += 1;
-          const last = completed === args.agents.length;
-          await progress.send(
-            last ? `Aggregating ${completed}/${args.agents.length} Codex results` : `Completed ${completed}/${args.agents.length} Codex agents`,
-            last ? { progress: total, total } : { total }
-          );
-        }
-      });
-      const aggregation = aggregateAgentResults(results);
-      await progress.flush();
-      return jsonResult(
-        {
-          ok: aggregation.ok,
-          aggregation,
-          agents: results
-        },
-        !aggregation.ok
-      );
-    } catch (error2) {
-      await progress.flush();
-      return jsonResult({ error: error2 instanceof Error ? error2.message : String(error2) }, true);
-    }
+    return loggedToolCall("run_agents_aggregate", args, extra, async () => {
+      const progress = createProgressReporter(extra);
+      try {
+        const total = args.agents.length * 2 + 1;
+        let completed = 0;
+        await progress.send(`Queued ${args.agents.length} Codex agents for aggregation`, { total });
+        const results = await runQueuedAgents(toParallelRunOptions(args), {
+          onStart: (queuedMs, label) => {
+            void progress.send(`Started ${label ?? "Codex agent"} after ${queuedMs}ms queued`, { total });
+          },
+          onComplete: async () => {
+            completed += 1;
+            const last = completed === args.agents.length;
+            await progress.send(
+              last ? `Aggregating ${completed}/${args.agents.length} Codex results` : `Completed ${completed}/${args.agents.length} Codex agents`,
+              last ? { progress: total, total } : { total }
+            );
+          }
+        });
+        const aggregation = aggregateAgentResults(results);
+        await progress.flush();
+        return jsonResult(
+          {
+            ok: aggregation.ok,
+            aggregation,
+            agents: results
+          },
+          !aggregation.ok
+        );
+      } catch (error2) {
+        await progress.flush();
+        logger.error("run_agents_aggregate.failed", { error: errorForLog(error2) });
+        return jsonResult({ error: error2 instanceof Error ? error2.message : String(error2) }, true);
+      }
+    });
   }
 );
 server.registerTool(
@@ -23199,17 +23565,20 @@ server.registerTool(
     }
   },
   async (args, extra) => {
-    const progress = createProgressReporter(extra);
-    try {
-      await progress.send(`Queued asynchronous run for ${args.agents.length} Codex agents`);
-      const job = jobManager.startAgents(toParallelRunOptions(args));
-      await progress.send(`Started Codex job ${job.id}`);
-      await progress.flush();
-      return jsonResult({ job });
-    } catch (error2) {
-      await progress.flush();
-      return jsonResult({ error: error2 instanceof Error ? error2.message : String(error2) }, true);
-    }
+    return loggedToolCall("start_agents_run", args, extra, async () => {
+      const progress = createProgressReporter(extra);
+      try {
+        await progress.send(`Queued asynchronous run for ${args.agents.length} Codex agents`);
+        const job = jobManager.startAgents(toParallelRunOptions(args));
+        await progress.send(`Started Codex job ${job.id}`);
+        await progress.flush();
+        return jsonResult({ job });
+      } catch (error2) {
+        await progress.flush();
+        logger.error("start_agents_run.failed", { error: errorForLog(error2) });
+        return jsonResult({ error: error2 instanceof Error ? error2.message : String(error2) }, true);
+      }
+    });
   }
 );
 var jobIdSchema = external_exports.string().trim().min(1).describe("Job id returned by start_agent_run or start_agents_run.");
@@ -23223,15 +23592,17 @@ server.registerTool(
     }
   },
   async (args, extra) => {
-    const progress = createProgressReporter(extra);
-    await progress.send(`Checking Codex job ${args.job_id}`);
-    await progress.flush();
-    const job = jobManager.get(args.job_id);
-    if (!job) {
+    return loggedToolCall("get_agent_run", args, extra, async () => {
+      const progress = createProgressReporter(extra);
+      await progress.send(`Checking Codex job ${args.job_id}`);
       await progress.flush();
-      return jsonResult({ error: `Unknown job_id: ${args.job_id}` }, true);
-    }
-    return jsonResult({ job });
+      const job = jobManager.get(args.job_id);
+      if (!job) {
+        await progress.flush();
+        return jsonResult({ error: `Unknown job_id: ${args.job_id}` }, true);
+      }
+      return jsonResult({ job });
+    });
   }
 );
 server.registerTool(
@@ -23245,24 +23616,26 @@ server.registerTool(
     }
   },
   async (args, extra) => {
-    const progress = createProgressReporter(extra);
-    await progress.send(`Waiting for Codex job ${args.job_id}`);
-    const started = Date.now();
-    let job = jobManager.get(args.job_id);
-    while (job && !job.completedAt && Date.now() - started < args.timeout_ms) {
-      const remaining = args.timeout_ms - (Date.now() - started);
-      await new Promise((resolve) => setTimeout(resolve, Math.min(1e3, Math.max(1, remaining))));
-      job = jobManager.get(args.job_id);
-      if (job) await progress.send(`Codex job ${job.status}`);
-    }
-    if (job && !job.completedAt) {
-      const waitedJob = await jobManager.wait(args.job_id, 1);
-      job = waitedJob ?? job;
-    }
-    if (!job) return jsonResult({ error: `Unknown job_id: ${args.job_id}` }, true);
-    if (job.completedAt) await progress.send(`Codex job ${job.status}`);
-    await progress.flush();
-    return jsonResult({ job }, job.status === "failed" || job.status === "cancelled");
+    return loggedToolCall("wait_agent_run", args, extra, async () => {
+      const progress = createProgressReporter(extra);
+      await progress.send(`Waiting for Codex job ${args.job_id}`);
+      const started = Date.now();
+      let job = jobManager.get(args.job_id);
+      while (job && !job.completedAt && Date.now() - started < args.timeout_ms) {
+        const remaining = args.timeout_ms - (Date.now() - started);
+        await new Promise((resolve) => setTimeout(resolve, Math.min(1e3, Math.max(1, remaining))));
+        job = jobManager.get(args.job_id);
+        if (job) await progress.send(`Codex job ${job.status}`);
+      }
+      if (job && !job.completedAt) {
+        const waitedJob = await jobManager.wait(args.job_id, 1);
+        job = waitedJob ?? job;
+      }
+      if (!job) return jsonResult({ error: `Unknown job_id: ${args.job_id}` }, true);
+      if (job.completedAt) await progress.send(`Codex job ${job.status}`);
+      await progress.flush();
+      return jsonResult({ job }, job.status === "failed" || job.status === "cancelled");
+    });
   }
 );
 server.registerTool(
@@ -23275,12 +23648,14 @@ server.registerTool(
     }
   },
   async (args, extra) => {
-    const progress = createProgressReporter(extra);
-    await progress.send(`Cancelling Codex job ${args.job_id}`);
-    await progress.flush();
-    const job = jobManager.cancel(args.job_id);
-    if (!job) return jsonResult({ error: `Unknown job_id: ${args.job_id}` }, true);
-    return jsonResult({ job });
+    return loggedToolCall("cancel_agent_run", args, extra, async () => {
+      const progress = createProgressReporter(extra);
+      await progress.send(`Cancelling Codex job ${args.job_id}`);
+      await progress.flush();
+      const job = jobManager.cancel(args.job_id);
+      if (!job) return jsonResult({ error: `Unknown job_id: ${args.job_id}` }, true);
+      return jsonResult({ job });
+    });
   }
 );
 var sessionIdSchema = external_exports.string().trim().min(1).describe("Session id returned by start_session.");
@@ -23297,23 +23672,26 @@ server.registerTool(
     }
   },
   async (args, extra) => {
-    const progress = createProgressReporter(extra);
-    try {
-      await progress.send("Starting persistent Codex session");
-      const { session, result } = await sessionManager.start(
-        {
-          ...toRunOptions(args),
-          ephemeral: false
-        },
-        { sessionName: args.session_name }
-      );
-      await reportAgentResult(progress, result);
-      await progress.flush();
-      return jsonResult({ session, agent: result }, !result.ok);
-    } catch (error2) {
-      await progress.flush();
-      return jsonResult({ error: error2 instanceof Error ? error2.message : String(error2) }, true);
-    }
+    return loggedToolCall("start_session", args, extra, async () => {
+      const progress = createProgressReporter(extra);
+      try {
+        await progress.send("Starting persistent Codex session");
+        const { session, result } = await sessionManager.start(
+          {
+            ...toRunOptions(args),
+            ephemeral: false
+          },
+          { sessionName: args.session_name }
+        );
+        await reportAgentResult(progress, result);
+        await progress.flush();
+        return jsonResult({ session, agent: result }, !result.ok);
+      } catch (error2) {
+        await progress.flush();
+        logger.error("start_session.failed", { error: errorForLog(error2) });
+        return jsonResult({ error: error2 instanceof Error ? error2.message : String(error2) }, true);
+      }
+    });
   }
 );
 server.registerTool(
@@ -23328,21 +23706,24 @@ server.registerTool(
     }
   },
   async (args, extra) => {
-    const progress = createProgressReporter(extra);
-    try {
-      await progress.send(`Resuming Codex session ${args.session_id}`);
-      const { session, result, error: error2 } = await sessionManager.send(args.session_id, args.prompt, toRunOptions(args));
-      if (error2 || !session || !result) {
+    return loggedToolCall("send_session_prompt", args, extra, async () => {
+      const progress = createProgressReporter(extra);
+      try {
+        await progress.send(`Resuming Codex session ${args.session_id}`);
+        const { session, result, error: error2 } = await sessionManager.send(args.session_id, args.prompt, toRunOptions(args));
+        if (error2 || !session || !result) {
+          await progress.flush();
+          return jsonResult({ error: error2, session }, true);
+        }
+        await reportAgentResult(progress, result);
         await progress.flush();
-        return jsonResult({ error: error2, session }, true);
+        return jsonResult({ session, agent: result }, !result.ok);
+      } catch (error2) {
+        await progress.flush();
+        logger.error("send_session_prompt.failed", { error: errorForLog(error2) });
+        return jsonResult({ error: error2 instanceof Error ? error2.message : String(error2) }, true);
       }
-      await reportAgentResult(progress, result);
-      await progress.flush();
-      return jsonResult({ session, agent: result }, !result.ok);
-    } catch (error2) {
-      await progress.flush();
-      return jsonResult({ error: error2 instanceof Error ? error2.message : String(error2) }, true);
-    }
+    });
   }
 );
 server.registerTool(
@@ -23354,11 +23735,11 @@ server.registerTool(
       session_id: sessionIdSchema
     }
   },
-  async (args) => {
+  async (args, extra) => loggedToolCall("get_session", args, extra, async () => {
     const session = sessionManager.get(args.session_id);
     if (!session) return jsonResult({ error: `Unknown session_id: ${args.session_id}` }, true);
     return jsonResult({ session });
-  }
+  })
 );
 server.registerTool(
   "list_sessions",
@@ -23367,7 +23748,12 @@ server.registerTool(
     description: "List persistent Codex sessions held by this daemonless MCP server process.",
     inputSchema: {}
   },
-  async () => jsonResult({ sessions: sessionManager.list() })
+  async (args, extra) => loggedToolCall(
+    "list_sessions",
+    args,
+    extra,
+    async () => jsonResult({ sessions: sessionManager.list() })
+  )
 );
 server.registerTool(
   "cancel_session",
@@ -23378,11 +23764,11 @@ server.registerTool(
       session_id: sessionIdSchema
     }
   },
-  async (args) => {
+  async (args, extra) => loggedToolCall("cancel_session", args, extra, async () => {
     const session = sessionManager.cancel(args.session_id);
     if (!session) return jsonResult({ error: `Unknown session_id: ${args.session_id}` }, true);
     return jsonResult({ session });
-  }
+  })
 );
 server.registerTool(
   "codex_status",
@@ -23393,7 +23779,7 @@ server.registerTool(
       codex_bin: commonInputSchema.codex_bin
     }
   },
-  async (args) => {
+  async (args, extra) => loggedToolCall("codex_status", args, extra, async () => {
     try {
       const status = await probeCodexVersion(args.codex_bin);
       return jsonResult({
@@ -23418,6 +23804,7 @@ server.registerTool(
         queue: jobManager.stats()
       });
     } catch (error2) {
+      logger.error("codex_status.failed", { error: errorForLog(error2) });
       return jsonResult(
         {
           ok: false,
@@ -23426,7 +23813,7 @@ server.registerTool(
         true
       );
     }
-  }
+  })
 );
 server.registerTool(
   "codex_doctor",
@@ -23438,7 +23825,7 @@ server.registerTool(
       project_dir: commonInputSchema.project_dir
     }
   },
-  async (args) => {
+  async (args, extra) => loggedToolCall("codex_doctor", args, extra, async () => {
     const checks = [];
     let ok = true;
     try {
@@ -23451,6 +23838,7 @@ server.registerTool(
       if (status.error) ok = false;
     } catch (error2) {
       ok = false;
+      logger.error("codex_doctor.binary_failed", { error: errorForLog(error2) });
       checks.push({
         name: "codex_binary",
         ok: false,
@@ -23466,6 +23854,7 @@ server.registerTool(
       });
     } catch (error2) {
       ok = false;
+      logger.error("codex_doctor.project_dir_failed", { error: errorForLog(error2) });
       checks.push({ name: "project_dir", ok: false, detail: String(error2) });
     }
     checks.push({
@@ -23493,7 +23882,7 @@ server.registerTool(
         mcpConfigPolicies
       }
     });
-  }
+  })
 );
 server.registerPrompt(
   "codex_agent",
@@ -23507,26 +23896,34 @@ server.registerPrompt(
       model_preset: modelPresetSchema.optional().describe("Optional model preset, such as spark.")
     }
   },
-  ({ prompt, model, reasoning_effort, model_preset }) => ({
-    messages: [
-      {
-        role: "user",
-        content: {
-          type: "text",
-          text: [
-            "Use the codex-subagents MCP tool `run_agent` for this task.",
-            "Keep the sandbox read-only unless I explicitly ask for another sandbox or full non-sandbox access.",
-            "For full non-sandbox access, set dangerously_bypass_approvals_and_sandbox true.",
-            model ? `Use model ${model}.` : "Use the configured Codex model default.",
-            model_preset ? `Use model_preset ${model_preset}.` : "",
-            reasoning_effort ? `Use reasoning_effort ${reasoning_effort}.` : "Use reasoning_effort medium unless the task clearly needs more.",
-            "",
-            prompt
-          ].join("\n")
+  ({ prompt, model, reasoning_effort, model_preset }) => {
+    const promptResult = {
+      messages: [
+        {
+          role: "user",
+          content: {
+            type: "text",
+            text: [
+              "Use the codex-subagents MCP tool `run_agent` for this task.",
+              "Keep the sandbox read-only unless I explicitly ask for another sandbox or full non-sandbox access.",
+              "For full non-sandbox access, set dangerously_bypass_approvals_and_sandbox true.",
+              model ? `Use model ${model}.` : "Use the configured Codex model default.",
+              model_preset ? `Use model_preset ${model_preset}.` : "",
+              reasoning_effort ? `Use reasoning_effort ${reasoning_effort}.` : "Use reasoning_effort medium unless the task clearly needs more.",
+              "",
+              prompt
+            ].join("\n")
+          }
         }
-      }
-    ]
-  })
+      ]
+    };
+    logger.rawDebug("mcp.prompt.result", {
+      prompt: "codex_agent",
+      arguments: summarizeRawTrafficForLog({ prompt, model, reasoning_effort, model_preset }),
+      result: summarizeRawTrafficForLog(promptResult)
+    });
+    return promptResult;
+  }
 );
 server.registerPrompt(
   "codex_parallel",
@@ -23539,38 +23936,51 @@ server.registerPrompt(
       model_preset: modelPresetSchema.optional().describe("Optional model preset for all agents.")
     }
   },
-  ({ prompt, max_parallel, model_preset }) => ({
-    messages: [
-      {
-        role: "user",
-        content: {
-          type: "text",
-          text: [
-            "Use the codex-subagents MCP tool `run_agents` for this task.",
-            "Create one agent object per independent workstream and run them read-only unless I explicitly ask for full non-sandbox access.",
-            "For full non-sandbox access, set dangerously_bypass_approvals_and_sandbox true.",
-            max_parallel ? `Use max_parallel ${max_parallel}.` : "Use max_parallel 4 unless fewer agents are needed.",
-            model_preset ? `Use model_preset ${model_preset} unless an agent needs a different model.` : "",
-            "Ask each Codex agent for concise findings with file paths and line references when relevant.",
-            "",
-            prompt
-          ].join("\n")
+  ({ prompt, max_parallel, model_preset }) => {
+    const promptResult = {
+      messages: [
+        {
+          role: "user",
+          content: {
+            type: "text",
+            text: [
+              "Use the codex-subagents MCP tool `run_agents` for this task.",
+              "Create one agent object per independent workstream and run them read-only unless I explicitly ask for full non-sandbox access.",
+              "For full non-sandbox access, set dangerously_bypass_approvals_and_sandbox true.",
+              max_parallel ? `Use max_parallel ${max_parallel}.` : "Use max_parallel 4 unless fewer agents are needed.",
+              model_preset ? `Use model_preset ${model_preset} unless an agent needs a different model.` : "",
+              "Ask each Codex agent for concise findings with file paths and line references when relevant.",
+              "",
+              prompt
+            ].join("\n")
+          }
         }
-      }
-    ]
-  })
+      ]
+    };
+    logger.rawDebug("mcp.prompt.result", {
+      prompt: "codex_parallel",
+      arguments: summarizeRawTrafficForLog({ prompt, max_parallel, model_preset }),
+      result: summarizeRawTrafficForLog(promptResult)
+    });
+    return promptResult;
+  }
 );
 async function main() {
   process.on("unhandledRejection", (error2) => {
-    console.error("codex-subagents unhandled rejection", error2);
+    logger.error("process.unhandled_rejection", { error: errorForLog(error2) });
   });
   process.on("uncaughtException", (error2) => {
-    console.error("codex-subagents uncaught exception", error2);
+    logger.error("process.uncaught_exception", { error: errorForLog(error2) });
+  });
+  logger.info("server.starting", {
+    logLevel: process.env.CODEX_SUBAGENTS_LOG_LEVEL ?? process.env.CODEX_SUBAGENTS_LOG ?? "debug"
   });
   const transport = new StdioServerTransport();
+  installTransportLogging(transport);
   await server.connect(transport);
+  logger.info("server.connected", { transport: "stdio" });
 }
 main().catch((error2) => {
-  console.error(error2);
+  logger.error("server.start_failed", { error: errorForLog(error2) });
   process.exit(1);
 });

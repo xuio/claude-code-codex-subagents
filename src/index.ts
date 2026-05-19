@@ -1,7 +1,7 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import type { RequestHandlerExtra } from "@modelcontextprotocol/sdk/shared/protocol.js";
-import type { CallToolResult, ServerNotification, ServerRequest } from "@modelcontextprotocol/sdk/types.js";
+import type { CallToolResult, JSONRPCMessage, ServerNotification, ServerRequest } from "@modelcontextprotocol/sdk/types.js";
 import { z } from "zod";
 import {
   defaultModel,
@@ -18,6 +18,7 @@ import {
 import { aggregateAgentResults } from "./aggregate.js";
 import { cleanOption } from "./binary.js";
 import { jobManager, runQueuedAgent, runQueuedAgents } from "./jobs.js";
+import { errorForLog, logger, makeLogId, summarizeRawTrafficForLog } from "./logging.js";
 import { sessionManager } from "./sessions.js";
 import { modelPresets } from "./subagents.js";
 
@@ -339,12 +340,53 @@ function jsonResult(value: Record<string, unknown>, isError = false): CallToolRe
   };
 }
 
+async function loggedToolCall(
+  tool: string,
+  args: unknown,
+  extra: ToolExtra | undefined,
+  run: (toolCallId: string) => Promise<CallToolResult>,
+): Promise<CallToolResult> {
+  const toolCallId = makeLogId("tool");
+  const started = Date.now();
+  logger.rawDebug("mcp.tool.call", {
+    toolCallId,
+    tool,
+    hasProgressToken: extra?._meta?.progressToken !== undefined,
+    arguments: summarizeRawTrafficForLog(args),
+  });
+
+  try {
+    const result = await run(toolCallId);
+    logger[result.isError ? "rawError" : "rawDebug"]("mcp.tool.result", {
+      toolCallId,
+      tool,
+      durationMs: Date.now() - started,
+      isError: Boolean(result.isError),
+      result: summarizeRawTrafficForLog(result),
+    });
+    return result;
+  } catch (error) {
+    logger.error("mcp.tool.exception", {
+      toolCallId,
+      tool,
+      durationMs: Date.now() - started,
+      error: errorForLog(error),
+    });
+    return jsonResult({ error: error instanceof Error ? error.message : String(error) }, true);
+  }
+}
+
 function createProgressReporter(extra: ToolExtra | undefined) {
   const progressToken = extra?._meta?.progressToken;
   let progress = 0;
   let pending = Promise.resolve();
 
   async function send(message: string, options: { progress?: number; total?: number } = {}) {
+    logger.rawDebug("mcp.progress", {
+      hasProgressToken: progressToken !== undefined,
+      message,
+      options,
+    });
     if (progressToken === undefined || !extra) return;
 
     pending = pending
@@ -361,8 +403,18 @@ function createProgressReporter(extra: ToolExtra | undefined) {
             message,
           },
         });
+        logger.rawDebug("mcp.notification.sent", {
+          method: "notifications/progress",
+          params: {
+            progressToken,
+            progress,
+            ...(options.total === undefined ? {} : { total: options.total }),
+            message,
+          },
+        });
       })
-      .catch(() => {
+      .catch((error) => {
+        logger.error("mcp.notification.failed", { error: errorForLog(error) });
         // Progress is best-effort; a failed notification must not fail the tool call.
       });
 
@@ -376,6 +428,35 @@ function createProgressReporter(extra: ToolExtra | undefined) {
   }
 
   return { send, flush };
+}
+
+function installTransportLogging(transport: StdioServerTransport): void {
+  const previousOnMessage = transport.onmessage;
+  transport.onmessage = (message) => {
+    logger.rawDebug("mcp.transport.inbound", {
+      message: summarizeRawTrafficForLog(message),
+    });
+    previousOnMessage?.(message);
+  };
+
+  const previousOnError = transport.onerror;
+  transport.onerror = (error) => {
+    logger.error("mcp.transport.error", { error: errorForLog(error) });
+    previousOnError?.(error);
+  };
+
+  const send = transport.send.bind(transport);
+  transport.send = async (message: JSONRPCMessage): Promise<void> => {
+    logger.rawDebug("mcp.transport.outbound", {
+      message: summarizeRawTrafficForLog(message),
+    });
+    try {
+      await send(message);
+    } catch (error) {
+      logger.error("mcp.transport.send_failed", { error: errorForLog(error) });
+      throw error;
+    }
+  };
 }
 
 async function reportAgentResult(progress: ProgressReporter, result: { ok?: boolean; status?: string }) {
@@ -577,42 +658,44 @@ server.registerTool(
       "Read the operating guide for this MCP server. Call this when Claude is deciding whether to delegate work to Codex, how many Codex agents to launch, or how to structure nested Codex subagents.",
     inputSchema: {},
   },
-  async () =>
-    jsonResult({
-      guide: usageGuide,
-      examples: {
-        single: {
-          tool: "run_agent",
-          arguments: {
-            prompt:
-              "Inspect the authentication flow read-only. Return the top risks with file paths and line references.",
-            project_dir: "/path/to/project",
-            model_preset: "spark",
-            reasoning_effort: "medium",
+  async (args, extra) =>
+    loggedToolCall("codex_usage_guide", args, extra, async () =>
+      jsonResult({
+        guide: usageGuide,
+        examples: {
+          single: {
+            tool: "run_agent",
+            arguments: {
+              prompt:
+                "Inspect the authentication flow read-only. Return the top risks with file paths and line references.",
+              project_dir: "/path/to/project",
+              model_preset: "spark",
+              reasoning_effort: "medium",
+            },
+          },
+          parallel: {
+            tool: "run_agents",
+            arguments: {
+              agents: [
+                {
+                  name: "api",
+                  prompt: "Review API flow read-only. Return concrete findings with paths.",
+                  project_dir: "/path/to/project",
+                },
+                {
+                  name: "tests",
+                  prompt: "Review test coverage gaps read-only. Return concrete findings with paths.",
+                  project_dir: "/path/to/project",
+                },
+              ],
+              max_parallel: 2,
+              model_preset: "spark",
+              reasoning_effort: "medium",
+            },
           },
         },
-        parallel: {
-          tool: "run_agents",
-          arguments: {
-            agents: [
-              {
-                name: "api",
-                prompt: "Review API flow read-only. Return concrete findings with paths.",
-                project_dir: "/path/to/project",
-              },
-              {
-                name: "tests",
-                prompt: "Review test coverage gaps read-only. Return concrete findings with paths.",
-                project_dir: "/path/to/project",
-              },
-            ],
-            max_parallel: 2,
-            model_preset: "spark",
-            reasoning_effort: "medium",
-          },
-        },
-      },
-    }),
+      }),
+    ),
 );
 
 server.registerTool(
@@ -633,26 +716,29 @@ server.registerTool(
     },
   },
   async (args, extra) => {
-    const progress = createProgressReporter(extra);
-    try {
-      await progress.send("Queued Codex run");
-      const result = await runQueuedAgent(toRunOptions(args), {
-        onStart: (queuedMs) => {
-          void progress.send(`Started Codex run after ${queuedMs}ms queued`);
-        },
-      });
-      await reportAgentResult(progress, result);
-      await progress.flush();
-      return jsonResult({ agent: result }, !result.ok);
-    } catch (error) {
-      await progress.flush();
-      return jsonResult(
-        {
-          error: error instanceof Error ? error.message : String(error),
-        },
-        true,
-      );
-    }
+    return loggedToolCall("run_agent", args, extra, async () => {
+      const progress = createProgressReporter(extra);
+      try {
+        await progress.send("Queued Codex run");
+        const result = await runQueuedAgent(toRunOptions(args), {
+          onStart: (queuedMs) => {
+            void progress.send(`Started Codex run after ${queuedMs}ms queued`);
+          },
+        });
+        await reportAgentResult(progress, result);
+        await progress.flush();
+        return jsonResult({ agent: result }, !result.ok);
+      } catch (error) {
+        await progress.flush();
+        logger.error("run_agent.failed", { error: errorForLog(error) });
+        return jsonResult(
+          {
+            error: error instanceof Error ? error.message : String(error),
+          },
+          true,
+        );
+      }
+    });
   },
 );
 
@@ -672,17 +758,20 @@ server.registerTool(
     },
   },
   async (args, extra) => {
-    const progress = createProgressReporter(extra);
-    try {
-      await progress.send("Queued asynchronous Codex run");
-      const job = jobManager.startAgent(toRunOptions(args));
-      await progress.send(`Started Codex job ${job.id}`);
-      await progress.flush();
-      return jsonResult({ job });
-    } catch (error) {
-      await progress.flush();
-      return jsonResult({ error: error instanceof Error ? error.message : String(error) }, true);
-    }
+    return loggedToolCall("start_agent_run", args, extra, async () => {
+      const progress = createProgressReporter(extra);
+      try {
+        await progress.send("Queued asynchronous Codex run");
+        const job = jobManager.startAgent(toRunOptions(args));
+        await progress.send(`Started Codex job ${job.id}`);
+        await progress.flush();
+        return jsonResult({ job });
+      } catch (error) {
+        await progress.flush();
+        logger.error("start_agent_run.failed", { error: errorForLog(error) });
+        return jsonResult({ error: error instanceof Error ? error.message : String(error) }, true);
+      }
+    });
   },
 );
 
@@ -752,46 +841,49 @@ server.registerTool(
     },
   },
   async (args, extra) => {
-    const progress = createProgressReporter(extra);
-    try {
-      const total = args.agents.length * 2 + 1;
-      let completed = 0;
-      let failed = 0;
-      await progress.send(`Queued ${args.agents.length} Codex agents`, { total });
-      const results = await runQueuedAgents(toParallelRunOptions(args), {
-        onStart: (queuedMs, label) => {
-          void progress.send(`Started ${label ?? "Codex agent"} after ${queuedMs}ms queued`, { total });
-        },
-        onComplete: async (result) => {
-          completed += 1;
-          if (!result.ok) failed += 1;
-          const last = completed === args.agents.length;
-          const message = last
-            ? failed === 0
-              ? `Parallel Codex run completed (${completed}/${args.agents.length})`
-              : `Parallel Codex run finished with errors (${completed}/${args.agents.length})`
-            : `${result.ok ? "Completed" : "Finished"} ${result.name ?? "Codex agent"} (${completed}/${args.agents.length})`;
-          await progress.send(message, last ? { progress: total, total } : { total });
-        },
-      });
-      const ok = results.every((result) => result.ok);
-      await progress.flush();
-      return jsonResult(
-        {
-          ok,
-          agents: results,
-        },
-        !ok,
-      );
-    } catch (error) {
-      await progress.flush();
-      return jsonResult(
-        {
-          error: error instanceof Error ? error.message : String(error),
-        },
-        true,
-      );
-    }
+    return loggedToolCall("run_agents", args, extra, async () => {
+      const progress = createProgressReporter(extra);
+      try {
+        const total = args.agents.length * 2 + 1;
+        let completed = 0;
+        let failed = 0;
+        await progress.send(`Queued ${args.agents.length} Codex agents`, { total });
+        const results = await runQueuedAgents(toParallelRunOptions(args), {
+          onStart: (queuedMs, label) => {
+            void progress.send(`Started ${label ?? "Codex agent"} after ${queuedMs}ms queued`, { total });
+          },
+          onComplete: async (result) => {
+            completed += 1;
+            if (!result.ok) failed += 1;
+            const last = completed === args.agents.length;
+            const message = last
+              ? failed === 0
+                ? `Parallel Codex run completed (${completed}/${args.agents.length})`
+                : `Parallel Codex run finished with errors (${completed}/${args.agents.length})`
+              : `${result.ok ? "Completed" : "Finished"} ${result.name ?? "Codex agent"} (${completed}/${args.agents.length})`;
+            await progress.send(message, last ? { progress: total, total } : { total });
+          },
+        });
+        const ok = results.every((result) => result.ok);
+        await progress.flush();
+        return jsonResult(
+          {
+            ok,
+            agents: results,
+          },
+          !ok,
+        );
+      } catch (error) {
+        await progress.flush();
+        logger.error("run_agents.failed", { error: errorForLog(error) });
+        return jsonResult(
+          {
+            error: error instanceof Error ? error.message : String(error),
+          },
+          true,
+        );
+      }
+    });
   },
 );
 
@@ -812,40 +904,43 @@ server.registerTool(
     },
   },
   async (args, extra) => {
-    const progress = createProgressReporter(extra);
-    try {
-      const total = args.agents.length * 2 + 1;
-      let completed = 0;
-      await progress.send(`Queued ${args.agents.length} Codex agents for aggregation`, { total });
-      const results = await runQueuedAgents(toParallelRunOptions(args), {
-        onStart: (queuedMs, label) => {
-          void progress.send(`Started ${label ?? "Codex agent"} after ${queuedMs}ms queued`, { total });
-        },
-        onComplete: async () => {
-          completed += 1;
-          const last = completed === args.agents.length;
-          await progress.send(
-            last
-              ? `Aggregating ${completed}/${args.agents.length} Codex results`
-              : `Completed ${completed}/${args.agents.length} Codex agents`,
-            last ? { progress: total, total } : { total },
-          );
-        },
-      });
-      const aggregation = aggregateAgentResults(results);
-      await progress.flush();
-      return jsonResult(
-        {
-          ok: aggregation.ok,
-          aggregation,
-          agents: results,
-        },
-        !aggregation.ok,
-      );
-    } catch (error) {
-      await progress.flush();
-      return jsonResult({ error: error instanceof Error ? error.message : String(error) }, true);
-    }
+    return loggedToolCall("run_agents_aggregate", args, extra, async () => {
+      const progress = createProgressReporter(extra);
+      try {
+        const total = args.agents.length * 2 + 1;
+        let completed = 0;
+        await progress.send(`Queued ${args.agents.length} Codex agents for aggregation`, { total });
+        const results = await runQueuedAgents(toParallelRunOptions(args), {
+          onStart: (queuedMs, label) => {
+            void progress.send(`Started ${label ?? "Codex agent"} after ${queuedMs}ms queued`, { total });
+          },
+          onComplete: async () => {
+            completed += 1;
+            const last = completed === args.agents.length;
+            await progress.send(
+              last
+                ? `Aggregating ${completed}/${args.agents.length} Codex results`
+                : `Completed ${completed}/${args.agents.length} Codex agents`,
+              last ? { progress: total, total } : { total },
+            );
+          },
+        });
+        const aggregation = aggregateAgentResults(results);
+        await progress.flush();
+        return jsonResult(
+          {
+            ok: aggregation.ok,
+            aggregation,
+            agents: results,
+          },
+          !aggregation.ok,
+        );
+      } catch (error) {
+        await progress.flush();
+        logger.error("run_agents_aggregate.failed", { error: errorForLog(error) });
+        return jsonResult({ error: error instanceof Error ? error.message : String(error) }, true);
+      }
+    });
   },
 );
 
@@ -866,17 +961,20 @@ server.registerTool(
     },
   },
   async (args, extra) => {
-    const progress = createProgressReporter(extra);
-    try {
-      await progress.send(`Queued asynchronous run for ${args.agents.length} Codex agents`);
-      const job = jobManager.startAgents(toParallelRunOptions(args));
-      await progress.send(`Started Codex job ${job.id}`);
-      await progress.flush();
-      return jsonResult({ job });
-    } catch (error) {
-      await progress.flush();
-      return jsonResult({ error: error instanceof Error ? error.message : String(error) }, true);
-    }
+    return loggedToolCall("start_agents_run", args, extra, async () => {
+      const progress = createProgressReporter(extra);
+      try {
+        await progress.send(`Queued asynchronous run for ${args.agents.length} Codex agents`);
+        const job = jobManager.startAgents(toParallelRunOptions(args));
+        await progress.send(`Started Codex job ${job.id}`);
+        await progress.flush();
+        return jsonResult({ job });
+      } catch (error) {
+        await progress.flush();
+        logger.error("start_agents_run.failed", { error: errorForLog(error) });
+        return jsonResult({ error: error instanceof Error ? error.message : String(error) }, true);
+      }
+    });
   },
 );
 
@@ -892,15 +990,17 @@ server.registerTool(
     },
   },
   async (args, extra) => {
-    const progress = createProgressReporter(extra);
-    await progress.send(`Checking Codex job ${args.job_id}`);
-    await progress.flush();
-    const job = jobManager.get(args.job_id);
-    if (!job) {
+    return loggedToolCall("get_agent_run", args, extra, async () => {
+      const progress = createProgressReporter(extra);
+      await progress.send(`Checking Codex job ${args.job_id}`);
       await progress.flush();
-      return jsonResult({ error: `Unknown job_id: ${args.job_id}` }, true);
-    }
-    return jsonResult({ job });
+      const job = jobManager.get(args.job_id);
+      if (!job) {
+        await progress.flush();
+        return jsonResult({ error: `Unknown job_id: ${args.job_id}` }, true);
+      }
+      return jsonResult({ job });
+    });
   },
 );
 
@@ -916,24 +1016,26 @@ server.registerTool(
     },
   },
   async (args, extra) => {
-    const progress = createProgressReporter(extra);
-    await progress.send(`Waiting for Codex job ${args.job_id}`);
-    const started = Date.now();
-    let job = jobManager.get(args.job_id);
-    while (job && !job.completedAt && Date.now() - started < args.timeout_ms) {
-      const remaining = args.timeout_ms - (Date.now() - started);
-      await new Promise((resolve) => setTimeout(resolve, Math.min(1_000, Math.max(1, remaining))));
-      job = jobManager.get(args.job_id);
-      if (job) await progress.send(`Codex job ${job.status}`);
-    }
-    if (job && !job.completedAt) {
-      const waitedJob = await jobManager.wait(args.job_id, 1);
-      job = waitedJob ?? job;
-    }
-    if (!job) return jsonResult({ error: `Unknown job_id: ${args.job_id}` }, true);
-    if (job.completedAt) await progress.send(`Codex job ${job.status}`);
-    await progress.flush();
-    return jsonResult({ job }, job.status === "failed" || job.status === "cancelled");
+    return loggedToolCall("wait_agent_run", args, extra, async () => {
+      const progress = createProgressReporter(extra);
+      await progress.send(`Waiting for Codex job ${args.job_id}`);
+      const started = Date.now();
+      let job = jobManager.get(args.job_id);
+      while (job && !job.completedAt && Date.now() - started < args.timeout_ms) {
+        const remaining = args.timeout_ms - (Date.now() - started);
+        await new Promise((resolve) => setTimeout(resolve, Math.min(1_000, Math.max(1, remaining))));
+        job = jobManager.get(args.job_id);
+        if (job) await progress.send(`Codex job ${job.status}`);
+      }
+      if (job && !job.completedAt) {
+        const waitedJob = await jobManager.wait(args.job_id, 1);
+        job = waitedJob ?? job;
+      }
+      if (!job) return jsonResult({ error: `Unknown job_id: ${args.job_id}` }, true);
+      if (job.completedAt) await progress.send(`Codex job ${job.status}`);
+      await progress.flush();
+      return jsonResult({ job }, job.status === "failed" || job.status === "cancelled");
+    });
   },
 );
 
@@ -948,12 +1050,14 @@ server.registerTool(
     },
   },
   async (args, extra) => {
-    const progress = createProgressReporter(extra);
-    await progress.send(`Cancelling Codex job ${args.job_id}`);
-    await progress.flush();
-    const job = jobManager.cancel(args.job_id);
-    if (!job) return jsonResult({ error: `Unknown job_id: ${args.job_id}` }, true);
-    return jsonResult({ job });
+    return loggedToolCall("cancel_agent_run", args, extra, async () => {
+      const progress = createProgressReporter(extra);
+      await progress.send(`Cancelling Codex job ${args.job_id}`);
+      await progress.flush();
+      const job = jobManager.cancel(args.job_id);
+      if (!job) return jsonResult({ error: `Unknown job_id: ${args.job_id}` }, true);
+      return jsonResult({ job });
+    });
   },
 );
 
@@ -973,23 +1077,26 @@ server.registerTool(
     },
   },
   async (args, extra) => {
-    const progress = createProgressReporter(extra);
-    try {
-      await progress.send("Starting persistent Codex session");
-      const { session, result } = await sessionManager.start(
-        {
-          ...toRunOptions(args),
-          ephemeral: false,
-        },
-        { sessionName: args.session_name },
-      );
-      await reportAgentResult(progress, result);
-      await progress.flush();
-      return jsonResult({ session, agent: result }, !result.ok);
-    } catch (error) {
-      await progress.flush();
-      return jsonResult({ error: error instanceof Error ? error.message : String(error) }, true);
-    }
+    return loggedToolCall("start_session", args, extra, async () => {
+      const progress = createProgressReporter(extra);
+      try {
+        await progress.send("Starting persistent Codex session");
+        const { session, result } = await sessionManager.start(
+          {
+            ...toRunOptions(args),
+            ephemeral: false,
+          },
+          { sessionName: args.session_name },
+        );
+        await reportAgentResult(progress, result);
+        await progress.flush();
+        return jsonResult({ session, agent: result }, !result.ok);
+      } catch (error) {
+        await progress.flush();
+        logger.error("start_session.failed", { error: errorForLog(error) });
+        return jsonResult({ error: error instanceof Error ? error.message : String(error) }, true);
+      }
+    });
   },
 );
 
@@ -1006,21 +1113,24 @@ server.registerTool(
     },
   },
   async (args, extra) => {
-    const progress = createProgressReporter(extra);
-    try {
-      await progress.send(`Resuming Codex session ${args.session_id}`);
-      const { session, result, error } = await sessionManager.send(args.session_id, args.prompt, toRunOptions(args));
-      if (error || !session || !result) {
+    return loggedToolCall("send_session_prompt", args, extra, async () => {
+      const progress = createProgressReporter(extra);
+      try {
+        await progress.send(`Resuming Codex session ${args.session_id}`);
+        const { session, result, error } = await sessionManager.send(args.session_id, args.prompt, toRunOptions(args));
+        if (error || !session || !result) {
+          await progress.flush();
+          return jsonResult({ error, session }, true);
+        }
+        await reportAgentResult(progress, result);
         await progress.flush();
-        return jsonResult({ error, session }, true);
+        return jsonResult({ session, agent: result }, !result.ok);
+      } catch (error) {
+        await progress.flush();
+        logger.error("send_session_prompt.failed", { error: errorForLog(error) });
+        return jsonResult({ error: error instanceof Error ? error.message : String(error) }, true);
       }
-      await reportAgentResult(progress, result);
-      await progress.flush();
-      return jsonResult({ session, agent: result }, !result.ok);
-    } catch (error) {
-      await progress.flush();
-      return jsonResult({ error: error instanceof Error ? error.message : String(error) }, true);
-    }
+    });
   },
 );
 
@@ -1033,11 +1143,12 @@ server.registerTool(
       session_id: sessionIdSchema,
     },
   },
-  async (args) => {
-    const session = sessionManager.get(args.session_id);
-    if (!session) return jsonResult({ error: `Unknown session_id: ${args.session_id}` }, true);
-    return jsonResult({ session });
-  },
+  async (args, extra) =>
+    loggedToolCall("get_session", args, extra, async () => {
+      const session = sessionManager.get(args.session_id);
+      if (!session) return jsonResult({ error: `Unknown session_id: ${args.session_id}` }, true);
+      return jsonResult({ session });
+    }),
 );
 
 server.registerTool(
@@ -1047,7 +1158,10 @@ server.registerTool(
     description: "List persistent Codex sessions held by this daemonless MCP server process.",
     inputSchema: {},
   },
-  async () => jsonResult({ sessions: sessionManager.list() }),
+  async (args, extra) =>
+    loggedToolCall("list_sessions", args, extra, async () =>
+      jsonResult({ sessions: sessionManager.list() }),
+    ),
 );
 
 server.registerTool(
@@ -1060,11 +1174,12 @@ server.registerTool(
       session_id: sessionIdSchema,
     },
   },
-  async (args) => {
-    const session = sessionManager.cancel(args.session_id);
-    if (!session) return jsonResult({ error: `Unknown session_id: ${args.session_id}` }, true);
-    return jsonResult({ session });
-  },
+  async (args, extra) =>
+    loggedToolCall("cancel_session", args, extra, async () => {
+      const session = sessionManager.cancel(args.session_id);
+      if (!session) return jsonResult({ error: `Unknown session_id: ${args.session_id}` }, true);
+      return jsonResult({ session });
+    }),
 );
 
 server.registerTool(
@@ -1077,40 +1192,42 @@ server.registerTool(
       codex_bin: commonInputSchema.codex_bin,
     },
   },
-  async (args) => {
-    try {
-      const status = await probeCodexVersion(args.codex_bin);
-      return jsonResult({
-        ok: !status.error,
-        binary: status.binary,
-        version: status.version,
-        error: status.error,
-        cwd: process.cwd(),
-        defaultModel: defaultModel(),
-        defaultReasoningEffort: defaultReasoningEffort(),
-        defaultSandbox: "read-only",
-        fullAccessFlag: "dangerously_bypass_approvals_and_sandbox",
-        defaultServiceTier: "codex-default",
-        modelPresets: {
-          codex: "gpt-5.3-codex",
-          spark: "gpt-5.3-codex-spark",
-        },
-        outputContracts,
-        mcpConfigPolicies,
-        pluginCodexBin: cleanOption(process.env.CODEX_SUBAGENTS_CODEX_BIN),
-        claudeProjectDir: cleanOption(process.env.CLAUDE_PROJECT_DIR),
-        queue: jobManager.stats(),
-      });
-    } catch (error) {
-      return jsonResult(
-        {
-          ok: false,
-          error: error instanceof Error ? error.message : String(error),
-        },
-        true,
-      );
-    }
-  },
+  async (args, extra) =>
+    loggedToolCall("codex_status", args, extra, async () => {
+      try {
+        const status = await probeCodexVersion(args.codex_bin);
+        return jsonResult({
+          ok: !status.error,
+          binary: status.binary,
+          version: status.version,
+          error: status.error,
+          cwd: process.cwd(),
+          defaultModel: defaultModel(),
+          defaultReasoningEffort: defaultReasoningEffort(),
+          defaultSandbox: "read-only",
+          fullAccessFlag: "dangerously_bypass_approvals_and_sandbox",
+          defaultServiceTier: "codex-default",
+          modelPresets: {
+            codex: "gpt-5.3-codex",
+            spark: "gpt-5.3-codex-spark",
+          },
+          outputContracts,
+          mcpConfigPolicies,
+          pluginCodexBin: cleanOption(process.env.CODEX_SUBAGENTS_CODEX_BIN),
+          claudeProjectDir: cleanOption(process.env.CLAUDE_PROJECT_DIR),
+          queue: jobManager.stats(),
+        });
+      } catch (error) {
+        logger.error("codex_status.failed", { error: errorForLog(error) });
+        return jsonResult(
+          {
+            ok: false,
+            error: error instanceof Error ? error.message : String(error),
+          },
+          true,
+        );
+      }
+    }),
 );
 
 server.registerTool(
@@ -1124,66 +1241,69 @@ server.registerTool(
       project_dir: commonInputSchema.project_dir,
     },
   },
-  async (args) => {
-    const checks: Array<{ name: string; ok: boolean; detail?: unknown }> = [];
-    let ok = true;
+  async (args, extra) =>
+    loggedToolCall("codex_doctor", args, extra, async () => {
+      const checks: Array<{ name: string; ok: boolean; detail?: unknown }> = [];
+      let ok = true;
 
-    try {
-      const status = await probeCodexVersion(args.codex_bin);
+      try {
+        const status = await probeCodexVersion(args.codex_bin);
+        checks.push({
+          name: "codex_binary",
+          ok: !status.error,
+          detail: { binary: status.binary, version: status.version, error: status.error },
+        });
+        if (status.error) ok = false;
+      } catch (error) {
+        ok = false;
+        logger.error("codex_doctor.binary_failed", { error: errorForLog(error) });
+        checks.push({
+          name: "codex_binary",
+          ok: false,
+          detail: error instanceof Error ? error.message : String(error),
+        });
+      }
+
+      try {
+        const projectDir = args.project_dir ?? process.env.CLAUDE_PROJECT_DIR ?? process.cwd();
+        checks.push({
+          name: "project_dir",
+          ok: Boolean(projectDir),
+          detail: { projectDir: cleanOption(projectDir) },
+        });
+      } catch (error) {
+        ok = false;
+        logger.error("codex_doctor.project_dir_failed", { error: errorForLog(error) });
+        checks.push({ name: "project_dir", ok: false, detail: String(error) });
+      }
+
       checks.push({
-        name: "codex_binary",
-        ok: !status.error,
-        detail: { binary: status.binary, version: status.version, error: status.error },
+        name: "defaults",
+        ok: defaultReasoningEffort() !== "minimal",
+        detail: {
+          sandbox: "read-only",
+          dangerouslyBypassApprovalsAndSandbox: false,
+          approvalPolicy: "never",
+          defaultModel: defaultModel(),
+          defaultReasoningEffort: defaultReasoningEffort(),
+          forwardSensitiveEnvDefault: false,
+        },
       });
-      if (status.error) ok = false;
-    } catch (error) {
-      ok = false;
-      checks.push({
-        name: "codex_binary",
-        ok: false,
-        detail: error instanceof Error ? error.message : String(error),
+      checks.push({ name: "queue", ok: true, detail: jobManager.stats() });
+
+      return jsonResult({
+        ok,
+        checks,
+        supported: {
+          modelPresets,
+          reasoningEfforts,
+          sandboxModes,
+          fullAccessFlag: "dangerously_bypass_approvals_and_sandbox",
+          outputContracts,
+          mcpConfigPolicies,
+        },
       });
-    }
-
-    try {
-      const projectDir = args.project_dir ?? process.env.CLAUDE_PROJECT_DIR ?? process.cwd();
-      checks.push({
-        name: "project_dir",
-        ok: Boolean(projectDir),
-        detail: { projectDir: cleanOption(projectDir) },
-      });
-    } catch (error) {
-      ok = false;
-      checks.push({ name: "project_dir", ok: false, detail: String(error) });
-    }
-
-    checks.push({
-      name: "defaults",
-      ok: defaultReasoningEffort() !== "minimal",
-      detail: {
-        sandbox: "read-only",
-        dangerouslyBypassApprovalsAndSandbox: false,
-        approvalPolicy: "never",
-        defaultModel: defaultModel(),
-        defaultReasoningEffort: defaultReasoningEffort(),
-        forwardSensitiveEnvDefault: false,
-      },
-    });
-    checks.push({ name: "queue", ok: true, detail: jobManager.stats() });
-
-    return jsonResult({
-      ok,
-      checks,
-      supported: {
-        modelPresets,
-        reasoningEfforts,
-        sandboxModes,
-        fullAccessFlag: "dangerously_bypass_approvals_and_sandbox",
-        outputContracts,
-        mcpConfigPolicies,
-      },
-    });
-  },
+    }),
 );
 
 server.registerPrompt(
@@ -1198,28 +1318,36 @@ server.registerPrompt(
       model_preset: modelPresetSchema.optional().describe("Optional model preset, such as spark."),
     },
   },
-  ({ prompt, model, reasoning_effort, model_preset }) => ({
-    messages: [
-      {
-        role: "user",
-        content: {
-          type: "text",
-          text: [
-            "Use the codex-subagents MCP tool `run_agent` for this task.",
-            "Keep the sandbox read-only unless I explicitly ask for another sandbox or full non-sandbox access.",
-            "For full non-sandbox access, set dangerously_bypass_approvals_and_sandbox true.",
-            model ? `Use model ${model}.` : "Use the configured Codex model default.",
-            model_preset ? `Use model_preset ${model_preset}.` : "",
-            reasoning_effort
-              ? `Use reasoning_effort ${reasoning_effort}.`
-              : "Use reasoning_effort medium unless the task clearly needs more.",
-            "",
-            prompt,
-          ].join("\n"),
+  ({ prompt, model, reasoning_effort, model_preset }) => {
+    const promptResult = {
+      messages: [
+        {
+          role: "user" as const,
+          content: {
+            type: "text" as const,
+            text: [
+              "Use the codex-subagents MCP tool `run_agent` for this task.",
+              "Keep the sandbox read-only unless I explicitly ask for another sandbox or full non-sandbox access.",
+              "For full non-sandbox access, set dangerously_bypass_approvals_and_sandbox true.",
+              model ? `Use model ${model}.` : "Use the configured Codex model default.",
+              model_preset ? `Use model_preset ${model_preset}.` : "",
+              reasoning_effort
+                ? `Use reasoning_effort ${reasoning_effort}.`
+                : "Use reasoning_effort medium unless the task clearly needs more.",
+              "",
+              prompt,
+            ].join("\n"),
+          },
         },
-      },
-    ],
-  }),
+      ],
+    };
+    logger.rawDebug("mcp.prompt.result", {
+      prompt: "codex_agent",
+      arguments: summarizeRawTrafficForLog({ prompt, model, reasoning_effort, model_preset }),
+      result: summarizeRawTrafficForLog(promptResult),
+    });
+    return promptResult;
+  },
 );
 
 server.registerPrompt(
@@ -1234,41 +1362,54 @@ server.registerPrompt(
       model_preset: modelPresetSchema.optional().describe("Optional model preset for all agents."),
     },
   },
-  ({ prompt, max_parallel, model_preset }) => ({
-    messages: [
-      {
-        role: "user",
-        content: {
-          type: "text",
-          text: [
-            "Use the codex-subagents MCP tool `run_agents` for this task.",
-            "Create one agent object per independent workstream and run them read-only unless I explicitly ask for full non-sandbox access.",
-            "For full non-sandbox access, set dangerously_bypass_approvals_and_sandbox true.",
-            max_parallel ? `Use max_parallel ${max_parallel}.` : "Use max_parallel 4 unless fewer agents are needed.",
-            model_preset ? `Use model_preset ${model_preset} unless an agent needs a different model.` : "",
-            "Ask each Codex agent for concise findings with file paths and line references when relevant.",
-            "",
-            prompt,
-          ].join("\n"),
+  ({ prompt, max_parallel, model_preset }) => {
+    const promptResult = {
+      messages: [
+        {
+          role: "user" as const,
+          content: {
+            type: "text" as const,
+            text: [
+              "Use the codex-subagents MCP tool `run_agents` for this task.",
+              "Create one agent object per independent workstream and run them read-only unless I explicitly ask for full non-sandbox access.",
+              "For full non-sandbox access, set dangerously_bypass_approvals_and_sandbox true.",
+              max_parallel ? `Use max_parallel ${max_parallel}.` : "Use max_parallel 4 unless fewer agents are needed.",
+              model_preset ? `Use model_preset ${model_preset} unless an agent needs a different model.` : "",
+              "Ask each Codex agent for concise findings with file paths and line references when relevant.",
+              "",
+              prompt,
+            ].join("\n"),
+          },
         },
-      },
-    ],
-  }),
+      ],
+    };
+    logger.rawDebug("mcp.prompt.result", {
+      prompt: "codex_parallel",
+      arguments: summarizeRawTrafficForLog({ prompt, max_parallel, model_preset }),
+      result: summarizeRawTrafficForLog(promptResult),
+    });
+    return promptResult;
+  },
 );
 
 async function main(): Promise<void> {
   process.on("unhandledRejection", (error) => {
-    console.error("codex-subagents unhandled rejection", error);
+    logger.error("process.unhandled_rejection", { error: errorForLog(error) });
   });
   process.on("uncaughtException", (error) => {
-    console.error("codex-subagents uncaught exception", error);
+    logger.error("process.uncaught_exception", { error: errorForLog(error) });
   });
 
+  logger.info("server.starting", {
+    logLevel: process.env.CODEX_SUBAGENTS_LOG_LEVEL ?? process.env.CODEX_SUBAGENTS_LOG ?? "debug",
+  });
   const transport = new StdioServerTransport();
+  installTransportLogging(transport);
   await server.connect(transport);
+  logger.info("server.connected", { transport: "stdio" });
 }
 
 main().catch((error) => {
-  console.error(error);
+  logger.error("server.start_failed", { error: errorForLog(error) });
   process.exit(1);
 });

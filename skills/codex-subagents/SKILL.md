@@ -19,6 +19,7 @@ Default behavior:
 - Supports persistent Codex sessions with `start_session` and `send_session_prompt`; use these when the same Codex subagent should keep context across multiple prompts.
 - Supports structured results with `output_contract` or `output_schema`; use these when Claude must merge, compare, or aggregate Codex outputs.
 - Redacts secret-looking output by default and does not forward secret-looking environment variables unless `forward_sensitive_env` is explicitly true.
+- Writes very verbose JSONL logs to stderr by default, including raw MCP JSON-RPC frames, tool arguments/results, prompt outputs, progress notifications, queue/job/session lifecycle, and Codex stdin/stdout/stderr traffic.
 
 For one delegated task, call `run_agent`. Make the prompt self-contained: include the scope, the expected read-only behavior, and the output shape Claude needs. For code review and exploration, ask for concise findings with file paths and line references.
 

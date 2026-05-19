@@ -5,6 +5,7 @@ import {
   type ParallelRunOptions,
   runAgent,
 } from "./runner.js";
+import { errorForLog, logger, summarizeRawTrafficForLog } from "./logging.js";
 
 export class AbortError extends Error {
   constructor(message = "Operation was cancelled.") {
@@ -138,6 +139,7 @@ class AgentRunQueue {
 
   enqueue<T>(run: () => Promise<T>, options: QueueRunOptions = {}): Promise<{ value: T; queuedMs: number }> {
     if (options.signal?.aborted) {
+      logger.warn("queue.enqueue_rejected_cancelled", { projectKey: options.projectKey ?? "__default__" });
       return Promise.reject(new AbortError("Codex run was cancelled before it entered the queue."));
     }
 
@@ -157,12 +159,18 @@ class AgentRunQueue {
         const index = this.pending.indexOf(task as QueueTask<unknown>);
         if (index >= 0) {
           this.pending.splice(index, 1);
+          logger.warn("queue.cancelled_while_pending", { queueTaskId: task.id, projectKey: task.projectKey });
           reject(new AbortError("Codex run was cancelled while queued."));
         }
       };
 
       options.signal?.addEventListener("abort", abortPending, { once: true });
       this.pending.push(task as QueueTask<unknown>);
+      logger.debug("queue.enqueued", {
+        queueTaskId: task.id,
+        projectKey: task.projectKey,
+        stats: this.stats(),
+      });
       this.tryStart();
     });
   }
@@ -179,6 +187,7 @@ class AgentRunQueue {
       const [task] = this.pending.splice(index, 1);
       if (!task) return;
       if (task.signal?.aborted) {
+        logger.warn("queue.cancelled_before_start", { queueTaskId: task.id, projectKey: task.projectKey });
         task.reject(new AbortError("Codex run was cancelled while queued."));
         continue;
       }
@@ -186,17 +195,38 @@ class AgentRunQueue {
       const queuedMs = Date.now() - task.enqueuedAt;
       this.active += 1;
       this.projectActive.set(task.projectKey, (this.projectActive.get(task.projectKey) ?? 0) + 1);
+      logger.debug("queue.started", {
+        queueTaskId: task.id,
+        projectKey: task.projectKey,
+        queuedMs,
+        stats: this.stats(),
+      });
       void callQueueCallback(() => task.onStart?.(queuedMs));
 
       Promise.resolve()
         .then(task.run)
-        .then((value) => task.resolve({ value, queuedMs }))
-        .catch((error) => task.reject(error))
+        .then((value) => {
+          logger.debug("queue.completed", { queueTaskId: task.id, projectKey: task.projectKey });
+          task.resolve({ value, queuedMs });
+        })
+        .catch((error) => {
+          logger.error("queue.failed", {
+            queueTaskId: task.id,
+            projectKey: task.projectKey,
+            error: errorForLog(error),
+          });
+          task.reject(error);
+        })
         .finally(() => {
           this.active -= 1;
           const projectCount = (this.projectActive.get(task.projectKey) ?? 1) - 1;
           if (projectCount > 0) this.projectActive.set(task.projectKey, projectCount);
           else this.projectActive.delete(task.projectKey);
+          logger.debug("queue.released", {
+            queueTaskId: task.id,
+            projectKey: task.projectKey,
+            stats: this.stats(),
+          });
           this.tryStart();
         });
     }
@@ -387,6 +417,9 @@ class CodexJobManager {
       waiters: new Set(),
     };
     this.jobs.set(job.id, job);
+    logger.rawDebug("job.started", {
+      job: summarizeRawTrafficForLog(snapshot(job)),
+    });
 
     void run(job)
       .then((result) => {
@@ -397,10 +430,22 @@ class CodexJobManager {
           const agents = (result as { agents?: AgentRunResult[] }).agents ?? [];
           job.status = statusFromAgentResults(agents);
         }
+        logger.rawInfo("job.finished", {
+          jobId: job.id,
+          kind: job.kind,
+          status: job.status,
+          result: summarizeRawTrafficForLog(result),
+        });
       })
       .catch((error) => {
         job.error = error instanceof Error ? error.message : String(error);
         job.status = error instanceof AbortError ? "cancelled" : "failed";
+        logger.error("job.failed", {
+          jobId: job.id,
+          kind: job.kind,
+          status: job.status,
+          error: errorForLog(error),
+        });
       })
       .finally(() => {
         const nowDone = new Date().toISOString();
