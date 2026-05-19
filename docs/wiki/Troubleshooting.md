@@ -36,12 +36,10 @@ Ask Codex to review this repository read-only.
 
 Use persistent or async tools instead of one blocking request:
 
-- `start_codex_session_async`
-- `get_codex_session`
-- `wait_codex_session`
-- `start_agent_run`
-- `get_agent_run`
-- `wait_agent_run`
+- `codex_session_start`
+- `codex_session_status`
+- `codex_session_wait`
+- `codex_session_steer`
 
 Persistent sessions are the right path for work that should be recoverable after
 an MCP restart.

@@ -360,7 +360,7 @@ export class CodexSessionManager {
       logger.warn("session.send_missing_thread", { sessionId: id });
       return {
         session: snapshot(session),
-        error: `Session has no Codex thread id yet; start_session must complete successfully before send_session_prompt.`,
+        error: `Session has no Codex thread id yet; codex_session_start must complete successfully before codex_session_prompt.`,
       };
     }
 

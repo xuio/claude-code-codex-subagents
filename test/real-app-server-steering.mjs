@@ -25,9 +25,10 @@ try {
   await client.connect(transport);
   const start = await client.callTool(
     {
-      name: "start_codex_session_async",
+      name: "codex_session_start",
       arguments: {
-        task: "Real app-server steering probe. Stay read-only. Run the shell command `sleep 6`, then reply exactly REAL_APP_SERVER_START_OK unless a later steering instruction changes the exact final reply.",
+        description: "Real app-server steering probe",
+        prompt: "Real app-server steering probe. Stay read-only. Run the shell command `sleep 6`, then reply exactly REAL_APP_SERVER_START_OK unless a later steering instruction changes the exact final reply.",
         project_dir: projectDir,
         codex_bin: codexBin,
         model_preset: "spark",
@@ -41,12 +42,12 @@ try {
   );
   const sessionId = start.structuredContent?.session?.id;
   if (!sessionId) {
-    throw new Error(`start_codex_session_async did not return a session id: ${JSON.stringify(start.structuredContent)}`);
+    throw new Error(`codex_session_start did not return a session id: ${JSON.stringify(start.structuredContent)}`);
   }
 
   for (let attempt = 0; attempt < 30; attempt += 1) {
     const current = await client.callTool(
-      { name: "get_codex_session", arguments: { session_id: sessionId } },
+      { name: "codex_session_status", arguments: { session_id: sessionId } },
       CallToolResultSchema,
       { timeout: 10_000, resetTimeoutOnProgress: true },
     );
@@ -56,10 +57,10 @@ try {
 
   const steer = await client.callTool(
     {
-      name: "steer_codex_session",
+      name: "codex_session_steer",
       arguments: {
         session_id: sessionId,
-        steering_prompt: "Steering update: change the exact final reply to REAL_APP_SERVER_STEER_OK.",
+        prompt: "Steering update: change the exact final reply to REAL_APP_SERVER_STEER_OK.",
         codex_bin: codexBin,
         model_preset: "spark",
         reasoning_effort: "low",
@@ -71,11 +72,11 @@ try {
     { timeout: 30_000, resetTimeoutOnProgress: true },
   );
   if (steer.structuredContent?.delivery !== "delivered_to_active_turn") {
-    throw new Error(`steer_codex_session was not delivered live: ${JSON.stringify(steer.structuredContent)}`);
+    throw new Error(`codex_session_steer was not delivered live: ${JSON.stringify(steer.structuredContent)}`);
   }
 
   const wait = await client.callTool(
-    { name: "wait_codex_session", arguments: { session_id: sessionId, timeout_ms: 240_000 } },
+    { name: "codex_session_wait", arguments: { session_id: sessionId, timeout_ms: 240_000 } },
     CallToolResultSchema,
     { timeout: 260_000, resetTimeoutOnProgress: true },
   );

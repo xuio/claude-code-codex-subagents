@@ -56,19 +56,17 @@ the low-level tool names.
 
 Prefer session or async tools for long work:
 
-- `start_codex_session_async`
-- `get_codex_session`
-- `wait_codex_session`
-- `start_agent_run`
-- `get_agent_run`
-- `wait_agent_run`
+- `codex_session_start`
+- `codex_session_status`
+- `codex_session_wait`
+- `codex_session_steer`
 
 Persistent sessions are the better choice when the work must survive an MCP
 restart. Async one-shot jobs are process-local and do not survive restarts.
 
 ## Session Recovery Fails
 
-Use `get_codex_session`, then `recover_codex_session`.
+Use `codex_session_status`, then `codex_session_recover`.
 
 Check:
 

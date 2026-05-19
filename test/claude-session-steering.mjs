@@ -71,7 +71,7 @@ await mkdir(recordDir, { recursive: true });
 try {
   const prompt = `Validate the codex-subagents plugin's long-running session flow from inside Claude Code. Use only the codex-subagents MCP tools. Use this exact fake Codex binary: ${fakeCodex}. Use this exact project_dir: ${projectDir}.
 
-Start a Codex Spark session in the background with task "CLAUDE_STEERING_START DELAY_MS=10000". Poll get_codex_session until the session reports supportsRealSteering true and has an activeTurn. While it is running, first steer the session with steering prompt "CLAUDE_STEERING_STEER" without waiting for steering to complete. Then add a normal follow-up prompt "CLAUDE_STEERING_FOLLOW" without waiting for that prompt to complete. Then wait until the session is idle.
+Start a Codex Spark session in the background using codex_session_start with description "Claude steering start" and prompt "CLAUDE_STEERING_START DELAY_MS=10000". Poll codex_session_status until the session reports supportsRealSteering true and has an activeTurn. While it is running, first steer the session with codex_session_steer prompt "CLAUDE_STEERING_STEER" without waiting for steering to complete. Then add a normal follow-up prompt "CLAUDE_STEERING_FOLLOW" with codex_session_prompt without waiting for that prompt to complete. Then wait until the session is idle using codex_session_wait.
 
 Return exactly one compact JSON object and no markdown. Shape: {"ok": boolean, "turns": number, "steerCompleted": boolean, "completed": boolean}.`;
 
@@ -103,11 +103,11 @@ Return exactly one compact JSON object and no markdown. Shape: {"ok": boolean, "
       "local",
       "--allowedTools",
       [
-        "mcp__plugin_codex-subagents_codex-subagents__start_codex_session_async",
-        "mcp__plugin_codex-subagents_codex-subagents__send_codex_session_prompt",
-        "mcp__plugin_codex-subagents_codex-subagents__steer_codex_session",
-        "mcp__plugin_codex-subagents_codex-subagents__wait_codex_session",
-        "mcp__plugin_codex-subagents_codex-subagents__get_codex_session",
+        "mcp__plugin_codex-subagents_codex-subagents__codex_session_start",
+        "mcp__plugin_codex-subagents_codex-subagents__codex_session_prompt",
+        "mcp__plugin_codex-subagents_codex-subagents__codex_session_steer",
+        "mcp__plugin_codex-subagents_codex-subagents__codex_session_wait",
+        "mcp__plugin_codex-subagents_codex-subagents__codex_session_status",
         "Skill",
       ].join(","),
       "--append-system-prompt",

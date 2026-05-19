@@ -14,7 +14,7 @@ full-access Codex work when the user asks for it.
 
 ## Why Use It?
 
-- **Native Claude Code workflow:** Claude gets MCP tools and a plugin skill, so it can decide when to ask Codex without shell glue.
+- **Native Claude Code workflow:** Claude gets a small Task-like MCP surface: `codex_task`, `codex_task_group`, and `codex_session_*`.
 - **Read-only by default:** Codex starts with `--sandbox read-only` and non-interactive approvals.
 - **No daemon:** Claude launches the MCP server over stdio for the active session.
 - **Fast parallel review:** Claude can launch several independent Codex agents with bounded concurrency.
@@ -62,7 +62,7 @@ after `dist/index.js` is rebuilt.
 Ask Codex for a second opinion on the session recovery code. Keep it read-only and return concrete findings with file paths.
 ```
 
-Claude should use the `ask_codex` front door.
+Claude should use `codex_task`.
 
 ### Run Parallel Codex Agents
 
@@ -70,7 +70,7 @@ Claude should use the `ask_codex` front door.
 Launch three Codex subagents in parallel: one for API behavior, one for tests, and one for security. Keep all of them read-only.
 ```
 
-Claude should use `ask_codex_parallel` and split the work into independent tasks.
+Claude should use `codex_task_group` and split the work into independent tasks.
 
 ### Use Spark
 
@@ -86,8 +86,8 @@ Claude can pass `model_preset: "spark"` instead of remembering the exact Spark m
 Start a long-running Codex session on this repo, then let me send follow-up prompts into the same context.
 ```
 
-Claude should use `start_codex_session_async`, `send_codex_session_prompt`,
-`steer_codex_session`, `get_codex_session`, and `wait_codex_session`.
+Claude should use `codex_session_start`, `codex_session_prompt`,
+`codex_session_steer`, `codex_session_status`, and `codex_session_wait`.
 
 ## Safety Model
 
@@ -125,16 +125,17 @@ use DNS/network, install packages, or behave like a normal unrestricted Codex ru
 
 | Use case | Preferred tools |
 | --- | --- |
-| One read-only Codex task | `ask_codex` |
-| Several independent tasks | `ask_codex_parallel` |
-| Aggregated parallel review | `run_agents_aggregate` |
-| Persistent context | `start_codex_session`, `continue_codex_session` |
-| Long-running sessions | `start_codex_session_async`, `send_codex_session_prompt`, `steer_codex_session`, `wait_codex_session` |
-| Async one-shot jobs | `start_agent_run`, `get_agent_run`, `wait_agent_run`, `cancel_agent_run` |
+| One read-only Codex task | `codex_task` |
+| Several independent tasks | `codex_task_group` |
+| Persistent context | `codex_session_start`, `codex_session_prompt` |
+| Long-running sessions | `codex_session_start`, `codex_session_status`, `codex_session_wait`, `codex_session_steer` |
+| Session recovery | `codex_sessions`, `codex_session_recover`, `codex_session_cancel` |
 | Diagnostics | `codex_status`, `codex_doctor`, `codex_export_debug_bundle` |
 
-Compatibility tools such as `run_agent`, `run_agents`, `start_session`, and
-`send_session_prompt` remain available for lower-level control.
+Legacy tools such as `ask_codex`, `run_agent`, `run_agents`, `start_session`, and
+`send_session_prompt` are hidden by default. Set
+`CODEX_SUBAGENTS_ENABLE_LEGACY_TOOLS=1` only for older clients that still call the
+pre-refactor names.
 
 ## Development
 

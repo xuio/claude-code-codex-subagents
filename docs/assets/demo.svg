@@ -9,7 +9,7 @@
   <text x="86" y="28" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="14" fill="#d1d5db">Claude Code with codex-subagents</text>
   <text x="32" y="78" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="16" fill="#93c5fd">$ claude --plugin-dir .</text>
   <text x="32" y="118" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="16" fill="#f9fafb">User: Ask Codex to run three read-only reviewers: API, tests, security.</text>
-  <text x="32" y="160" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="15" fill="#a7f3d0">Claude -> ask_codex_parallel</text>
+  <text x="32" y="160" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="15" fill="#a7f3d0">Claude -> codex_task_group</text>
   <text x="64" y="195" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="15" fill="#d1d5db">api      gpt-5.3-codex-spark  read-only  completed</text>
   <text x="64" y="225" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="15" fill="#d1d5db">tests    gpt-5.3-codex-spark  read-only  completed</text>
   <text x="64" y="255" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="15" fill="#d1d5db">security gpt-5.3-codex-spark  read-only  completed</text>

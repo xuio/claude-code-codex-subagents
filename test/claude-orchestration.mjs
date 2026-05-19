@@ -69,9 +69,9 @@ const prompt = `Validate the codex-subagents Claude Code plugin from inside Clau
 
 Perform exactly these checks:
 1. Call codex_status with codex_bin set to the fake Codex binary. Verify ok is true and binary.source is explicit.
-2. Call run_agent with prompt "claude-inside-single RUN_COMMAND_EVENT", project_dir, codex_bin, model_preset "spark", reasoning_effort "low", timeout_ms 60000. Verify ok true, sandbox read-only, cwd equals project_dir, model is gpt-5.3-codex-spark, and command event parsing includes command "rg example".
-3. Call run_agents with two agents named alpha and beta, prompts "claude-inside-alpha DELAY_MS=40" and "claude-inside-beta DELAY_MS=40", project_dir on each agent, codex_bin at the shared level, max_parallel 2. Verify ok true and two successful agents are returned with cwd equal to project_dir.
-4. Call run_agent with prompt "claude-inside-nested", project_dir, codex_bin, model_preset "spark", codex_subagents containing one custom agent named "ui_spark" with description "Fast focused UI iteration.", developer_instructions "Stay scoped and concise.", model_preset "spark", reasoning_effort "medium", sandbox "read-only"; subagent_tasks containing one task for agent "ui_spark" with name "toolbar" and prompt "Inspect the toolbar."; subagent_runtime max_threads 4 and max_depth 2. Verify ok true, model is gpt-5.3-codex-spark, codexSubagents.customAgents includes ui_spark, requestedTasks is 1, and tempCodexHomeUsed is true.
+2. Call codex_task with description "Claude inside single" and prompt "claude-inside-single RUN_COMMAND_EVENT", project_dir, codex_bin, model_preset "spark", reasoning_effort "low", timeout_ms 60000. Verify ok true, sandbox read-only, cwd equals project_dir, model is gpt-5.3-codex-spark, and command event parsing includes command "rg example".
+3. Call codex_task_group with two tasks named alpha and beta, prompts "claude-inside-alpha DELAY_MS=40" and "claude-inside-beta DELAY_MS=40", project_dir on each task, codex_bin at the shared level, max_parallel 2. Verify ok true and two successful agents are returned with cwd equal to project_dir.
+4. Call codex_task with description "Claude inside nested" and prompt "claude-inside-nested", project_dir, codex_bin, model_preset "spark", codex_subagents containing one custom agent named "ui_spark" with description "Fast focused UI iteration.", developer_instructions "Stay scoped and concise.", model_preset "spark", reasoning_effort "medium", sandbox "read-only"; subagent_tasks containing one task for agent "ui_spark" with name "toolbar" and prompt "Inspect the toolbar."; subagent_runtime max_threads 4 and max_depth 2. Verify ok true, model is gpt-5.3-codex-spark, codexSubagents.customAgents includes ui_spark, requestedTasks is 1, and tempCodexHomeUsed is true.
 
 Return exactly one compact JSON object and no markdown. Shape: {"ok": boolean, "checks": {"status": boolean, "single": boolean, "parallel": boolean, "nested": boolean}, "details": {"statusSource": string, "singleModel": string, "parallelCount": number, "nestedTempHome": boolean}}`;
 
@@ -90,8 +90,8 @@ const result = spawnSync(
     "--allowedTools",
     [
       "mcp__plugin_codex-subagents_codex-subagents__codex_status",
-      "mcp__plugin_codex-subagents_codex-subagents__run_agent",
-      "mcp__plugin_codex-subagents_codex-subagents__run_agents",
+      "mcp__plugin_codex-subagents_codex-subagents__codex_task",
+      "mcp__plugin_codex-subagents_codex-subagents__codex_task_group",
     ].join(","),
     "--model",
     process.env.CLAUDE_ORCHESTRATION_MODEL ?? "claude-haiku-4-5-20251001",
@@ -135,8 +135,8 @@ assert(
 const validation = extractJsonResult(envelope.result);
 assert(validation.ok === true, "Claude should report overall success", validation);
 assert(validation.checks?.status === true, "Claude should validate codex_status", validation);
-assert(validation.checks?.single === true, "Claude should validate run_agent", validation);
-assert(validation.checks?.parallel === true, "Claude should validate run_agents", validation);
+assert(validation.checks?.single === true, "Claude should validate codex_task", validation);
+assert(validation.checks?.parallel === true, "Claude should validate codex_task_group", validation);
 assert(validation.checks?.nested === true, "Claude should validate nested Spark subagents", validation);
 assert(validation.details?.statusSource === "explicit", "codex_status should use explicit fake binary", validation);
 assert(

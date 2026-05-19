@@ -24,30 +24,17 @@ subdirectory that Claude is working in. If omitted, the server uses
 
 Prefer these tools in normal Claude usage:
 
-- `ask_codex` - one blocking Codex task.
-- `ask_codex_parallel` - several independent blocking Codex tasks.
-- `run_agents_aggregate` - parallel tasks plus deterministic aggregation.
-- `start_codex_session` - create a persistent session and wait for the first turn.
-- `continue_codex_session` - send another prompt into an existing session.
-- `start_codex_session_async` - start a persistent session and return immediately.
-- `send_codex_session_prompt` - queue a normal follow-up prompt.
-- `steer_codex_session` - steer the active app-server turn when supported.
-- `get_codex_session` and `wait_codex_session` - inspect or wait on sessions.
+- `codex_task` - one Task-like Codex subagent with an answer-first result.
+- `codex_task_group` - several independent Task-like Codex subagents in parallel.
+- `codex_session_start` - start a persistent session and return a session id.
+- `codex_session_prompt` - send another prompt into an existing session.
+- `codex_session_steer` - steer the active app-server turn when supported.
+- `codex_session_status` and `codex_session_wait` - inspect or wait on sessions.
+- `codex_sessions`, `codex_session_recover`, and `codex_session_cancel` - manage session lifecycle.
 
-Lower-level compatibility tools remain available:
-
-- `run_agent`
-- `run_agents`
-- `start_agent_run`
-- `start_agents_run`
-- `get_agent_run`
-- `wait_agent_run`
-- `cancel_agent_run`
-- `start_session`
-- `send_session_prompt`
-- `get_session`
-- `list_sessions`
-- `cancel_session`
+Legacy compatibility tools are hidden by default. Set
+`CODEX_SUBAGENTS_ENABLE_LEGACY_TOOLS=1` only for older clients that still call
+pre-refactor names such as `ask_codex`, `run_agent`, or `start_session`.
 
 Diagnostics tools:
 
@@ -63,15 +50,13 @@ Use this decision path when writing prompts or debugging Claude tool choice:
 
 | User intent | Best tool |
 | --- | --- |
-| One normal read-only second opinion | `ask_codex` |
-| Two or more independent workstreams | `ask_codex_parallel` |
-| Several agents plus a merged summary | `run_agents_aggregate` |
-| Same Codex agent should keep context | `start_codex_session`, then `continue_codex_session` |
-| Long first turn, user wants to keep working | `start_codex_session_async` |
-| Add a normal follow-up to a running session | `send_codex_session_prompt` |
-| Redirect the active app-server turn | `steer_codex_session` |
-| Recover a session after Claude/MCP restart | `recover_codex_session` |
-| Slow one-shot job that need not be durable | `start_agent_run` |
+| One normal read-only second opinion | `codex_task` |
+| Two or more independent workstreams | `codex_task_group` |
+| Same Codex agent should keep context | `codex_session_start`, then `codex_session_prompt` |
+| Long first turn, user wants to keep working | `codex_session_start` |
+| Add a normal follow-up to a running session | `codex_session_prompt` |
+| Redirect the active app-server turn | `codex_session_steer` |
+| Recover a session after Claude/MCP restart | `codex_session_recover` |
 
 When in doubt, ask Claude to call `codex_choose_tool` before delegating.
 
@@ -87,9 +72,9 @@ Representative tool arguments:
 
 ```json
 {
-  "task": "Review the MCP server read-only. Return the top reliability risks with file paths and line references.",
+  "description": "Review MCP server reliability",
+  "prompt": "Review the MCP server read-only. Return the top reliability risks with file paths and line references.",
   "project_dir": "/path/to/project",
-  "model_preset": "spark",
   "reasoning_effort": "medium"
 }
 ```
@@ -109,22 +94,24 @@ Representative tool arguments:
   "tasks": [
     {
       "name": "api",
-      "task": "Review MCP tool schemas and runtime behavior read-only. Return concrete risks with paths.",
+      "description": "Review API behavior",
+      "prompt": "Review MCP tool schemas and runtime behavior read-only. Return concrete risks with paths.",
       "project_dir": "/path/to/project"
     },
     {
       "name": "tests",
-      "task": "Review test coverage read-only. Identify missing scenarios with paths.",
+      "description": "Review tests",
+      "prompt": "Review test coverage read-only. Identify missing scenarios with paths.",
       "project_dir": "/path/to/project"
     },
     {
       "name": "security",
-      "task": "Review sandboxing, env forwarding, and logging read-only. Return concrete risks with paths.",
+      "description": "Review security posture",
+      "prompt": "Review sandboxing, env forwarding, and logging read-only. Return concrete risks with paths.",
       "project_dir": "/path/to/project"
     }
   ],
   "max_parallel": 3,
-  "model_preset": "spark",
   "reasoning_effort": "medium"
 }
 ```
@@ -135,14 +122,14 @@ Use a persistent session when Codex should keep context across prompts.
 
 ```json
 {
-  "task": "Investigate the session manager read-only. Keep a compact working map of the code.",
+  "description": "Investigate session manager",
+  "prompt": "Investigate the session manager read-only. Keep a compact working map of the code.",
   "project_dir": "/path/to/project",
-  "model_preset": "spark",
   "reasoning_effort": "medium"
 }
 ```
 
-For a long-running first turn, use `start_codex_session_async`. Then:
+`codex_session_start` returns a session id immediately by default. Then:
 
 ```json
 {
@@ -156,7 +143,7 @@ To steer an active app-server turn:
 ```json
 {
   "session_id": "session-...",
-  "steering_prompt": "Prioritize app-server recovery and ignore UI/documentation polish."
+  "prompt": "Prioritize app-server recovery and ignore UI/documentation polish."
 }
 ```
 
@@ -165,8 +152,10 @@ protocol and steering becomes a high-priority queued turn.
 
 ## Spark And Reasoning
 
-Use `model_preset: "spark"` for fast, focused Codex work. Exact `model` still
-wins when both `model` and `model_preset` are provided.
+Do not use `model_preset: "spark"` by default. Use Spark only when the user asks
+for Spark or when a quick focused sidecar check is clearly more appropriate than
+the default Codex model. Exact `model` still wins when both `model` and
+`model_preset` are provided.
 
 Recommended reasoning:
 

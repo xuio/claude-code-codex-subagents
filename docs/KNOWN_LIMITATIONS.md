@@ -22,18 +22,18 @@ Disable logging entirely:
 export CODEX_SUBAGENTS_LOG_LEVEL=silent
 ```
 
-## Async Jobs Are Not Durable
+## Legacy Async Jobs Are Not Durable
 
-`start_agent_run` and `start_agents_run` are process-local async jobs. They keep
-Claude responsive during long one-shot work, but they do not survive MCP process
-restart.
+Legacy async one-shot jobs are process-local. They keep Claude responsive during
+long one-shot work, but they do not survive MCP process restart. These legacy
+tools are hidden unless `CODEX_SUBAGENTS_ENABLE_LEGACY_TOOLS=1` is set.
 
-Use `start_codex_session_async` for long-running work that should be recoverable
-after Claude Code or the MCP server restarts.
+Use `codex_session_start` for long-running work that should be recoverable after
+Claude Code or the MCP server restarts.
 
 ## Real Steering Requires App-Server
 
-`steer_codex_session` delivers live steering only when the session is running
+`codex_session_steer` delivers live steering only when the session is running
 through Codex app-server and reports `supportsRealSteering: true`.
 
 If app-server is unavailable and the session falls back to `codex exec`, steering
@@ -69,4 +69,3 @@ still make better choices when the user names the intended shape:
 - "run three Codex agents in parallel"
 - "start a long-running Codex session"
 - "steer the running Codex session"
-

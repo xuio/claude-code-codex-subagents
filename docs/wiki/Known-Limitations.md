@@ -11,8 +11,8 @@ normal work, or `CODEX_SUBAGENTS_LOG_LEVEL=silent` to disable logging.
 
 ## Async Jobs Are Not Durable
 
-`start_agent_run` and `start_agents_run` are process-local. Use
-`start_codex_session_async` when the work should be recoverable after restart.
+Legacy async one-shot jobs are process-local and hidden by default. Use
+`codex_session_start` when the work should be recoverable after restart.
 
 ## Steering Requires App-Server
 
@@ -23,4 +23,3 @@ exec protocol, steering becomes a high-priority queued turn.
 
 Full local access requires `dangerously_bypass_approvals_and_sandbox: true`. It
 can write files, mutate git state, use network/DNS, and install packages.
-

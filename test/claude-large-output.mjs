@@ -67,11 +67,11 @@ function assert(condition, message, details) {
 
 const prompt = `Validate that the installed codex-subagents plugin handles oversized Codex output without surfacing a Claude tool-result overflow error. Use only the codex-subagents MCP tools. Use this exact fake Codex binary: ${fakeCodex}. Use this exact project_dir: ${projectDir}.
 
-Call ask_codex with task "CLAUDE_LARGE_OUTPUT BIG_FINAL_CHARS=80000 BIG_STDOUT_CHARS=80000 BIG_STDERR_CHARS=80000", project_dir, codex_bin, reasoning_effort "low", timeout_ms 60000.
+Call codex_task with description "Large output validation" and prompt "CLAUDE_LARGE_OUTPUT BIG_FINAL_CHARS=80000 BIG_STDOUT_CHARS=80000 BIG_STDERR_CHARS=80000", project_dir, codex_bin, reasoning_effort "low", timeout_ms 60000.
 
 Verify the tool result says agent.ok true and agent.mcpResponse.compacted true. Return exactly one compact JSON object and no markdown. Shape: {"ok": boolean, "compacted": boolean}.`;
 const systemPrompt =
-  "You are validating the codex-subagents plugin. Use only ask_codex from the codex-subagents MCP server. Do not use Bash, Read, shell commands, or filesystem inspection. Return only the requested JSON.";
+  "You are validating the codex-subagents plugin. Use only codex_task from the codex-subagents MCP server. Do not use Bash, Read, shell commands, or filesystem inspection. Return only the requested JSON.";
 const resultSchema = JSON.stringify({
   type: "object",
   additionalProperties: false,
@@ -95,7 +95,7 @@ const result = spawnSync(
     "--setting-sources",
     "local",
     "--allowedTools",
-    "mcp__plugin_codex-subagents_codex-subagents__ask_codex",
+    "mcp__plugin_codex-subagents_codex-subagents__codex_task",
     "--append-system-prompt",
     systemPrompt,
     "--model",

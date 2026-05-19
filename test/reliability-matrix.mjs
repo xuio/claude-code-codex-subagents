@@ -16,6 +16,7 @@ const transport = new StdioClientTransport({
   env: {
     ...process.env,
     CODEX_SUBAGENTS_CODEX_BIN: fakeCodex,
+    CODEX_SUBAGENTS_ENABLE_LEGACY_TOOLS: "1",
     CLAUDE_PROJECT_DIR: projectDir,
     CODEX_SUBAGENTS_SESSION_STATE_FILE: path.join(projectDir, "sessions.json"),
     FAKE_CODEX_RECORD_DIR: recordDir,
@@ -391,8 +392,8 @@ try {
     wants_parallel: true,
   });
   assert(
-    choice.structuredContent?.recommendedTool === "ask_codex_parallel",
-    "codex_choose_tool should recommend ask_codex_parallel for parallel work",
+    choice.structuredContent?.recommendedTool === "codex_task_group",
+    "codex_choose_tool should recommend codex_task_group for parallel work",
     choice.structuredContent,
   );
 

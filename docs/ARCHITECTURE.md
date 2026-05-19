@@ -62,7 +62,7 @@ metadata needed to reattach to a Codex thread; prompt text and environment value
 are not persisted.
 
 After an MCP runtime shutdown, app-server sessions with a Codex thread id are
-preserved as recoverable. `recover_codex_session` reattaches with `thread/resume`
+preserved as recoverable. `codex_session_recover` reattaches with `thread/resume`
 and treats `thread/read` as an optional capability.
 
 Async one-shot jobs are process-local and do not survive MCP restarts. Their tool

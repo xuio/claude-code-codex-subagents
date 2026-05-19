@@ -78,7 +78,7 @@ Codex should stay read-only and include the token AUTODISCOVERY_OK in its reply.
 After the Codex result comes back, return exactly one compact JSON object and no markdown. Shape: {"ok": boolean, "tokenSeen": boolean, "model": string, "cwd": string}. Set ok true when the Codex tool call completed successfully.`;
 
   const systemPrompt =
-    "You are validating the codex-subagents plugin. You may use Skill only for codex-subagents guidance, then codex_choose_tool, codex_usage_guide, or ask_codex. Do not use Bash, Read, shell commands, or filesystem inspection. The MCP server already resolves the Codex binary.";
+    "You are validating the codex-subagents plugin. You may use Skill only for codex-subagents guidance, then codex_choose_tool, codex_usage_guide, or codex_task. Do not use Bash, Read, shell commands, or filesystem inspection. The MCP server already resolves the Codex binary.";
   const resultSchema = JSON.stringify({
     type: "object",
     additionalProperties: false,
@@ -107,7 +107,7 @@ After the Codex result comes back, return exactly one compact JSON object and no
       [
         "mcp__plugin_codex-subagents_codex-subagents__codex_usage_guide",
         "mcp__plugin_codex-subagents_codex-subagents__codex_choose_tool",
-        "mcp__plugin_codex-subagents_codex-subagents__ask_codex",
+        "mcp__plugin_codex-subagents_codex-subagents__codex_task",
         "Skill",
       ].join(","),
       "--append-system-prompt",
@@ -183,7 +183,7 @@ After the Codex result comes back, return exactly one compact JSON object and no
   );
 
   console.log(
-    `Claude autodiscovery passed in ${envelope.duration_ms}ms, cost $${envelope.total_cost_usd}`,
+    `Claude native autodiscovery passed in ${envelope.duration_ms}ms, cost $${envelope.total_cost_usd}`,
   );
 } finally {
   await rm(recordDir, { recursive: true, force: true });

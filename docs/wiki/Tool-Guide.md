@@ -4,12 +4,11 @@ Use the intuitive front-door tools first.
 
 | Task | Tool |
 | --- | --- |
-| One Codex task | `ask_codex` |
-| Several independent tasks | `ask_codex_parallel` |
-| Parallel review with merged output | `run_agents_aggregate` |
-| Persistent session | `start_codex_session`, `continue_codex_session` |
-| Long-running session | `start_codex_session_async`, `send_codex_session_prompt`, `steer_codex_session`, `wait_codex_session` |
-| Async one-shot job | `start_agent_run`, `get_agent_run`, `wait_agent_run`, `cancel_agent_run` |
+| One Codex task | `codex_task` |
+| Several independent tasks | `codex_task_group` |
+| Persistent session | `codex_session_start`, `codex_session_prompt` |
+| Long-running session | `codex_session_start`, `codex_session_status`, `codex_session_wait`, `codex_session_steer` |
+| Session lifecycle | `codex_sessions`, `codex_session_recover`, `codex_session_cancel` |
 | Diagnostics | `codex_status`, `codex_doctor`, `codex_export_debug_bundle` |
 
 ## One Agent

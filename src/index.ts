@@ -43,41 +43,38 @@ import { packageVersion } from "./version.js";
 const usageGuide = [
   "Claude Code integration guide for codex-subagents:",
   "",
-  "Use this MCP server whenever the user asks Claude to use Codex, OpenAI Codex, Codex subagents, Codex Spark, a Codex second opinion, parallel Codex review, or independent Codex codebase analysis. You do not need the user to name an MCP tool.",
+  "Use Codex subagents like Claude's native Task tool when the user needs an independent OpenAI Codex worker. Use this MCP server whenever the user asks Claude to use Codex, OpenAI Codex, Codex subagents, Codex Spark, a Codex second opinion, parallel Codex review, or independent Codex codebase analysis. You do not need the user to name an MCP tool.",
   "",
   "Tool choice:",
-  "- Prefer ask_codex for one delegated Codex task. This is the clearest front door for normal \"ask Codex\" or \"Codex second opinion\" requests.",
-  "- Prefer ask_codex_parallel when the work can be split into independent concurrent tasks, for example separate reviewers for API flow, tests, security, performance, UI, docs, or migration risk.",
-  "- Prefer start_codex_session and continue_codex_session when the user wants a Codex agent to keep context across multiple prompts. Persistent sessions use Codex app-server by default and fall back to codex exec only when app-server is unavailable.",
-  "- Prefer start_codex_session_async when Claude needs a session id immediately while Codex keeps working in the background.",
-  "- Use send_codex_session_prompt for ordinary follow-ups on an active or idle Codex session. This preserves context and queues behind the active turn when needed.",
-  "- Use steer_codex_session only when the user wants to redirect the active work now. It sends real live steering into a running app-server turn; use interrupt_current only when the active turn should be cancelled and redirected. If a session had to fall back to codex exec, steering degrades to the next high-priority queued turn.",
-  "- Use get_codex_session or wait_codex_session to inspect or wait for long-running Codex sessions. Session snapshots include appServer.supports and appServerFallbackReason for protocol diagnostics.",
-  "- Use recover_codex_session when Claude has a persisted session_id from before a Claude/MCP restart and wants to reattach to that Codex thread before sending a follow-up.",
+  "- Prefer codex_task for one delegated Codex task. It is the most native Claude-like front door: description plus prompt, read-only by default, answer-first result.",
+  "- Prefer codex_task_group when the work can be split into independent concurrent tasks, for example separate reviewers for API flow, tests, security, performance, UI, docs, or migration risk.",
+  "- Prefer codex_session_start when the user wants a Codex agent to keep context across multiple prompts. Persistent sessions use Codex app-server by default and fall back to codex exec only when app-server is unavailable.",
+  "- Use codex_session_prompt for ordinary follow-ups on an active or idle Codex session. This preserves context and queues behind the active turn when needed.",
+  "- Use codex_session_steer only when the user wants to redirect the active work now. It sends real live steering into a running app-server turn; use interrupt_current only when the active turn should be cancelled and redirected. If a session had to fall back to codex exec, steering degrades to the next high-priority queued turn.",
+  "- Use codex_session_status or codex_session_wait to inspect or wait for long-running Codex sessions. Session snapshots include partial_result, last_event, elapsed_ms, next_poll_ms, appServer.supports, and appServerFallbackReason.",
+  "- Use codex_session_recover when Claude has a persisted session_id from before a Claude/MCP restart and wants to reattach to that Codex thread before sending a follow-up.",
   "- Use codex_export_debug_bundle after repeated failures; it writes recent diagnostics, selected session/job state, status, and optional log tail into one local JSON bundle.",
   "- Use codex_choose_tool if you are unsure which Codex tool fits the request.",
-  "- Use run_agent, run_agents, run_agents_aggregate, start_session, and send_session_prompt for lower-level/manual control; they are compatibility tools behind the intuitive front doors.",
-  "- Use run_agents_aggregate when Claude needs a concise consensus object from several independent Codex agents.",
-  "- Use start_agent_run or start_agents_run for slow or broad Codex work; poll with get_agent_run, wait with wait_agent_run, and cancel with cancel_agent_run.",
+  "- Legacy/manual tools such as ask_codex, run_agent, run_agents, and old session names are hidden by default. They are exposed only when CODEX_SUBAGENTS_ENABLE_LEGACY_TOOLS=1.",
   "- Use codex_doctor for installation, binary, auth, and default-setting diagnostics.",
   "- Use codex_status only for diagnostics or when you need to confirm the Codex binary/version.",
   "- Use codex_usage_guide if you are unsure how to structure a Codex delegation.",
   "- Use codex_choose_tool before delegating when the request is ambiguous between one agent, parallel agents, aggregation, a persistent session, an async job, or live steering.",
   "",
   "Default operating rules:",
+  "- Do not use Codex for simple file reads, simple grep/search, tiny local commands, or work Claude can do directly faster.",
   "- Keep sandbox read-only unless the user explicitly asks for a different sandbox.",
   "- If the user explicitly asks for non-sandbox/full local capabilities, set dangerously_bypass_approvals_and_sandbox true. This maps to Codex's --dangerously-bypass-approvals-and-sandbox flag and allows DNS/network plus unrestricted file and git writes.",
   "- Approvals are non-interactive; do not expect Codex to ask permission.",
-  "- If wait_codex_session returns completed false with timeoutReason \"wait_timeout\", the session is still running unless its status says otherwise.",
+  "- If codex_session_wait returns completed false with timeoutReason \"wait_timeout\", the session is still running unless its status says otherwise.",
   "- If a tool returns recovery.reason \"backpressure\", reduce max_parallel or wait before retrying. codex_status exposes current queue/session limits.",
   "- If a response mentions outputArtifacts, use the artifact paths for full retained output instead of asking Codex to resend huge stdout/stderr.",
-  "- Prefer model_preset \"spark\" for responsive focused checks, small reviews, UI iteration, and sidecar analysis.",
+  "- Do not use model_preset \"spark\" by default. Use Spark only when the user asks for Spark or when a quick focused sidecar check is clearly more appropriate than the default Codex model.",
   "- Use reasoning_effort \"medium\" by default, \"low\" for simple checks, and \"high\" or \"xhigh\" only for difficult analysis. Do not use \"minimal\"; Codex currently auto-attaches web_search and the API rejects that tool with minimal reasoning.",
   "- Do not combine model_preset \"spark\" with reasoning_summary values other than \"none\"; Spark does not support reasoning.summary.",
   "- Do not set service_tier by default. Let Codex use its normal account/default service tier unless the user explicitly asks for a service tier.",
   "- Pass project_dir whenever Claude knows the active project directory so Codex works in the same tree as Claude Code.",
-  "- Persistent sessions are durable across MCP restarts when Codex has produced a thread id. After restart, list_sessions can show recovered sessions and recover_codex_session can validate the thread.",
-  "- Async one-shot jobs from start_agent_run/start_agents_run are not durable across MCP restarts. Use persistent session tools for recoverable long-running work.",
+  "- Persistent sessions are durable across MCP restarts when Codex has produced a thread id. After restart, codex_sessions can show recovered sessions and codex_session_recover can validate the thread.",
   "- Raw debug logs are intentionally verbose and may contain MCP traffic and prompt text. Treat logs and debug bundles as sensitive local data.",
   "- Do not use Bash, Read, or filesystem inspection to locate Codex. The MCP server resolves Codex automatically, preferring the Codex desktop app binary when installed.",
   "- Set isolated_codex_home true when a run should ignore the user's Codex MCP server config and use only this request's temporary Codex configuration.",
@@ -99,6 +96,14 @@ const server = new McpServer(
     instructions: usageGuide,
   },
 );
+
+const legacyToolsEnabled = process.env.CODEX_SUBAGENTS_ENABLE_LEGACY_TOOLS === "1";
+
+const registerTool: typeof server.registerTool = server.registerTool.bind(server);
+const registerLegacyTool: typeof server.registerTool = ((name, config, cb) => {
+  if (!legacyToolsEnabled) return;
+  return registerTool(name, config, cb);
+}) as typeof server.registerTool;
 
 const reasoningEffortSchema = z.enum(reasoningEfforts);
 const sandboxModeSchema = z.enum(sandboxModes);
@@ -421,10 +426,13 @@ function jsonResult(value: Record<string, unknown>, isError = false): CallToolRe
 }
 
 function errorResult(error: unknown, context = "tool_call"): CallToolResult {
+  const recovery = recoveryForError(error, context);
   return jsonResult(
     {
+      ok: false,
       error: redactSensitiveText(error instanceof Error ? error.message : String(error)),
-      recovery: redactJsonValue(recoveryForError(error, context)),
+      recovery: redactJsonValue(recovery),
+      suggested_next_action: recovery.recommendedAction,
     },
     true,
   );
@@ -436,9 +444,167 @@ function agentResultResponse(result: Parameters<typeof compactAgentResultForMcp>
     {
       agent: compactAgentResultForMcp(result),
       recovery,
+      suggested_next_action: recovery?.recommendedAction,
     },
     !result.ok,
   );
+}
+
+function firstUsefulLine(text: string | undefined, fallback: string): string {
+  const line = String(text ?? "")
+    .split(/\r?\n/)
+    .map((part) => part.trim())
+    .find(Boolean);
+  if (!line) return fallback;
+  return line.length <= 500 ? line : `${line.slice(0, 500)}...`;
+}
+
+function stringifyResultValue(value: unknown, fallback = ""): string {
+  if (typeof value === "string") return value;
+  if (value === undefined || value === null) return fallback;
+  try {
+    return JSON.stringify(value, null, 2);
+  } catch {
+    return String(value);
+  }
+}
+
+function suggestedActionForAgent(result: { ok: boolean; status: string }, recovery?: { recommendedAction?: string }): string {
+  if (recovery?.recommendedAction) return recovery.recommendedAction;
+  if (result.ok) return "Use the result directly, or ask a follow-up Codex task only if more independent analysis is needed.";
+  return "Inspect the Codex result details and retry only if the failure looks transient.";
+}
+
+function nativeAgentPayload(
+  result: Parameters<typeof compactAgentResultForMcp>[0],
+  context: { description?: string; prompt?: string; tool: string },
+): Record<string, unknown> {
+  const agent = compactAgentResultForMcp(result);
+  const recovery = recoveryForAgentResult(result);
+  const resultValue = agent.structuredOutput ?? agent.finalMessage;
+  const answer = stringifyResultValue(resultValue, agent.finalMessage);
+  return {
+    ok: agent.ok,
+    status: agent.status,
+    result: answer,
+    structured_result: agent.structuredOutput,
+    summary: firstUsefulLine(answer, `Codex task ${agent.status}`),
+    confidence: agent.ok ? "high" : "low",
+    next_action: suggestedActionForAgent(agent, recovery),
+    suggested_next_action: recovery?.recommendedAction,
+    task: {
+      description: context.description,
+      prompt: context.prompt,
+      tool: context.tool,
+    },
+    raw_output: {
+      final_message: agent.finalMessage,
+      stdout_tail: agent.stdoutTail,
+      stderr_tail: agent.stderr,
+      output_artifacts: agent.outputArtifacts,
+      compacted: agent.mcpResponse.compacted,
+    },
+    agent,
+    recovery,
+  };
+}
+
+function nativeAgentResponse(
+  result: Parameters<typeof compactAgentResultForMcp>[0],
+  context: { description?: string; prompt?: string; tool: string },
+): CallToolResult {
+  return jsonResult(nativeAgentPayload(result, context), !result.ok);
+}
+
+function nativeParallelResponse(
+  results: Parameters<typeof compactAgentResultsForMcp>[0],
+  context: { descriptions: Array<{ name?: string; description?: string; prompt?: string }> },
+): CallToolResult {
+  const agents = compactAgentResultsForMcp(results);
+  const recoveries = results.map(recoveryForAgentResult);
+  const ok = results.every((result) => result.ok);
+  const normalized = agents.map((agent, index) => {
+    const recovery = recoveries[index];
+    const task = context.descriptions[index] ?? {};
+    const answer = stringifyResultValue(agent.structuredOutput ?? agent.finalMessage, agent.finalMessage);
+    return {
+      name: agent.name ?? task.name ?? `codex-task-${index + 1}`,
+      ok: agent.ok,
+      status: agent.status,
+      result: answer,
+      structured_result: agent.structuredOutput,
+      summary: firstUsefulLine(answer, `Codex task ${agent.status}`),
+      confidence: agent.ok ? "high" : "low",
+      suggested_next_action: recovery?.recommendedAction,
+      task,
+    };
+  });
+  const resultText = normalized
+    .map((item) => `## ${item.name}\n${item.result || item.status}`)
+    .join("\n\n");
+  const firstRecovery = recoveries.find(Boolean);
+  return jsonResult(
+    {
+      ok,
+      status: ok ? "completed" : "failed",
+      result: resultText,
+      results: normalized,
+      summary: `${results.filter((result) => result.ok).length}/${results.length} Codex tasks completed successfully.`,
+      confidence: ok ? "high" : "low",
+      next_action: firstRecovery?.recommendedAction ?? "Use the per-task results directly, or ask focused follow-up tasks for any gaps.",
+      suggested_next_action: firstRecovery?.recommendedAction,
+      raw_output: {
+        agents: agents.map((agent) => ({
+          name: agent.name,
+          final_message: agent.finalMessage,
+          stdout_tail: agent.stdoutTail,
+          stderr_tail: agent.stderr,
+          output_artifacts: agent.outputArtifacts,
+          compacted: agent.mcpResponse.compacted,
+        })),
+      },
+      agents,
+      recoveries,
+    },
+    !ok,
+  );
+}
+
+function nativeTaskPrompt(args: { description?: string; prompt: string; subagent_type?: string }): string {
+  const prefix = [
+    args.subagent_type ? `Codex subagent type: ${args.subagent_type}` : undefined,
+    args.description ? `Task description: ${args.description}` : undefined,
+  ].filter(Boolean);
+  if (prefix.length === 0) return args.prompt;
+  return `${prefix.join("\n")}\n\n${args.prompt}`;
+}
+
+function sessionProgressPayload(session: unknown): Record<string, unknown> {
+  if (!session || typeof session !== "object") return {};
+  const value = session as Record<string, unknown>;
+  const partial = value.partial && typeof value.partial === "object" ? (value.partial as Record<string, unknown>) : undefined;
+  const lastResult = value.lastResult && typeof value.lastResult === "object" ? (value.lastResult as Record<string, unknown>) : undefined;
+  const activeTurn = value.activeTurn && typeof value.activeTurn === "object" ? (value.activeTurn as Record<string, unknown>) : undefined;
+  const updatedAt = typeof value.updatedAt === "string" ? Date.parse(value.updatedAt) : NaN;
+  const createdAt = typeof activeTurn?.createdAt === "string" ? Date.parse(activeTurn.createdAt) : NaN;
+  const elapsedBase = Number.isFinite(createdAt) ? createdAt : updatedAt;
+  const partialResult =
+    typeof partial?.lastAgentMessage === "string"
+      ? partial.lastAgentMessage
+      : typeof lastResult?.finalMessage === "string"
+        ? lastResult.finalMessage
+        : undefined;
+  return {
+    partial_result: partialResult,
+    last_event:
+      typeof activeTurn?.status === "string"
+        ? `${activeTurn.kind ?? "turn"}:${activeTurn.status}`
+        : typeof value.status === "string"
+          ? value.status
+          : undefined,
+    elapsed_ms: Number.isFinite(elapsedBase) ? Math.max(0, Date.now() - elapsedBase) : undefined,
+    next_poll_ms: value.active ? 1_000 : undefined,
+  };
 }
 
 function withRequestAbort<T extends object>(options: T, extra: ToolExtra | undefined): T & { abortSignal?: AbortSignal } {
@@ -455,7 +621,7 @@ function ephemeralJobDurability(): Record<string, unknown> {
     durable: false,
     survivesRestart: false,
     recommendation:
-      "Use start_codex_session_async when Claude needs recoverable long-running Codex work across MCP restarts.",
+      "Use codex_session_start when Claude needs recoverable long-running Codex work across MCP restarts.",
   };
 }
 
@@ -797,7 +963,55 @@ function toFrontDoorParallelRunOptions(args: FrontDoorParallelToolInput) {
   });
 }
 
-server.registerTool(
+type NativeTaskInput = SharedRunInput & {
+  description: string;
+  prompt: string;
+  subagent_type?: string;
+};
+
+type NativeTaskGroupItemInput = Omit<ParallelAgentInput, "prompt"> & {
+  description: string;
+  prompt: string;
+  subagent_type?: string;
+};
+
+type NativeTaskGroupInput = SharedRunInput & {
+  tasks: NativeTaskGroupItemInput[];
+  max_parallel?: number;
+};
+
+function toNativeTaskRunOptions(args: NativeTaskInput) {
+  return toRunOptions({
+    ...args,
+    name: args.name ?? args.description,
+    prompt: nativeTaskPrompt(args),
+  });
+}
+
+function toNativeSessionRunOptions(args: SharedRunInput & { prompt: string; description?: string; subagent_type?: string }) {
+  return toRunOptions({
+    ...args,
+    name: args.name ?? args.description,
+    prompt: nativeTaskPrompt({
+      description: args.description,
+      prompt: args.prompt,
+      subagent_type: args.subagent_type,
+    }),
+  });
+}
+
+function toNativeTaskGroupRunOptions(args: NativeTaskGroupInput) {
+  return toParallelRunOptions({
+    ...args,
+    agents: args.tasks.map((task) => ({
+      ...task,
+      name: task.name ?? task.description,
+      prompt: nativeTaskPrompt(task),
+    })),
+  });
+}
+
+registerTool(
   "codex_usage_guide",
   {
     title: "How to use Codex subagents",
@@ -810,50 +1024,51 @@ server.registerTool(
       jsonResult({
         guide: usageGuide,
         preferredTools: {
-          oneTask: "ask_codex",
-          parallelTasks: "ask_codex_parallel",
-          persistentSessionStart: "start_codex_session",
-          persistentSessionFollowUp: "continue_codex_session",
-          longRunningSessionStart: "start_codex_session_async",
-          queuedSessionPrompt: "send_codex_session_prompt",
-          steerRunningSession: "steer_codex_session",
-          inspectSession: "get_codex_session",
-          waitForSession: "wait_codex_session",
-          recoverSessionAfterRestart: "recover_codex_session",
+          oneTask: "codex_task",
+          parallelTasks: "codex_task_group",
+          persistentSessionStart: "codex_session_start",
+          persistentSessionFollowUp: "codex_session_prompt",
+          longRunningSessionStart: "codex_session_start",
+          queuedSessionPrompt: "codex_session_prompt",
+          steerRunningSession: "codex_session_steer",
+          inspectSession: "codex_session_status",
+          waitForSession: "codex_session_wait",
+          recoverSessionAfterRestart: "codex_session_recover",
+          listSessions: "codex_sessions",
+          cancelSession: "codex_session_cancel",
           exportDiagnostics: "codex_export_debug_bundle",
-          longRunningOneTask: "start_agent_run",
-          longRunningParallelTasks: "start_agents_run",
-          lowerLevelSingle: "run_agent",
-          lowerLevelParallel: "run_agents",
+          legacyCompatibility:
+            "Set CODEX_SUBAGENTS_ENABLE_LEGACY_TOOLS=1 to expose ask_codex, run_agent, and other pre-refactor tools.",
         },
         examples: {
           single: {
-            tool: "ask_codex",
+            tool: "codex_task",
             arguments: {
-              task:
+              description: "Review authentication flow",
+              prompt:
                 "Inspect the authentication flow read-only. Return the top risks with file paths and line references.",
               project_dir: "/path/to/project",
-              model_preset: "spark",
               reasoning_effort: "medium",
             },
           },
           parallel: {
-            tool: "ask_codex_parallel",
+            tool: "codex_task_group",
             arguments: {
               tasks: [
                 {
+                  description: "Review API flow",
                   name: "api",
-                  task: "Review API flow read-only. Return concrete findings with paths.",
+                  prompt: "Review API flow read-only. Return concrete findings with paths.",
                   project_dir: "/path/to/project",
                 },
                 {
+                  description: "Review test coverage",
                   name: "tests",
-                  task: "Review test coverage gaps read-only. Return concrete findings with paths.",
+                  prompt: "Review test coverage gaps read-only. Return concrete findings with paths.",
                   project_dir: "/path/to/project",
                 },
               ],
               max_parallel: 2,
-              model_preset: "spark",
               reasoning_effort: "medium",
             },
           },
@@ -862,12 +1077,12 @@ server.registerTool(
     ),
 );
 
-server.registerTool(
+registerTool(
   "codex_choose_tool",
   {
     title: "Choose Codex tool",
     description:
-      "Return a short decision guide for which Codex MCP tool Claude should use. Call this when a user asks for Codex and Claude is unsure whether to run one agent, parallel agents, a persistent session, or an async job.",
+      "Return a short decision guide for which Codex MCP tool Claude should use. Call this when a user asks for Codex and Claude is unsure whether to run one agent, parallel agents, a persistent session, or long-running work.",
     inputSchema: {
       request: z.string().trim().optional().describe("Optional user request Claude is trying to map to a Codex tool."),
       task_count: z.number().int().min(1).max(24).optional().describe("Known number of independent Codex tasks."),
@@ -884,50 +1099,93 @@ server.registerTool(
   async (args, extra) =>
     loggedToolCall("codex_choose_tool", args, extra, async () => {
       const taskCount = args.task_count ?? (args.wants_parallel ? 2 : 1);
-      let recommendedTool = "ask_codex";
-      if (args.recovering_after_restart) recommendedTool = "recover_codex_session";
-      else if (args.wants_steering) recommendedTool = "steer_codex_session";
-      else if (args.continuing_session && args.long_running) recommendedTool = "send_codex_session_prompt";
-      else if (args.continuing_session) recommendedTool = "continue_codex_session";
-      else if (args.wants_session && (args.wants_async_session || args.long_running)) recommendedTool = "start_codex_session_async";
-      else if (args.wants_session) recommendedTool = "start_codex_session";
-      else if (args.wants_aggregation) recommendedTool = "run_agents_aggregate";
-      else if (args.long_running && taskCount > 1) recommendedTool = "start_agents_run";
-      else if (args.long_running) recommendedTool = "start_agent_run";
-      else if (args.wants_parallel || taskCount > 1) recommendedTool = "ask_codex_parallel";
+      let recommendedTool = "codex_task";
+      if (args.recovering_after_restart) recommendedTool = "codex_session_recover";
+      else if (args.wants_steering) recommendedTool = "codex_session_steer";
+      else if (args.continuing_session) recommendedTool = "codex_session_prompt";
+      else if (args.wants_session || args.long_running) recommendedTool = "codex_session_start";
+      else if (args.wants_aggregation) recommendedTool = "codex_task_group";
+      else if (args.wants_parallel || taskCount > 1) recommendedTool = "codex_task_group";
 
       return jsonResult({
         recommendedTool,
         request: args.request,
         rules: [
-          "Use ask_codex for one normal Codex task.",
-          "Use ask_codex_parallel for multiple independent Codex tasks.",
-          "Use start_codex_session for a new multi-turn Codex worker and continue_codex_session for follow-ups.",
-          "Use recover_codex_session after an MCP restart when Claude has a previous persisted session id.",
-          "Use start_codex_session_async when Claude needs the session id immediately and will poll or wait later.",
-          "Use send_codex_session_prompt for ordinary follow-up prompts on an active or idle Codex session.",
-          "Use steer_codex_session only for active redirection. Live steering requires app-server support; exec fallback queues a high-priority turn.",
-          "Use start_agent_run/start_agents_run for slow jobs that should not hold a blocking MCP request open.",
-          "Use run_agents_aggregate only when Claude needs a deterministic consensus object.",
+          "Use codex_task for one normal Codex task; it is the most native Claude-like front door.",
+          "Use codex_task_group for multiple independent Codex tasks.",
+          "Use codex_session_start for a new multi-turn Codex worker and codex_session_prompt for follow-ups.",
+          "Use codex_session_recover after an MCP restart when Claude has a previous persisted session id.",
+          "Use codex_session_status to inspect progress and codex_session_wait when Claude needs completion.",
+          "Use codex_session_steer only for active redirection. Live steering requires app-server support; exec fallback queues a high-priority turn.",
+          "Use codex_session_start for slow work that should not hold a blocking request open.",
+          "Use codex_task_group when Claude needs multiple independent answers to merge or compare.",
           "Pass project_dir whenever Claude knows the active project directory.",
+          "Do not use Codex for simple file reads, simple grep/search, or tiny commands Claude can do directly.",
           "When recovery.reason is backpressure, inspect codex_status and retry with less parallelism after a short wait.",
           "Do not use Bash or Read to locate Codex; this MCP server resolves the binary.",
         ],
-        aliases: {
-          ask_codex: ["run_agent"],
-          ask_codex_parallel: ["run_agents"],
-          start_codex_session: ["start_session"],
-          continue_codex_session: ["send_session_prompt"],
-          start_codex_session_async: ["start_session + return immediately"],
-          send_codex_session_prompt: ["queued continue_codex_session"],
-          steer_codex_session: ["live app-server turn steering"],
-          recover_codex_session: ["reattach persisted Codex thread"],
-        },
+        legacyCompatibility:
+          "Pre-refactor tools are disabled by default. Set CODEX_SUBAGENTS_ENABLE_LEGACY_TOOLS=1 only for older clients/tests that still call the old tool names.",
       });
     }),
 );
 
-server.registerTool(
+registerTool(
+  "codex_task",
+  {
+    title: "Codex Task",
+    description:
+      "Native Claude-like front door for launching one OpenAI Codex subagent. Use this like Claude's Task tool for a Codex second opinion, focused review, plan, or codebase analysis. Provide a short description and a self-contained prompt. Defaults to read-only sandbox and does not use Spark unless model_preset is explicitly set to spark.",
+    inputSchema: {
+      description: z
+        .string()
+        .trim()
+        .min(1)
+        .describe("Short human-readable task label, like Claude's native Task description."),
+      prompt: z
+        .string()
+        .min(1)
+        .describe(
+          "Self-contained Codex task prompt. Include scope, read-only expectation, output shape, and file/line reference requirements when reviewing code.",
+        ),
+      subagent_type: z
+        .string()
+        .trim()
+        .min(1)
+        .optional()
+        .describe("Optional Claude-style role label such as reviewer, explorer, security, performance, tests, ui, or docs."),
+      ...frontDoorInputSchema,
+    },
+  },
+  async (args, extra) => {
+    return loggedToolCall("codex_task", args, extra, async () => {
+      const progress = createProgressReporter(extra);
+      try {
+        await progress.send(`Queued Codex task: ${args.description}`);
+        const result = await withProgressHeartbeat(progress, `Still running Codex task: ${args.description}`, () =>
+          runQueuedAgent(withRequestAbort(toNativeTaskRunOptions(args), extra), {
+            onStart: (queuedMs) => {
+              void progress.send(`Started Codex task after ${queuedMs}ms queued`);
+            },
+          }),
+        );
+        await reportAgentResult(progress, result);
+        await progress.flush();
+        return nativeAgentResponse(result, {
+          description: args.description,
+          prompt: args.prompt,
+          tool: "codex_task",
+        });
+      } catch (error) {
+        await progress.flush();
+        logger.error("codex_task.failed", { error: errorForLog(error) });
+        return errorResult(error, "codex_task");
+      }
+    });
+  },
+);
+
+registerLegacyTool(
   "ask_codex",
   {
     title: "Ask Codex",
@@ -968,7 +1226,7 @@ server.registerTool(
   },
 );
 
-server.registerTool(
+registerLegacyTool(
   "run_agent",
   {
     title: "Run one Codex agent",
@@ -1009,7 +1267,7 @@ server.registerTool(
   },
 );
 
-server.registerTool(
+registerLegacyTool(
   "start_agent_run",
   {
     title: "Start one Codex agent run",
@@ -1125,7 +1383,129 @@ const frontDoorParallelTaskSchema = z.object({
   subagent_runtime: commonInputSchema.subagent_runtime,
 });
 
-server.registerTool(
+const nativeTaskGroupTaskSchema = z.object({
+  description: z
+    .string()
+    .trim()
+    .min(1)
+    .describe("Short task label, like Claude's native Task description."),
+  prompt: z
+    .string()
+    .min(1)
+    .describe(
+      "Self-contained Codex prompt for this independent task. Keep overlap low across parallel tasks.",
+    ),
+  subagent_type: z
+    .string()
+    .trim()
+    .min(1)
+    .optional()
+    .describe("Optional Claude-style role label such as reviewer, explorer, security, performance, tests, ui, or docs."),
+  name: z.string().trim().min(1).optional().describe("Optional stable label for this Codex task."),
+  project_dir: commonInputSchema.project_dir,
+  model_preset: commonInputSchema.model_preset,
+  reasoning_effort: commonInputSchema.reasoning_effort,
+  sandbox: commonInputSchema.sandbox.optional(),
+  dangerously_bypass_approvals_and_sandbox:
+    commonInputSchema.dangerously_bypass_approvals_and_sandbox.optional(),
+  codex_bin: commonInputSchema.codex_bin,
+  timeout_ms: commonInputSchema.timeout_ms.optional(),
+  max_output_chars: commonInputSchema.max_output_chars.optional(),
+  output_contract: commonInputSchema.output_contract.optional(),
+  output_schema: commonInputSchema.output_schema,
+  model: commonInputSchema.model,
+  service_tier: commonInputSchema.service_tier.optional(),
+  model_verbosity: commonInputSchema.model_verbosity,
+  reasoning_summary: commonInputSchema.reasoning_summary,
+  cwd: commonInputSchema.cwd,
+  profile: commonInputSchema.profile,
+  include_events: commonInputSchema.include_events.optional(),
+  ephemeral: commonInputSchema.ephemeral.optional(),
+  skip_git_repo_check: commonInputSchema.skip_git_repo_check.optional(),
+  ignore_rules: commonInputSchema.ignore_rules.optional(),
+  isolated_codex_home: commonInputSchema.isolated_codex_home.optional(),
+  mcp_config_policy: commonInputSchema.mcp_config_policy.optional(),
+  codex_mcp_servers: commonInputSchema.codex_mcp_servers,
+  forward_sensitive_env: commonInputSchema.forward_sensitive_env.optional(),
+  idle_timeout_ms: commonInputSchema.idle_timeout_ms,
+  spawn_timeout_ms: commonInputSchema.spawn_timeout_ms.optional(),
+  terminate_grace_ms: commonInputSchema.terminate_grace_ms.optional(),
+  codex_subagents: commonInputSchema.codex_subagents,
+  subagent_tasks: commonInputSchema.subagent_tasks,
+  subagent_runtime: commonInputSchema.subagent_runtime,
+});
+
+registerTool(
+  "codex_task_group",
+  {
+    title: "Codex Task Group",
+    description:
+      "Native Claude-like front door for launching multiple independent Codex subagents in parallel. Use this like multiple Claude Task calls when the work naturally splits by security, performance, tests, API, UI, docs, or migration risk. Defaults are read-only and bounded; Spark is opt-in only.",
+    inputSchema: {
+      tasks: z
+        .array(nativeTaskGroupTaskSchema)
+        .min(1)
+        .max(12)
+        .describe("Independent Codex tasks, each with a short description and prompt."),
+      max_parallel: z
+        .number()
+        .int()
+        .min(1)
+        .max(8)
+        .default(4)
+        .describe("Maximum concurrent Codex processes. Use 2-4 for most responsive parallel reviews."),
+      ...frontDoorInputSchema,
+    },
+  },
+  async (args, extra) => {
+    return loggedToolCall("codex_task_group", args, extra, async () => {
+      const progress = createProgressReporter(extra);
+      try {
+        const total = args.tasks.length * 2 + 1;
+        let completed = 0;
+        let failed = 0;
+        await progress.send(`Queued ${args.tasks.length} Codex tasks`, { total });
+        const results = await withProgressHeartbeat(
+          progress,
+          `Still running ${args.tasks.length} Codex tasks`,
+          () =>
+            runQueuedAgents(toNativeTaskGroupRunOptions(args), {
+              signal: extra?.signal,
+              onStart: (queuedMs, label) => {
+                void progress.send(`Started ${label ?? "Codex task"} after ${queuedMs}ms queued`, { total });
+              },
+              onComplete: async (result) => {
+                completed += 1;
+                if (!result.ok) failed += 1;
+                const last = completed === args.tasks.length;
+                const message = last
+                  ? failed === 0
+                    ? `Codex task group completed (${completed}/${args.tasks.length})`
+                    : `Codex task group finished with errors (${completed}/${args.tasks.length})`
+                  : `${result.ok ? "Completed" : "Finished"} ${result.name ?? "Codex task"} (${completed}/${args.tasks.length})`;
+                await progress.send(message, last ? { progress: total, total } : { total, reserveFinal: true });
+              },
+            }),
+          { total, reserveFinal: true },
+        );
+        await progress.flush();
+        return nativeParallelResponse(results, {
+          descriptions: args.tasks.map((task) => ({
+            name: task.name ?? task.description,
+            description: task.description,
+            prompt: task.prompt,
+          })),
+        });
+      } catch (error) {
+        await progress.flush();
+        logger.error("codex_task_group.failed", { error: errorForLog(error) });
+        return errorResult(error, "codex_task_group");
+      }
+    });
+  },
+);
+
+registerLegacyTool(
   "ask_codex_parallel",
   {
     title: "Ask parallel Codex agents",
@@ -1199,7 +1579,7 @@ server.registerTool(
   },
 );
 
-server.registerTool(
+registerLegacyTool(
   "run_agents",
   {
     title: "Run parallel Codex agents",
@@ -1273,7 +1653,7 @@ server.registerTool(
   },
 );
 
-server.registerTool(
+registerLegacyTool(
   "run_agents_aggregate",
   {
     title: "Run and aggregate parallel Codex agents",
@@ -1338,7 +1718,7 @@ server.registerTool(
   },
 );
 
-server.registerTool(
+registerLegacyTool(
   "start_agents_run",
   {
     title: "Start parallel Codex agents",
@@ -1375,7 +1755,7 @@ server.registerTool(
 
 const jobIdSchema = z.string().trim().min(1).describe("Job id returned by start_agent_run or start_agents_run.");
 
-server.registerTool(
+registerLegacyTool(
   "get_agent_run",
   {
     title: "Get Codex run job",
@@ -1399,7 +1779,7 @@ server.registerTool(
   },
 );
 
-server.registerTool(
+registerLegacyTool(
   "wait_agent_run",
   {
     title: "Wait for Codex run job",
@@ -1448,7 +1828,7 @@ server.registerTool(
   },
 );
 
-server.registerTool(
+registerLegacyTool(
   "cancel_agent_run",
   {
     title: "Cancel Codex run job",
@@ -1470,9 +1850,372 @@ server.registerTool(
   },
 );
 
-const sessionIdSchema = z.string().trim().min(1).describe("Session id returned by start_codex_session or start_session.");
+const sessionIdSchema = z.string().trim().min(1).describe("Session id returned by codex_session_start.");
 
-server.registerTool(
+registerTool(
+  "codex_session_start",
+  {
+    title: "Codex Session Start",
+    description:
+      "Native Claude-like front door for starting a persistent Codex subagent that keeps context across prompts. Returns a session id immediately by default so Claude can keep working, poll progress, queue prompts, or steer the active turn.",
+    inputSchema: {
+      description: z
+        .string()
+        .trim()
+        .min(1)
+        .describe("Short human-readable label for the persistent Codex session."),
+      prompt: z.string().min(1).describe("Initial prompt for the persistent Codex session."),
+      subagent_type: z
+        .string()
+        .trim()
+        .min(1)
+        .optional()
+        .describe("Optional Claude-style role label such as explorer, reviewer, security, performance, tests, ui, or docs."),
+      session_name: z.string().trim().min(1).optional().describe("Optional human label for this session."),
+      wait_for_completion: z
+        .boolean()
+        .default(false)
+        .describe("When true, wait for the initial turn to finish before returning. Leave false for long-running sessions."),
+      ...frontDoorInputSchema,
+    },
+  },
+  async (args, extra) => {
+    return loggedToolCall("codex_session_start", args, extra, async () => {
+      const progress = createProgressReporter(extra);
+      try {
+        const runOptions = {
+          ...toNativeSessionRunOptions(args),
+          ephemeral: false,
+        };
+        await progress.send(`Starting Codex session: ${args.description}`);
+        if (args.wait_for_completion) {
+          const { session, result } = await withProgressHeartbeat(
+            progress,
+            `Still starting Codex session: ${args.description}`,
+            () => sessionManager.start(withRequestAbort(runOptions, extra), { sessionName: args.session_name }),
+          );
+          await reportAgentResult(progress, result);
+          await progress.flush();
+          const compactSession = compactSessionSnapshotForMcp(session);
+          return jsonResult(
+            {
+              ...nativeAgentPayload(result, {
+                description: args.description,
+                prompt: args.prompt,
+                tool: "codex_session_start",
+              }),
+              session: compactSession,
+              ...sessionProgressPayload(compactSession),
+            },
+            !result.ok,
+          );
+        }
+        throwIfRequestAborted(extra);
+        const { session, turn } = sessionManager.startAsync(runOptions, { sessionName: args.session_name });
+        await progress.flush();
+        const compactSession = compactSessionSnapshotForMcp(session);
+        return jsonResult({
+          ok: true,
+          status: "running",
+          result: `Codex session ${session.id} started.`,
+          summary: `Started Codex session: ${args.description}`,
+          confidence: "high",
+          session: compactSession,
+          ...sessionProgressPayload(compactSession),
+          turn,
+          next_action:
+            "Use codex_session_status for progress, codex_session_wait when Claude needs completion, codex_session_prompt for follow-ups, or codex_session_steer for active redirection.",
+        });
+      } catch (error) {
+        await progress.flush();
+        logger.error("codex_session_start.failed", { error: errorForLog(error) });
+        return errorResult(error, "codex_session_start");
+      }
+    });
+  },
+);
+
+registerTool(
+  "codex_session_prompt",
+  {
+    title: "Codex Session Prompt",
+    description:
+      "Send a normal follow-up prompt to an existing persistent Codex session. If the session is active, this queues behind the active turn; if idle, it starts the next turn in the same Codex context.",
+    inputSchema: {
+      session_id: sessionIdSchema,
+      prompt: z.string().min(1).describe("Follow-up prompt for the persistent Codex session."),
+      description: z.string().trim().min(1).optional().describe("Optional short label for this follow-up turn."),
+      subagent_type: z.string().trim().min(1).optional().describe("Optional role label to include in the prompt context."),
+      wait_for_completion: z
+        .boolean()
+        .default(false)
+        .describe("When true, wait for this turn to finish before returning. Leave false when the session is already running."),
+      ...frontDoorInputSchema,
+    },
+  },
+  async (args, extra) => {
+    return loggedToolCall("codex_session_prompt", args, extra, async () => {
+      const progress = createProgressReporter(extra);
+      try {
+        await progress.send(`Queueing prompt for Codex session ${args.session_id}`);
+        const run = () =>
+          sessionManager.send(args.session_id, nativeTaskPrompt(args), toNativeSessionRunOptions(args), {
+            wait: args.wait_for_completion,
+            waitSignal: extra?.signal,
+          });
+        const { session, turn, result, error } = args.wait_for_completion
+          ? await withProgressHeartbeat(progress, `Still waiting for Codex session ${args.session_id}`, run)
+          : await run();
+        if (error || !session) {
+          await progress.flush();
+          return errorResult(new Error(error ?? "Codex session prompt did not return a session."), "codex_session_prompt");
+        }
+        if (result) await reportAgentResult(progress, result);
+        await progress.flush();
+        const compactSession = compactSessionSnapshotForMcp(session);
+        return jsonResult(
+          {
+            ok: result ? result.ok : true,
+            status: result?.status ?? "queued",
+            result: result ? stringifyResultValue(result.structuredOutput ?? result.finalMessage, result.finalMessage) : "Prompt queued.",
+            summary: result ? firstUsefulLine(result.finalMessage, `Codex turn ${result.status}`) : "Queued Codex session prompt.",
+            confidence: result?.ok === false ? "low" : "high",
+            session: compactSession,
+            ...sessionProgressPayload(compactSession),
+            turn,
+            queued: !args.wait_for_completion,
+            agent: result ? compactAgentResultForMcp(result) : undefined,
+            recovery: result ? recoveryForAgentResult(result) : undefined,
+            next_action: result
+              ? suggestedActionForAgent(result, recoveryForAgentResult(result))
+              : "Use codex_session_status to inspect progress or codex_session_wait when Claude needs the queued turn result.",
+          },
+          result ? !result.ok : false,
+        );
+      } catch (error) {
+        await progress.flush();
+        logger.error("codex_session_prompt.failed", { error: errorForLog(error) });
+        return errorResult(error, "codex_session_prompt");
+      }
+    });
+  },
+);
+
+registerTool(
+  "codex_session_steer",
+  {
+    title: "Codex Session Steer",
+    description:
+      "Steer an active Codex session. App-server sessions deliver this into the running turn. If the session fell back to codex exec, steering becomes a high-priority queued turn.",
+    inputSchema: {
+      session_id: sessionIdSchema,
+      prompt: z.string().min(1).describe("Steering instruction to apply to the Codex session."),
+      interrupt_current: z
+        .boolean()
+        .default(false)
+        .describe("Cancel the currently running turn and run this steering prompt next. Leave false to avoid losing in-flight work."),
+      wait_for_completion: z
+        .boolean()
+        .default(false)
+        .describe("When true, wait until the steered active turn or queued fallback steering turn completes."),
+      ...frontDoorInputSchema,
+    },
+  },
+  async (args, extra) => {
+    return loggedToolCall("codex_session_steer", args, extra, async () => {
+      const progress = createProgressReporter(extra);
+      try {
+        await progress.send(`Steering Codex session ${args.session_id}`);
+        const runOptions = toNativeSessionRunOptions({ ...args, description: "Steer Codex session" });
+        const run = () =>
+          sessionManager.steer(args.session_id, args.prompt, runOptions, {
+            wait: args.wait_for_completion,
+            interruptCurrent: args.interrupt_current,
+            waitSignal: extra?.signal,
+          });
+        const { session, turn, result, delivery, error } = args.wait_for_completion
+          ? await withProgressHeartbeat(progress, `Still waiting for Codex session steering ${args.session_id}`, run)
+          : await run();
+        if (error || !session) {
+          await progress.flush();
+          return errorResult(new Error(error ?? "Codex steering did not return a session."), "codex_session_steer");
+        }
+        if (result) await reportAgentResult(progress, result);
+        await progress.flush();
+        const compactSession = compactSessionSnapshotForMcp(session);
+        return jsonResult(
+          {
+            ok: result ? result.ok : true,
+            status: result?.status ?? "queued",
+            result: result ? stringifyResultValue(result.structuredOutput ?? result.finalMessage, result.finalMessage) : "Steering delivered.",
+            summary: result ? firstUsefulLine(result.finalMessage, `Codex steering ${result.status}`) : `Steering ${delivery}.`,
+            confidence: result?.ok === false ? "low" : "high",
+            session: compactSession,
+            ...sessionProgressPayload(compactSession),
+            turn,
+            delivery,
+            queued: !args.wait_for_completion,
+            agent: result ? compactAgentResultForMcp(result) : undefined,
+            recovery: result ? recoveryForAgentResult(result) : undefined,
+            next_action: result
+              ? suggestedActionForAgent(result, recoveryForAgentResult(result))
+              : delivery === "delivered_to_active_turn"
+                ? "Use codex_session_status to inspect live progress or codex_session_wait to wait for the steered turn."
+                : "Use codex_session_wait to wait for the queued steering turn.",
+          },
+          result ? !result.ok : false,
+        );
+      } catch (error) {
+        await progress.flush();
+        logger.error("codex_session_steer.failed", { error: errorForLog(error) });
+        return errorResult(error, "codex_session_steer");
+      }
+    });
+  },
+);
+
+registerTool(
+  "codex_session_status",
+  {
+    title: "Codex Session Status",
+    description:
+      "Inspect a persistent Codex session: status, active turn, queued turns, partial result, last event, elapsed time, and the next suggested polling delay.",
+    inputSchema: {
+      session_id: sessionIdSchema,
+    },
+  },
+  async (args, extra) =>
+    loggedToolCall("codex_session_status", args, extra, async () => {
+      const session = sessionManager.get(args.session_id);
+      if (!session) return errorResult(new Error(`Unknown session_id: ${args.session_id}`), "codex_session_status");
+      const compactSession = compactSessionSnapshotForMcp(session);
+      return jsonResult({
+        ok: true,
+        session: compactSession,
+        ...sessionProgressPayload(compactSession),
+        next_action: compactSession.active
+          ? "Poll codex_session_status for progress, call codex_session_wait when Claude needs completion, or codex_session_steer to redirect active work."
+          : "Use codex_session_prompt for follow-up work in this same Codex context.",
+      });
+    }),
+);
+
+registerTool(
+  "codex_session_wait",
+  {
+    title: "Codex Session Wait",
+    description:
+      "Wait until a Codex session becomes idle, or until a specific queued/running turn completes. Use after codex_session_start, codex_session_prompt, or codex_session_steer.",
+    inputSchema: {
+      session_id: sessionIdSchema,
+      turn_id: z.string().trim().min(1).optional().describe("Optional turn id to wait for. Omit to wait until the whole session queue is idle."),
+      timeout_ms: z.number().int().positive().max(86_400_000).default(600_000),
+    },
+  },
+  async (args, extra) =>
+    loggedToolCall("codex_session_wait", args, extra, async () => {
+      const progress = createProgressReporter(extra);
+      try {
+        await progress.send(`Waiting for Codex session ${args.session_id}`);
+        const waited = await withProgressHeartbeat(
+          progress,
+          `Still waiting for Codex session ${args.session_id}`,
+          () => sessionManager.wait(args.session_id, args.timeout_ms, args.turn_id, extra?.signal),
+        );
+        await progress.flush();
+        if (waited.error || !waited.session) {
+          return errorResult(new Error(waited.error ?? "Codex session was not found."), "codex_session_wait");
+        }
+        const compactSession = compactSessionSnapshotForMcp(waited.session);
+        const recovery = recoveryForWait("codex_session", waited.timeoutReason);
+        return jsonResult({
+          ok: waited.timeoutReason !== "wait_cancelled",
+          completed: waited.completed,
+          timeoutReason: waited.timeoutReason,
+          session: compactSession,
+          ...sessionProgressPayload(compactSession),
+          turn: waited.turn,
+          recovery,
+          suggested_next_action: recovery?.recommendedAction,
+          next_action:
+            recovery?.recommendedAction ??
+            "Use session.lastResult directly, or send a follow-up prompt if more Codex context is needed.",
+        }, waited.timeoutReason === "wait_cancelled");
+      } catch (error) {
+        await progress.flush();
+        logger.error("codex_session_wait.failed", { error: errorForLog(error) });
+        return errorResult(error, "codex_session_wait");
+      }
+    }),
+);
+
+registerTool(
+  "codex_sessions",
+  {
+    title: "Codex Sessions",
+    description: "List persistent Codex sessions held by this daemonless MCP server process.",
+    inputSchema: {},
+  },
+  async (args, extra) =>
+    loggedToolCall("codex_sessions", args, extra, async () =>
+      jsonResult({ ok: true, sessions: sessionManager.list().map(compactSessionSnapshotForMcp) }),
+    ),
+);
+
+registerTool(
+  "codex_session_recover",
+  {
+    title: "Codex Session Recover",
+    description:
+      "Reattach a durable Codex session after Claude Code or the MCP server restarted. Use before codex_session_prompt when Claude has an older persisted session id.",
+    inputSchema: {
+      session_id: sessionIdSchema,
+    },
+  },
+  async (args, extra) =>
+    loggedToolCall("codex_session_recover", args, extra, async () => {
+      const progress = createProgressReporter(extra);
+      await progress.send(`Recovering Codex session ${args.session_id}`);
+      const recovered = await sessionManager.recover(args.session_id);
+      await progress.flush();
+      if (recovered.error || !recovered.session) {
+        return errorResult(new Error(recovered.error ?? "Codex session could not be recovered."), "codex_session_recover");
+      }
+      const compactSession = compactSessionSnapshotForMcp(recovered.session);
+      return jsonResult({
+        ok: true,
+        recovered: recovered.recovered,
+        session: compactSession,
+        ...sessionProgressPayload(compactSession),
+        next_action: "Use codex_session_prompt to continue this recovered Codex context.",
+      });
+    }),
+);
+
+registerTool(
+  "codex_session_cancel",
+  {
+    title: "Codex Session Cancel",
+    description: "Cancel the currently running turn for a persistent Codex session, or mark an idle session cancelled.",
+    inputSchema: {
+      session_id: sessionIdSchema,
+    },
+  },
+  async (args, extra) =>
+    loggedToolCall("codex_session_cancel", args, extra, async () => {
+      const session = sessionManager.cancel(args.session_id);
+      if (!session) return errorResult(new Error(`Unknown session_id: ${args.session_id}`), "codex_session_cancel");
+      const compactSession = compactSessionSnapshotForMcp(session);
+      return jsonResult({
+        ok: true,
+        session: compactSession,
+        ...sessionProgressPayload(compactSession),
+        next_action: "Start a new Codex session only if more work is needed.",
+      });
+    }),
+);
+
+registerLegacyTool(
   "start_codex_session",
   {
     title: "Start Codex session",
@@ -1524,7 +2267,7 @@ server.registerTool(
   },
 );
 
-server.registerTool(
+registerLegacyTool(
   "start_codex_session_async",
   {
     title: "Start long-running Codex session",
@@ -1551,9 +2294,13 @@ server.registerTool(
           { sessionName: args.session_name },
         );
         await progress.flush();
+        const compactSession = compactSessionSnapshotForMcp(session);
         return jsonResult({
-          session: compactSessionSnapshotForMcp(session),
+          session: compactSession,
+          ...sessionProgressPayload(compactSession),
           turn,
+          next_action:
+            "Session is running in the background. Use get_codex_session for progress, wait_codex_session to wait, send_codex_session_prompt for follow-ups, or steer_codex_session for active redirection.",
           note:
             "Session is running in the background. Use get_codex_session, wait_codex_session, send_codex_session_prompt, or steer_codex_session with this session_id.",
         });
@@ -1566,7 +2313,7 @@ server.registerTool(
   },
 );
 
-server.registerTool(
+registerLegacyTool(
   "continue_codex_session",
   {
     title: "Continue Codex session",
@@ -1595,9 +2342,11 @@ server.registerTool(
           await progress.flush();
           return jsonResult(
             {
+              ok: false,
               error,
               session: session ? compactSessionSnapshotForMcp(session) : session,
               recovery: recoveryForError(new Error(error ?? "Codex session did not return a result."), "continue_codex_session"),
+              suggested_next_action: recoveryForError(new Error(error ?? "Codex session did not return a result."), "continue_codex_session").recommendedAction,
             },
             true,
           );
@@ -1621,7 +2370,7 @@ server.registerTool(
   },
 );
 
-server.registerTool(
+registerLegacyTool(
   "send_codex_session_prompt",
   {
     title: "Queue Codex session prompt",
@@ -1658,10 +2407,12 @@ server.registerTool(
           await progress.flush();
           return jsonResult(
             {
+              ok: false,
               error,
               session: session ? compactSessionSnapshotForMcp(session) : session,
               turn,
               recovery: recoveryForError(new Error(error ?? "Codex session prompt did not return a session."), "send_codex_session_prompt"),
+              suggested_next_action: recoveryForError(new Error(error ?? "Codex session prompt did not return a session."), "send_codex_session_prompt").recommendedAction,
             },
             true,
           );
@@ -1675,6 +2426,9 @@ server.registerTool(
             queued: !args.wait_for_completion,
             agent: result ? compactAgentResultForMcp(result) : undefined,
             recovery: result ? recoveryForAgentResult(result) : undefined,
+            next_action: result
+              ? suggestedActionForAgent(result, recoveryForAgentResult(result))
+              : "Use get_codex_session to inspect progress or wait_codex_session when Claude needs the queued turn result.",
           },
           result ? !result.ok : false,
         );
@@ -1687,7 +2441,7 @@ server.registerTool(
   },
 );
 
-server.registerTool(
+registerLegacyTool(
   "steer_codex_session",
   {
     title: "Steer Codex session",
@@ -1737,11 +2491,13 @@ server.registerTool(
           await progress.flush();
           return jsonResult(
             {
+              ok: false,
               error,
               session: session ? compactSessionSnapshotForMcp(session) : session,
               turn,
               delivery,
               recovery: recoveryForError(new Error(error ?? "Codex steering did not return a session."), "steer_codex_session"),
+              suggested_next_action: recoveryForError(new Error(error ?? "Codex steering did not return a session."), "steer_codex_session").recommendedAction,
             },
             true,
           );
@@ -1756,6 +2512,11 @@ server.registerTool(
             queued: !args.wait_for_completion,
             agent: result ? compactAgentResultForMcp(result) : undefined,
             recovery: result ? recoveryForAgentResult(result) : undefined,
+            next_action: result
+              ? suggestedActionForAgent(result, recoveryForAgentResult(result))
+              : delivery === "delivered_to_active_turn"
+                ? "Use get_codex_session to inspect live progress or wait_codex_session to wait for the steered turn."
+                : "Use wait_codex_session to wait for the queued steering turn.",
           },
           result ? !result.ok : false,
         );
@@ -1768,7 +2529,7 @@ server.registerTool(
   },
 );
 
-server.registerTool(
+registerLegacyTool(
   "start_session",
   {
     title: "Start persistent Codex session",
@@ -1820,7 +2581,7 @@ server.registerTool(
   },
 );
 
-server.registerTool(
+registerLegacyTool(
   "send_session_prompt",
   {
     title: "Send prompt to Codex session",
@@ -1846,9 +2607,11 @@ server.registerTool(
           await progress.flush();
           return jsonResult(
             {
+              ok: false,
               error,
               session: session ? compactSessionSnapshotForMcp(session) : session,
               recovery: recoveryForError(new Error(error ?? "Codex session did not return a result."), "send_session_prompt"),
+              suggested_next_action: recoveryForError(new Error(error ?? "Codex session did not return a result."), "send_session_prompt").recommendedAction,
             },
             true,
           );
@@ -1872,7 +2635,7 @@ server.registerTool(
   },
 );
 
-server.registerTool(
+registerLegacyTool(
   "get_session",
   {
     title: "Get Codex session",
@@ -1885,11 +2648,12 @@ server.registerTool(
     loggedToolCall("get_session", args, extra, async () => {
       const session = sessionManager.get(args.session_id);
       if (!session) return errorResult(new Error(`Unknown session_id: ${args.session_id}`), "get_session");
-      return jsonResult({ session: compactSessionSnapshotForMcp(session) });
+      const compactSession = compactSessionSnapshotForMcp(session);
+      return jsonResult({ session: compactSession, ...sessionProgressPayload(compactSession) });
     }),
 );
 
-server.registerTool(
+registerLegacyTool(
   "get_codex_session",
   {
     title: "Get Codex session",
@@ -1903,11 +2667,18 @@ server.registerTool(
     loggedToolCall("get_codex_session", args, extra, async () => {
       const session = sessionManager.get(args.session_id);
       if (!session) return errorResult(new Error(`Unknown session_id: ${args.session_id}`), "get_codex_session");
-      return jsonResult({ session: compactSessionSnapshotForMcp(session) });
+      const compactSession = compactSessionSnapshotForMcp(session);
+      return jsonResult({
+        session: compactSession,
+        ...sessionProgressPayload(compactSession),
+        next_action: compactSession.active
+          ? "Poll get_codex_session for progress, wait_codex_session when Claude needs completion, or steer_codex_session for active redirection."
+          : "Use send_codex_session_prompt or continue_codex_session for follow-up work in this same Codex context.",
+      });
     }),
 );
 
-server.registerTool(
+registerLegacyTool(
   "recover_codex_session",
   {
     title: "Recover Codex session",
@@ -1926,9 +2697,11 @@ server.registerTool(
       if (recovered.error || !recovered.session) {
         return jsonResult(
           {
+            ok: false,
             error: recovered.error,
             session: recovered.session ? compactSessionSnapshotForMcp(recovered.session) : recovered.session,
             recovery: recoveryForError(new Error(recovered.error ?? "Codex session could not be recovered."), "recover_codex_session"),
+            suggested_next_action: recoveryForError(new Error(recovered.error ?? "Codex session could not be recovered."), "recover_codex_session").recommendedAction,
           },
           true,
         );
@@ -1940,7 +2713,7 @@ server.registerTool(
     }),
 );
 
-server.registerTool(
+registerLegacyTool(
   "wait_codex_session",
   {
     title: "Wait for Codex session",
@@ -1979,12 +2752,19 @@ server.registerTool(
         if (waited.error || !waited.session) {
           return errorResult(new Error(waited.error ?? "Codex session was not found."), "wait_codex_session");
         }
+        const compactSession = compactSessionSnapshotForMcp(waited.session);
+        const recovery = recoveryForWait("codex_session", waited.timeoutReason);
         return jsonResult({
           completed: waited.completed,
           timeoutReason: waited.timeoutReason,
-          session: compactSessionSnapshotForMcp(waited.session),
+          session: compactSession,
+          ...sessionProgressPayload(compactSession),
           turn: waited.turn,
-          recovery: recoveryForWait("codex_session", waited.timeoutReason),
+          recovery,
+          suggested_next_action: recovery?.recommendedAction,
+          next_action:
+            recovery?.recommendedAction ??
+            "Use the session.lastResult or turn result directly, or send a follow-up prompt if more Codex context is needed.",
         }, waited.timeoutReason === "wait_cancelled");
       } catch (error) {
         await progress.flush();
@@ -1994,7 +2774,7 @@ server.registerTool(
     }),
 );
 
-server.registerTool(
+registerLegacyTool(
   "list_sessions",
   {
     title: "List Codex sessions",
@@ -2007,7 +2787,7 @@ server.registerTool(
     ),
 );
 
-server.registerTool(
+registerLegacyTool(
   "cancel_session",
   {
     title: "Cancel Codex session",
@@ -2025,7 +2805,7 @@ server.registerTool(
     }),
 );
 
-server.registerTool(
+registerTool(
   "codex_export_debug_bundle",
   {
     title: "Export Codex debug bundle",
@@ -2082,7 +2862,7 @@ server.registerTool(
     }),
 );
 
-server.registerTool(
+registerTool(
   "codex_status",
   {
     title: "Codex status",
@@ -2145,7 +2925,7 @@ server.registerTool(
     }),
 );
 
-server.registerTool(
+registerTool(
   "codex_doctor",
   {
     title: "Codex subagents doctor",
@@ -2246,7 +3026,7 @@ server.registerPrompt(
           content: {
             type: "text" as const,
             text: [
-              "Use the codex-subagents MCP tool `ask_codex` for this task.",
+              "Use the codex-subagents MCP tool `codex_task` for this task.",
               "Keep the sandbox read-only unless I explicitly ask for another sandbox or full non-sandbox access.",
               "For full non-sandbox access, set dangerously_bypass_approvals_and_sandbox true.",
               model ? `Use model ${model}.` : "Use the configured Codex model default.",
@@ -2290,7 +3070,7 @@ server.registerPrompt(
           content: {
             type: "text" as const,
             text: [
-              "Use the codex-subagents MCP tool `ask_codex_parallel` for this task.",
+              "Use the codex-subagents MCP tool `codex_task_group` for this task.",
               "Create one task object per independent workstream and run them read-only unless I explicitly ask for full non-sandbox access.",
               "For full non-sandbox access, set dangerously_bypass_approvals_and_sandbox true.",
               max_parallel ? `Use max_parallel ${max_parallel}.` : "Use max_parallel 4 unless fewer agents are needed.",

@@ -28,8 +28,8 @@ export function recoveryForError(error: unknown, context = "tool_call"): Recover
     return {
       recoverable: false,
       reason: "unknown_session",
-      recommendedAction: "Call list_sessions or start a new Codex session.",
-      recommendedTool: "list_sessions",
+      recommendedAction: "Call codex_sessions or start a new Codex session.",
+      recommendedTool: "codex_sessions",
     };
   }
 
@@ -37,8 +37,8 @@ export function recoveryForError(error: unknown, context = "tool_call"): Recover
     return {
       recoverable: false,
       reason: "unknown_job",
-      recommendedAction: "Start a new async Codex run.",
-      recommendedTool: "start_agent_run",
+      recommendedAction: "Start a new persistent Codex session for long-running work.",
+      recommendedTool: "codex_session_start",
     };
   }
 
@@ -103,8 +103,8 @@ export function recoveryForAgentResult(result: Pick<AgentRunResult, "ok" | "stat
     return {
       recoverable: true,
       reason: result.timeoutReason ?? "timeout",
-      recommendedAction: "Retry with a larger timeout, use an async run, or split the task into smaller independent prompts.",
-      recommendedTool: "start_agent_run",
+      recommendedAction: "Retry with a larger timeout, start a Codex session for long-running work, or split the task into smaller independent prompts.",
+      recommendedTool: "codex_session_start",
       retryAfterMs: 1_000,
     };
   }
@@ -138,7 +138,7 @@ export function recoveryForWait(
         kind === "codex_session"
           ? "The wait request was cancelled, but the session may still be running. Inspect it before deciding whether to cancel it."
           : "The wait request was cancelled, but the job may still be running. Inspect it before deciding whether to cancel it.",
-      recommendedTool: kind === "codex_session" ? "get_codex_session" : "get_agent_run",
+      recommendedTool: kind === "codex_session" ? "codex_session_status" : "codex_status",
     };
   }
   return {
@@ -146,9 +146,9 @@ export function recoveryForWait(
     reason: "wait_timeout",
     recommendedAction:
       kind === "codex_session"
-        ? "Call get_codex_session to inspect progress or wait_codex_session again with a larger timeout."
-        : "Call get_agent_run to inspect progress or wait_agent_run again with a larger timeout.",
-    recommendedTool: kind === "codex_session" ? "get_codex_session" : "get_agent_run",
+        ? "Call codex_session_status to inspect progress or codex_session_wait again with a larger timeout."
+        : "Call codex_status to inspect queue state, then retry or switch to codex_session_start for long-running work.",
+    recommendedTool: kind === "codex_session" ? "codex_session_status" : "codex_status",
     retryAfterMs: 1_000,
   };
 }
