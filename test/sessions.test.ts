@@ -53,8 +53,10 @@ describe("CodexSessionManager", () => {
     expect(followUp.session?.projectDir).toBe(projectDir);
 
     const calls = await recordedCalls(recordDir);
-    expect(calls).toHaveLength(2);
-    const [initialCall, followUpCall] = calls as [
+    const turnCalls = calls.filter((call) => call.method === "turn/start");
+    expect(turnCalls).toHaveLength(2);
+    expect(calls.some((call) => call.method === "thread/read")).toBe(true);
+    const [initialCall, followUpCall] = turnCalls as [
       { args: string[]; cwd: string; prompt: string; protocol: string; method: string; threadId: string },
       { args: string[]; cwd: string; prompt: string; protocol: string; method: string; threadId: string },
     ];
@@ -97,7 +99,7 @@ describe("CodexSessionManager", () => {
     expect(waited.session?.lastResult?.finalMessage).toContain("steer this active turn");
 
     const calls = await recordedCalls(recordDir);
-    expect(calls.map((call) => call.method)).toEqual(["turn/start", "turn/steer"]);
+    expect(calls.map((call) => call.method).filter((method) => method !== "thread/read")).toEqual(["turn/start", "turn/steer"]);
     manager.cancel(session.id);
   });
 });

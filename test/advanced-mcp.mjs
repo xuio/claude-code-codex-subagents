@@ -17,6 +17,7 @@ const transport = new StdioClientTransport({
     ...process.env,
     CODEX_SUBAGENTS_CODEX_BIN: fakeCodex,
     CLAUDE_PROJECT_DIR: projectDir,
+    CODEX_SUBAGENTS_SESSION_STATE_FILE: path.join(projectDir, "sessions.json"),
     FAKE_CODEX_RECORD_DIR: recordDir,
     CANARY_API_KEY: ["sk", "test1234567890abcdefghijklmnop"].join("-"),
   },
@@ -245,8 +246,23 @@ try {
     ),
   );
   assert(sawCancelledSigterm, "request cancellation should terminate the Codex exec child");
+  const missingJob = await callTool("get_agent_run", { job_id: "job-missing-for-diagnostics" });
+  assert(missingJob.isError, "missing job lookup should return a structured error for diagnostics", missingJob.structuredContent);
   const afterCancelStatus = await callTool("codex_status", {});
   assert(afterCancelStatus.structuredContent?.ok, "server should remain usable after a cancelled MCP request", afterCancelStatus.structuredContent);
+  assert(
+    afterCancelStatus.structuredContent?.diagnostics?.retainedEvents >= 1,
+    "codex_status should expose recent diagnostic events after failures",
+    afterCancelStatus.structuredContent,
+  );
+  const debugBundle = await callTool("codex_export_debug_bundle", {});
+  const diagnosticsPath = debugBundle.structuredContent?.diagnosticsPath;
+  assert(typeof diagnosticsPath === "string", "codex_export_debug_bundle should return a diagnostics path", debugBundle.structuredContent);
+  const debugPayload = JSON.parse(await readFile(diagnosticsPath, "utf8"));
+  assert(Array.isArray(debugPayload.recentDiagnostics), "debug bundle should include recent diagnostics", debugPayload);
+  if (typeof debugBundle.structuredContent?.bundleDir === "string") {
+    await rm(debugBundle.structuredContent.bundleDir, { recursive: true, force: true });
+  }
 
   const calls = await readCalls();
   assert(calls.every((call) => call.hasCanaryApiKey === false), "secret env vars should not be forwarded by default", calls);

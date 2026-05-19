@@ -101,6 +101,7 @@ console.log(`Using installed plugin directory: ${installedPluginDir}`);
 
 const env = { ...process.env };
 delete env.CODEX_SUBAGENTS_CODEX_BIN;
+env.CODEX_SUBAGENTS_SESSION_STATE_FILE = path.join(os.tmpdir(), `codex-subagents-real-session-${process.pid}.sessions.json`);
 
 const result = spawnSync(
   binary,

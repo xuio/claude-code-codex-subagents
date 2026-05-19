@@ -3225,8 +3225,8 @@ var require_utils = __commonJS({
       }
       return ind;
     }
-    function removeDotSegments(path5) {
-      let input = path5;
+    function removeDotSegments(path8) {
+      let input = path8;
       const output = [];
       let nextSlash = -1;
       let len = 0;
@@ -3478,8 +3478,8 @@ var require_schemes = __commonJS({
         wsComponent.secure = void 0;
       }
       if (wsComponent.resourceName) {
-        const [path5, query] = wsComponent.resourceName.split("?");
-        wsComponent.path = path5 && path5 !== "/" ? path5 : void 0;
+        const [path8, query] = wsComponent.resourceName.split("?");
+        wsComponent.path = path8 && path8 !== "/" ? path8 : void 0;
         wsComponent.query = query;
         wsComponent.resourceName = void 0;
       }
@@ -7363,8 +7363,8 @@ function getErrorMap() {
 
 // node_modules/zod/v3/helpers/parseUtil.js
 var makeIssue = (params) => {
-  const { data, path: path5, errorMaps, issueData } = params;
-  const fullPath = [...path5, ...issueData.path || []];
+  const { data, path: path8, errorMaps, issueData } = params;
+  const fullPath = [...path8, ...issueData.path || []];
   const fullIssue = {
     ...issueData,
     path: fullPath
@@ -7480,11 +7480,11 @@ var errorUtil;
 
 // node_modules/zod/v3/types.js
 var ParseInputLazyPath = class {
-  constructor(parent, value, path5, key) {
+  constructor(parent, value, path8, key) {
     this._cachedPath = [];
     this.parent = parent;
     this.data = value;
-    this._path = path5;
+    this._path = path8;
     this._key = key;
   }
   get path() {
@@ -11121,10 +11121,10 @@ function assignProp(target, prop, value) {
     configurable: true
   });
 }
-function getElementAtPath(obj, path5) {
-  if (!path5)
+function getElementAtPath(obj, path8) {
+  if (!path8)
     return obj;
-  return path5.reduce((acc, key) => acc?.[key], obj);
+  return path8.reduce((acc, key) => acc?.[key], obj);
 }
 function promiseAllObject(promisesObj) {
   const keys = Object.keys(promisesObj);
@@ -11444,11 +11444,11 @@ function aborted(x, startIndex = 0) {
   }
   return false;
 }
-function prefixIssues(path5, issues) {
+function prefixIssues(path8, issues) {
   return issues.map((iss) => {
     var _a;
     (_a = iss).path ?? (_a.path = []);
-    iss.path.unshift(path5);
+    iss.path.unshift(path8);
     return iss;
   });
 }
@@ -21100,8 +21100,8 @@ var StdioServerTransport = class {
 // src/runner.ts
 import { spawn } from "node:child_process";
 import { mkdtemp as mkdtemp2, readFile as readFile2, rm as rm2, stat, writeFile as writeFile2 } from "node:fs/promises";
-import os3 from "node:os";
-import path4 from "node:path";
+import os4 from "node:os";
+import path5 from "node:path";
 
 // src/binary.ts
 import { accessSync, constants } from "node:fs";
@@ -21849,6 +21849,105 @@ async function readClaudeProjectMcpServers(projectDir) {
   return void 0;
 }
 
+// src/artifacts.ts
+import { appendFileSync as appendFileSync2, mkdirSync as mkdirSync2, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import os3 from "node:os";
+import path4 from "node:path";
+function artifactsEnabled(env = process.env) {
+  return env.CODEX_SUBAGENTS_OUTPUT_ARTIFACTS !== "0";
+}
+function keepAllArtifacts(env = process.env) {
+  return env.CODEX_SUBAGENTS_KEEP_OUTPUT_ARTIFACTS === "1";
+}
+function redactArtifacts(env = process.env) {
+  return env.CODEX_SUBAGENTS_ARTIFACT_REDACT !== "0";
+}
+function artifactBaseDir(env = process.env) {
+  return path4.resolve(env.CODEX_SUBAGENTS_ARTIFACT_DIR?.trim() || path4.join(os3.tmpdir(), "codex-subagents-artifacts"));
+}
+function safeText(text, redacted) {
+  return redacted ? redactSensitiveText(text) : text;
+}
+var OutputArtifactWriter = class {
+  constructor(label, env = process.env) {
+    this.label = label;
+    this.env = env;
+    this.enabled = artifactsEnabled(env);
+    this.redacted = redactArtifacts(env);
+  }
+  label;
+  env;
+  enabled;
+  redacted;
+  dir;
+  finished = false;
+  retained = false;
+  stdoutTouched = false;
+  stderrTouched = false;
+  finalTouched = false;
+  appendStdout(chunk) {
+    this.append("stdout.txt", chunk);
+    if (chunk.length > 0) this.stdoutTouched = true;
+  }
+  appendStderr(chunk) {
+    this.append("stderr.txt", chunk);
+    if (chunk.length > 0) this.stderrTouched = true;
+  }
+  finish(input) {
+    if (!this.enabled || this.finished) return void 0;
+    this.finished = true;
+    if (input.finalMessage.length > 0) {
+      this.ensureDir();
+      writeFileSync(this.pathFor("final-message.md"), safeText(input.finalMessage, this.redacted), "utf8");
+      this.finalTouched = true;
+    }
+    const retain = input.keep || keepAllArtifacts(this.env);
+    if (!retain) {
+      this.discard();
+      return void 0;
+    }
+    const dir = this.dir;
+    if (!dir) return void 0;
+    this.retained = true;
+    return {
+      directory: dir,
+      finalMessagePath: this.finalTouched ? this.pathFor("final-message.md") : void 0,
+      stdoutPath: this.stdoutTouched ? this.pathFor("stdout.txt") : void 0,
+      stderrPath: this.stderrTouched ? this.pathFor("stderr.txt") : void 0,
+      redacted: this.redacted,
+      retained: true
+    };
+  }
+  discard() {
+    if (this.retained) return;
+    if (this.dir) rmSync(this.dir, { recursive: true, force: true });
+    this.dir = void 0;
+  }
+  append(file, chunk) {
+    if (!this.enabled || this.finished || chunk.length === 0) return;
+    this.ensureDir();
+    appendFileSync2(this.pathFor(file), safeText(chunk, this.redacted), "utf8");
+  }
+  ensureDir() {
+    if (this.dir) return;
+    const base = artifactBaseDir(this.env);
+    mkdirSync2(base, { recursive: true });
+    this.dir = mkdtempSync(path4.join(base, `${this.label.replace(/[^a-zA-Z0-9_.-]/g, "_")}-`));
+  }
+  pathFor(file) {
+    if (!this.dir) throw new Error("Output artifact directory was not initialized.");
+    return path4.join(this.dir, file);
+  }
+};
+function outputArtifactDiagnostics(env = process.env) {
+  return {
+    enabled: artifactsEnabled(env),
+    directory: artifactBaseDir(env),
+    redacted: redactArtifacts(env),
+    keepAll: keepAllArtifacts(env)
+  };
+}
+
 // src/runner.ts
 var reasoningEfforts = ["minimal", "low", "medium", "high", "xhigh"];
 var sandboxModes = ["read-only", "workspace-write", "danger-full-access"];
@@ -21922,7 +22021,7 @@ async function resolveWorkingDirectory(cwd, env = process.env) {
   const requested = cwd?.trim();
   const claudeProjectDir = env.CLAUDE_PROJECT_DIR?.trim();
   const fallback = claudeProjectDir && !claudeProjectDir.includes("${") ? claudeProjectDir : process.env.PWD ?? process.cwd();
-  const resolved = path4.resolve(requested || fallback);
+  const resolved = path5.resolve(requested || fallback);
   const info = await stat(resolved);
   if (!info.isDirectory()) {
     throw new Error(`Codex working directory is not a directory: ${resolved}`);
@@ -22211,7 +22310,8 @@ async function runAgent(options) {
     }
     throw error2;
   }
-  const tempDir = await mkdtemp2(path4.join(os3.tmpdir(), "codex-subagents-"));
+  const tempDir = await mkdtemp2(path5.join(os4.tmpdir(), "codex-subagents-"));
+  const artifactWriter = new OutputArtifactWriter(runId, mergedEnv);
   const preparedSubagents = await prepareSubagents({
     definitions: options.codexSubagents,
     tasks: options.subagentTasks,
@@ -22227,9 +22327,9 @@ async function runAgent(options) {
     tempCodexHomeUsed: Boolean(preparedSubagents.tempCodexHome)
   });
   const childEnv = sanitizeChildEnv({ ...mergedEnv, ...preparedSubagents.env }, options.forwardSensitiveEnv);
-  const outputPath = path4.join(tempDir, "last-message.md");
+  const outputPath = path5.join(tempDir, "last-message.md");
   const outputSchema = schemaForOutputContract(options.outputContract, options.outputSchema);
-  const outputSchemaPath = outputSchema && !options.resumeSessionId && !options.resumeLast ? path4.join(tempDir, "output-schema.json") : void 0;
+  const outputSchemaPath = outputSchema && !options.resumeSessionId && !options.resumeLast ? path5.join(tempDir, "output-schema.json") : void 0;
   if (outputSchemaPath) await writeFile2(outputSchemaPath, JSON.stringify(outputSchema), "utf8");
   const args = buildCodexExecArgs({ ...options, cwd, outputSchemaPath }, outputPath, childEnv);
   logger.rawDebug("codex.spawn", {
@@ -22326,6 +22426,7 @@ async function runAgent(options) {
         runId,
         chunk: summarizeRawTrafficForLog(chunk)
       });
+      artifactWriter.appendStdout(chunk);
       resetIdleTimeout();
       stdout.append(chunk);
       publishSnapshot(true);
@@ -22345,6 +22446,7 @@ async function runAgent(options) {
         runId,
         chunk: summarizeRawTrafficForLog(chunk)
       });
+      artifactWriter.appendStderr(chunk);
       resetIdleTimeout();
       stderr.append(chunk);
       publishSnapshot(true);
@@ -22405,6 +22507,10 @@ async function runAgent(options) {
     );
     const structured = wantsStructuredOutput ? parseStructuredOutput(finalMessage) : { value: void 0, error: void 0 };
     const final = truncate(redactSensitiveText(finalMessage), maxOutputChars);
+    const outputArtifacts = artifactWriter.finish({
+      finalMessage,
+      keep: final.truncatedChars > 0 || stdout.truncated() > 0 || stderr.truncated() > 0
+    });
     const redactedSummary = cloneEventSummary(summary);
     const redactedStructuredOutput = structured.value === void 0 ? void 0 : redactJsonValue(structured.value);
     const status = cancelled ? "cancelled" : timedOut ? "timeout" : exitCode === 0 ? "completed" : "failed";
@@ -22425,7 +22531,8 @@ async function runAgent(options) {
         stdoutChars: stdout.truncated(),
         stderrChars: stderr.truncated(),
         finalMessageChars: final.truncatedChars
-      }
+      },
+      outputArtifacts
     });
     return {
       name: options.name,
@@ -22457,6 +22564,7 @@ async function runAgent(options) {
       structuredOutputError: structured.error,
       commandPreview: [codexBinary.path, ...args.filter((arg) => arg !== options.prompt)],
       timeoutReason,
+      outputArtifacts,
       codexSubagents: {
         customAgents: preparedSubagents.names,
         requestedTasks: options.subagentTasks?.length ?? 0,
@@ -22471,6 +22579,7 @@ async function runAgent(options) {
     if (abortHandler) options.abortSignal?.removeEventListener("abort", abortHandler);
     await rm2(tempDir, { recursive: true, force: true }).catch(() => {
     });
+    artifactWriter.discard();
     await preparedSubagents.cleanup().catch(() => {
     });
   }
@@ -22539,11 +22648,90 @@ function aggregateAgentResults(results) {
   };
 }
 
+// src/diagnostics.ts
+import { mkdir as mkdir2, mkdtemp as mkdtemp3, readFile as readFile3, writeFile as writeFile3 } from "node:fs/promises";
+import os5 from "node:os";
+import path6 from "node:path";
+var events = [];
+function maxEvents(env = process.env) {
+  const parsed = Number(env.CODEX_SUBAGENTS_DIAGNOSTIC_EVENTS);
+  if (!Number.isInteger(parsed) || parsed < 1) return 100;
+  return Math.min(parsed, 1e3);
+}
+function makeId() {
+  return `diag-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
+}
+function recordDiagnosticEvent(event, env = process.env) {
+  const entry = {
+    id: makeId(),
+    ts: (/* @__PURE__ */ new Date()).toISOString(),
+    ...event,
+    detail: event.detail === void 0 ? void 0 : redactJsonValue(event.detail)
+  };
+  events.push(entry);
+  const limit = maxEvents(env);
+  while (events.length > limit) events.shift();
+  return entry;
+}
+function recentDiagnosticEvents(limit = 50) {
+  return events.slice(-Math.max(0, Math.min(limit, events.length)));
+}
+function diagnosticStats() {
+  return {
+    retainedEvents: events.length,
+    recentErrors: events.filter((event) => event.severity === "error").length,
+    newestEventAt: events.at(-1)?.ts
+  };
+}
+async function tailFile(file, maxBytes = 2e5) {
+  try {
+    const text = await readFile3(file, "utf8");
+    return text.length <= maxBytes ? text : text.slice(text.length - maxBytes);
+  } catch {
+    return void 0;
+  }
+}
+async function createDebugBundle(input = {}) {
+  const env = input.env ?? process.env;
+  const base = path6.resolve(env.CODEX_SUBAGENTS_DEBUG_BUNDLE_DIR?.trim() || os5.tmpdir());
+  await mkdir2(base, { recursive: true });
+  const bundleDir = await mkdtemp3(path6.join(base, "codex-subagents-debug-"));
+  const logFile = env.CODEX_SUBAGENTS_LOG_FILE?.trim();
+  const payload = redactJsonValue({
+    createdAt: (/* @__PURE__ */ new Date()).toISOString(),
+    pid: process.pid,
+    cwd: process.cwd(),
+    node: process.version,
+    platform: {
+      platform: process.platform,
+      arch: process.arch,
+      release: os5.release()
+    },
+    envKeys: Object.keys(env).filter((key) => key.startsWith("CODEX_SUBAGENTS_") || key.startsWith("CLAUDE_")).sort(),
+    logging: loggingDiagnostics(env),
+    recentDiagnostics: recentDiagnosticEvents(100),
+    status: input.status,
+    session: input.session,
+    job: input.job,
+    notes: input.notes,
+    logTail: logFile ? await tailFile(logFile) : void 0
+  });
+  const diagnosticsPath = path6.join(bundleDir, "diagnostics.json");
+  await writeFile3(diagnosticsPath, JSON.stringify(payload, null, 2), "utf8");
+  return { bundleDir, diagnosticsPath };
+}
+
 // src/jobs.ts
 var AbortError = class extends Error {
   constructor(message = "Operation was cancelled.") {
     super(message);
     this.name = "AbortError";
+  }
+};
+var BackpressureError = class extends Error {
+  constructor(message = "Codex subagent queue is full.") {
+    super(message);
+    this.name = "BackpressureError";
   }
 };
 function readPositiveInt(value, fallback, max) {
@@ -22585,12 +22773,14 @@ async function callQueueCallback(callback) {
   }
 }
 var AgentRunQueue = class {
-  constructor(maxGlobal = readPositiveInt(process.env.CODEX_SUBAGENTS_MAX_GLOBAL_PROCESSES, 4, 32), maxPerProject = readPositiveInt(process.env.CODEX_SUBAGENTS_MAX_PROJECT_PROCESSES, 2, 32)) {
+  constructor(maxGlobal = readPositiveInt(process.env.CODEX_SUBAGENTS_MAX_GLOBAL_PROCESSES, 4, 32), maxPerProject = readPositiveInt(process.env.CODEX_SUBAGENTS_MAX_PROJECT_PROCESSES, 2, 32), maxPending = readPositiveInt(process.env.CODEX_SUBAGENTS_MAX_QUEUE_PENDING, 64, 1e4)) {
     this.maxGlobal = maxGlobal;
     this.maxPerProject = maxPerProject;
+    this.maxPending = maxPending;
   }
   maxGlobal;
   maxPerProject;
+  maxPending;
   pending = [];
   active = 0;
   projectActive = /* @__PURE__ */ new Map();
@@ -22599,13 +22789,22 @@ var AgentRunQueue = class {
       active: this.active,
       pending: this.pending.length,
       maxGlobal: this.maxGlobal,
-      maxPerProject: this.maxPerProject
+      maxPerProject: this.maxPerProject,
+      maxPending: this.maxPending
     };
   }
   enqueue(run, options = {}) {
     if (options.signal?.aborted) {
       logger.warn("queue.enqueue_rejected_cancelled", { projectKey: options.projectKey ?? "__default__" });
       return Promise.reject(new AbortError("Codex run was cancelled before it entered the queue."));
+    }
+    if (this.pending.length >= this.maxPending) {
+      logger.warn("queue.enqueue_rejected_backpressure", { projectKey: options.projectKey ?? "__default__", stats: this.stats() });
+      return Promise.reject(
+        new BackpressureError(
+          `Codex queue is full (${this.pending.length}/${this.maxPending} pending). Retry later or reduce parallelism.`
+        )
+      );
     }
     return new Promise((resolve, reject) => {
       const task = {
@@ -22798,6 +22997,10 @@ var CodexJobManager = class {
     const job = this.jobs.get(id);
     return job ? snapshot(job) : void 0;
   }
+  list() {
+    this.prune();
+    return [...this.jobs.values()].map(snapshot);
+  }
   cancel(id) {
     const job = this.jobs.get(id);
     if (!job) return void 0;
@@ -22891,6 +23094,13 @@ var CodexJobManager = class {
     }).catch((error2) => {
       job.error = error2 instanceof Error ? error2.message : String(error2);
       job.status = error2 instanceof AbortError ? "cancelled" : "failed";
+      recordDiagnosticEvent({
+        severity: job.status === "cancelled" ? "warn" : "error",
+        source: "job",
+        message: job.error,
+        jobId: job.id,
+        detail: { kind: job.kind, status: job.status }
+      });
       logger.error("job.failed", {
         jobId: job.id,
         kind: job.kind,
@@ -22947,6 +23157,15 @@ function recoveryForError(error2, context = "tool_call") {
       reason: "unknown_job",
       recommendedAction: "Start a new async Codex run.",
       recommendedTool: "start_agent_run"
+    };
+  }
+  if (lower.includes("queue is full") || lower.includes("backpressure") || lower.includes("too many queued")) {
+    return {
+      recoverable: true,
+      reason: "backpressure",
+      recommendedAction: "Reduce max_parallel or wait briefly, then retry. Inspect codex_status for queue/session limits.",
+      recommendedTool: "codex_status",
+      retryAfterMs: 2e3
     };
   }
   if (lower.includes("timed out") || lower.includes("timeout")) {
@@ -23319,6 +23538,14 @@ var CodexAppServerSession = class _CodexAppServerSession {
         exitCode: code,
         signal
       });
+      recordDiagnosticEvent({
+        severity: code === 0 ? "warn" : "error",
+        source: "codex.app_server",
+        message,
+        sessionId: this.logContext.sessionId,
+        codexBinary: this.codexBinary.path,
+        detail: { appServerId: this.id, threadId: this.threadId || void 0, exitCode: code, signal }
+      });
       this.rejectAll(new AppServerUnavailableError(message));
     });
   }
@@ -23348,12 +23575,13 @@ var CodexAppServerSession = class _CodexAppServerSession {
   capabilities = {
     initialize: false,
     threadStart: false,
+    threadResume: false,
     turnStart: false,
     turnSteer: true,
     turnInterrupt: true,
-    threadRead: true
+    threadRead: false
   };
-  static async create(options, logContext = {}) {
+  static async create(options, logContext = {}, resumeThreadId) {
     const mergedEnv = { ...process.env, ...options.env };
     const cwd = await resolveWorkingDirectory(options.projectDir ?? options.cwd, mergedEnv);
     const codexBinary = resolveCodexBinary({
@@ -23390,7 +23618,16 @@ var CodexAppServerSession = class _CodexAppServerSession {
     try {
       await session.initialize(options.spawnTimeoutMs ?? 1e4);
       const { model, reasoningEffort } = validateRunConfiguration(options, childEnv);
-      const thread = await session.request("thread/start", {
+      const thread = resumeThreadId ? await session.request("thread/resume", {
+        threadId: resumeThreadId,
+        cwd,
+        model,
+        serviceTier: options.serviceTier ?? null,
+        approvalPolicy: "never",
+        sandbox: sandboxMode(options),
+        config: appServerConfig(options, reasoningEffort),
+        excludeTurns: true
+      }, options.spawnTimeoutMs ?? 3e4) : await session.request("thread/start", {
         cwd,
         model,
         serviceTier: options.serviceTier ?? null,
@@ -23404,7 +23641,9 @@ var CodexAppServerSession = class _CodexAppServerSession {
       const threadId = thread.thread?.id;
       if (!threadId) throw new AppServerUnavailableError("Codex app-server did not return a thread id.");
       session.threadId = threadId;
-      session.capabilities.threadStart = true;
+      if (resumeThreadId) session.capabilities.threadResume = true;
+      else session.capabilities.threadStart = true;
+      await session.probeThreadRead(options.spawnTimeoutMs ?? 3e4);
       return session;
     } catch (error2) {
       await session.close();
@@ -23434,6 +23673,14 @@ var CodexAppServerSession = class _CodexAppServerSession {
       supports: { ...this.capabilities },
       lastError: this.lastError
     };
+  }
+  async readThread(includeTurns = false) {
+    const response = await this.request("thread/read", {
+      threadId: this.threadId,
+      includeTurns
+    }, 1e4);
+    this.capabilities.threadRead = true;
+    return response;
   }
   async startTurn(options, abortSignal, onSnapshot, turnLogContext = {}) {
     if (this.activeTurn) throw new Error(`Codex app-server already has an active turn: ${this.activeTurn.turnId}`);
@@ -23487,6 +23734,10 @@ var CodexAppServerSession = class _CodexAppServerSession {
     });
     const finish = (status, error2) => {
       const final = truncate2(redactSensitiveText(summary.lastAgentMessage ?? ""), maxOutputChars);
+      const outputArtifacts = this.activeTurn?.artifactWriter.finish({
+        finalMessage: summary.lastAgentMessage ?? "",
+        keep: final.truncatedChars > 0 || stdout.truncated() > 0 || stderr.truncated() > 0
+      });
       const result2 = {
         name: options.name,
         ok: status === "completed",
@@ -23510,6 +23761,7 @@ var CodexAppServerSession = class _CodexAppServerSession {
           stderrChars: stderr.truncated(),
           finalMessageChars: final.truncatedChars
         },
+        outputArtifacts,
         eventSummary: cloneSummary(summary),
         commandPreview: [this.codexBinary.path, "app-server", "--listen", "stdio://", "turn/start"],
         timeoutReason,
@@ -23566,7 +23818,8 @@ var CodexAppServerSession = class _CodexAppServerSession {
         finalMessage: "",
         resolve: resolveOnce,
         publishSnapshot,
-        lastSnapshotAt: 0
+        lastSnapshotAt: 0,
+        artifactWriter: new OutputArtifactWriter(`${this.id}-${turnId}`, this.env)
       };
       publishSnapshot(true);
       const interrupt = (reason) => {
@@ -23732,6 +23985,7 @@ var CodexAppServerSession = class _CodexAppServerSession {
       activeTurnId: this.activeTurnId,
       chunk: summarizeRawTrafficForLog(chunk)
     });
+    this.activeTurn?.artifactWriter.appendStderr(chunk);
     this.activeTurn?.stderr.append(chunk);
     this.activeTurn?.publishSnapshot(true);
   }
@@ -23745,6 +23999,8 @@ var CodexAppServerSession = class _CodexAppServerSession {
       this.lastError = error2;
       this.activeTurn?.summary.errors.push(error2);
       this.activeTurn?.stdout.append(`${line}
+`);
+      this.activeTurn?.artifactWriter.appendStdout(`${line}
 `);
       this.activeTurn?.publishSnapshot(true);
       return;
@@ -23810,6 +24066,8 @@ var CodexAppServerSession = class _CodexAppServerSession {
     for (const handler of this.notificationHandlers) handler(message);
     active.stdout.append(`${JSON.stringify(message)}
 `);
+    active.artifactWriter.appendStdout(`${JSON.stringify(message)}
+`);
     active.summary.counts[method] = (active.summary.counts[method] ?? 0) + 1;
     if (active.summary.events) active.summary.events.push(message);
     const turnId = typeof params?.turnId === "string" ? params.turnId : typeof params?.turn?.id === "string" ? (params?.turn).id : void 0;
@@ -23857,6 +24115,10 @@ var CodexAppServerSession = class _CodexAppServerSession {
     if (!active) throw new Error("No active app-server turn to finish.");
     const maxOutputChars = active.options.maxOutputChars ?? 6e4;
     const final = truncate2(redactSensitiveText(active.summary.lastAgentMessage ?? ""), maxOutputChars);
+    const outputArtifacts = active.artifactWriter.finish({
+      finalMessage: active.summary.lastAgentMessage ?? "",
+      keep: final.truncatedChars > 0 || active.stdout.truncated() > 0 || active.stderr.truncated() > 0
+    });
     const result = {
       name: active.options.name,
       ok: status === "completed",
@@ -23880,6 +24142,7 @@ var CodexAppServerSession = class _CodexAppServerSession {
         stderrChars: active.stderr.truncated(),
         finalMessageChars: final.truncatedChars
       },
+      outputArtifacts,
       eventSummary: cloneSummary(active.summary),
       commandPreview: [this.codexBinary.path, "app-server", "--listen", "stdio://", "turn/start"],
       timeoutReason: active.timeoutReason,
@@ -23914,6 +24177,24 @@ var CodexAppServerSession = class _CodexAppServerSession {
       this.activeTurn = void 0;
     }
   }
+  async probeThreadRead(timeoutMs) {
+    try {
+      await this.request("thread/read", {
+        threadId: this.threadId,
+        includeTurns: false
+      }, Math.min(timeoutMs, 1e4));
+      this.capabilities.threadRead = true;
+    } catch (error2) {
+      this.capabilities.threadRead = false;
+      this.lastError = error2 instanceof Error ? error2.message : String(error2);
+      logger.warn("codex.app_server.thread_read_unavailable", {
+        ...this.logContext,
+        appServerId: this.id,
+        threadId: this.threadId,
+        error: errorForLog(error2)
+      });
+    }
+  }
   queuePendingStartNotification(message) {
     this.pendingStartNotifications.push(message);
     if (this.pendingStartNotifications.length > 100) this.pendingStartNotifications.shift();
@@ -23923,6 +24204,77 @@ var CodexAppServerSession = class _CodexAppServerSession {
     for (const message of pending) this.handleNotification(message);
   }
 };
+
+// src/session-state.ts
+import { mkdirSync as mkdirSync3, readFileSync, renameSync as renameSync2, writeFileSync as writeFileSync2 } from "node:fs";
+import os6 from "node:os";
+import path7 from "node:path";
+function defaultSessionStateFile(env = process.env) {
+  const explicit = env.CODEX_SUBAGENTS_SESSION_STATE_FILE?.trim();
+  if (explicit) return path7.resolve(explicit);
+  return path7.join(os6.homedir(), ".codex-subagents", "sessions.json");
+}
+var SessionStateStore = class {
+  file;
+  constructor(file = defaultSessionStateFile()) {
+    this.file = file;
+  }
+  load() {
+    try {
+      const parsed = JSON.parse(readFileSync(this.file, "utf8"));
+      if (parsed.version !== 1 || !Array.isArray(parsed.sessions)) return [];
+      return parsed.sessions.filter(isDurableSessionState);
+    } catch {
+      return [];
+    }
+  }
+  save(sessions) {
+    mkdirSync3(path7.dirname(this.file), { recursive: true });
+    const temp = `${this.file}.${process.pid}.tmp`;
+    const payload = {
+      version: 1,
+      updatedAt: (/* @__PURE__ */ new Date()).toISOString(),
+      sessions
+    };
+    writeFileSync2(temp, `${JSON.stringify(payload, null, 2)}
+`, "utf8");
+    renameSync2(temp, this.file);
+  }
+};
+function isDurableSessionState(value) {
+  if (!value || typeof value !== "object") return false;
+  const session = value;
+  return typeof session.id === "string" && typeof session.createdAt === "string" && typeof session.updatedAt === "string" && (session.protocol === "app-server" || session.protocol === "exec") && Number.isInteger(session.turns) && typeof session.baseOptions === "object" && session.baseOptions !== null;
+}
+function durableRunOptions(options) {
+  return {
+    name: options.name,
+    model: options.model,
+    modelPreset: options.modelPreset,
+    reasoningEffort: options.reasoningEffort,
+    sandbox: options.sandbox,
+    dangerouslyBypassApprovalsAndSandbox: options.dangerouslyBypassApprovalsAndSandbox,
+    serviceTier: options.serviceTier,
+    modelVerbosity: options.modelVerbosity,
+    reasoningSummary: options.reasoningSummary,
+    cwd: options.cwd,
+    projectDir: options.projectDir,
+    codexBin: options.codexBin,
+    profile: options.profile,
+    timeoutMs: options.timeoutMs,
+    maxOutputChars: options.maxOutputChars,
+    includeEvents: options.includeEvents,
+    ephemeral: false,
+    skipGitRepoCheck: options.skipGitRepoCheck,
+    ignoreRules: options.ignoreRules,
+    isolatedCodexHome: options.isolatedCodexHome,
+    mcpConfigPolicy: options.mcpConfigPolicy === "explicit" ? "inherit_codex" : options.mcpConfigPolicy,
+    forwardSensitiveEnv: false,
+    idleTimeoutMs: options.idleTimeoutMs,
+    spawnTimeoutMs: options.spawnTimeoutMs,
+    terminateGraceMs: options.terminateGraceMs
+  };
+}
 
 // src/sessions.ts
 function withoutUndefined(value) {
@@ -23957,6 +24309,12 @@ function snapshot2(session) {
     supportsRealSteering: session.protocol === "app-server" && Boolean(session.appServer?.status().supports.turnSteer),
     appServer: session.appServer?.status(),
     appServerFallbackReason: session.appServerFallbackReason,
+    durable: session.persisted ? {
+      persisted: true,
+      recovered: session.recovered,
+      canResume: Boolean(session.codexThreadId && session.turns > 0),
+      stateFile: session.stateFile
+    } : void 0,
     turns: session.turns,
     active: Boolean(session.controller),
     activeTurn: session.activeTurn ? turnSnapshot(session.activeTurn) : void 0,
@@ -23984,6 +24342,7 @@ function readPositiveInt2(value, fallback, max) {
 }
 var CodexSessionManager = class {
   sessions = /* @__PURE__ */ new Map();
+  stateStore;
   completedTtlSeconds = readPositiveInt2(
     process.env.CODEX_SUBAGENTS_SESSION_COMPLETED_TTL_SECONDS,
     3600,
@@ -23995,6 +24354,13 @@ var CodexSessionManager = class {
     604800
   );
   maxSessions = readPositiveInt2(process.env.CODEX_SUBAGENTS_MAX_SESSIONS, 100, 1e3);
+  maxQueuedTurns = readPositiveInt2(process.env.CODEX_SUBAGENTS_MAX_SESSION_QUEUED_TURNS, 32, 1e3);
+  constructor(options = {}) {
+    if (options.persist) {
+      this.stateStore = new SessionStateStore(options.stateFile);
+      this.loadPersistedSessions();
+    }
+  }
   list() {
     this.prune();
     return [...this.sessions.values()].map(snapshot2);
@@ -24018,8 +24384,10 @@ var CodexSessionManager = class {
         0
       ),
       maxSessions: this.maxSessions,
+      maxQueuedTurns: this.maxQueuedTurns,
       completedTtlSeconds: this.completedTtlSeconds,
-      idleTtlSeconds: this.idleTtlSeconds
+      idleTtlSeconds: this.idleTtlSeconds,
+      durableStateFile: this.stateStore?.file
     };
   }
   async start(options, metadata = {}) {
@@ -24048,6 +24416,11 @@ var CodexSessionManager = class {
   }
   createSession(options, metadata = {}) {
     this.prune();
+    if (this.sessions.size >= this.maxSessions && ![...this.sessions.values()].some((session2) => this.isPrunable(session2))) {
+      throw new BackpressureError(
+        `Codex session table is full (${this.sessions.size}/${this.maxSessions}). Cancel old sessions or lower session retention before starting another session.`
+      );
+    }
     const now = (/* @__PURE__ */ new Date()).toISOString();
     const { prompt: _prompt, abortSignal: _abortSignal, onSnapshot: _onSnapshot, ...baseOptions } = options;
     const session = {
@@ -24068,7 +24441,10 @@ var CodexSessionManager = class {
       recentTurns: [],
       draining: false,
       cancelRequested: false,
-      waiters: /* @__PURE__ */ new Set()
+      waiters: /* @__PURE__ */ new Set(),
+      persisted: Boolean(this.stateStore),
+      recovered: false,
+      stateFile: this.stateStore?.file
     };
     this.sessions.set(session.id, session);
     const turn = this.enqueueTurn(session, {
@@ -24083,6 +24459,7 @@ var CodexSessionManager = class {
       session: summarizeRawTrafficForLog(snapshot2(session)),
       prompt: options.prompt
     });
+    this.persist();
     return { session, turn };
   }
   async send(id, prompt, overrides = {}, options = {}) {
@@ -24290,7 +24667,60 @@ var CodexSessionManager = class {
       void session.appServer?.close("cancelled");
     }
     this.notifySession(session);
+    this.persist();
     return snapshot2(session);
+  }
+  async recover(id) {
+    this.prune();
+    const session = this.sessions.get(id);
+    if (!session) return { error: `Unknown session_id: ${id}` };
+    if (!session.codexThreadId || session.turns < 1) {
+      return {
+        session: snapshot2(session),
+        recovered: false,
+        error: `Session ${id} does not have a persisted Codex thread id to recover.`
+      };
+    }
+    if (session.protocol === "exec") {
+      session.recovered = true;
+      this.persist();
+      return { session: snapshot2(session), recovered: true };
+    }
+    try {
+      if (!session.appServer) {
+        session.appServer = await CodexAppServerSession.create(
+          {
+            ...session.baseOptions,
+            prompt: "",
+            projectDir: session.projectDir ?? session.baseOptions.projectDir,
+            cwd: session.cwd ?? session.baseOptions.cwd,
+            ephemeral: false
+          },
+          { sessionId: session.id },
+          session.codexThreadId
+        );
+        session.codexThreadId = session.appServer.threadId;
+      } else {
+        await session.appServer.readThread(false);
+      }
+      session.status = session.status === "failed" ? "active" : session.status;
+      session.recovered = true;
+      session.updatedAt = (/* @__PURE__ */ new Date()).toISOString();
+      this.persist();
+      return { session: snapshot2(session), recovered: true };
+    } catch (error2) {
+      session.error = error2 instanceof Error ? error2.message : String(error2);
+      session.updatedAt = (/* @__PURE__ */ new Date()).toISOString();
+      recordDiagnosticEvent({
+        severity: "error",
+        source: "session.recover",
+        message: session.error,
+        sessionId: session.id,
+        detail: { protocol: session.protocol, codexThreadId: session.codexThreadId }
+      });
+      this.persist();
+      return { session: snapshot2(session), recovered: false, error: session.error };
+    }
   }
   async shutdown(reason = "shutdown") {
     logger.warn("session.shutdown", { reason, sessions: this.sessions.size });
@@ -24321,9 +24751,15 @@ var CodexSessionManager = class {
       snapshots.push(snapshot2(session));
     }
     await Promise.allSettled(closePromises);
+    this.persist();
     return snapshots;
   }
   enqueueTurn(session, input) {
+    if (session.queuedTurns.length >= this.maxQueuedTurns) {
+      throw new BackpressureError(
+        `Codex session ${session.id} has too many queued turns (${session.queuedTurns.length}/${this.maxQueuedTurns}). Wait for existing turns or start a separate session.`
+      );
+    }
     const now = (/* @__PURE__ */ new Date()).toISOString();
     const turn = {
       id: `turn-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`,
@@ -24345,6 +24781,7 @@ var CodexSessionManager = class {
       queuedTurns: session.queuedTurns.length
     });
     this.notifySession(session);
+    this.persist();
     return turn;
   }
   recordSteerDelivery(session, prompt) {
@@ -24439,8 +24876,17 @@ var CodexSessionManager = class {
         turnId: turn.id,
         error: errorForLog(error2)
       });
+      recordDiagnosticEvent({
+        severity: session.status === "cancelled" ? "warn" : "error",
+        source: "session",
+        message: session.error,
+        sessionId: session.id,
+        codexBinary: session.lastResult?.codexBinary.path,
+        detail: { turnId: turn.id, protocol: session.protocol }
+      });
       this.notifyTurn(turn);
       this.notifySession(session);
+      this.persist();
       throw error2;
     } finally {
       session.controller = void 0;
@@ -24469,7 +24915,11 @@ var CodexSessionManager = class {
   async runAppServerTurn(session, options, controller) {
     try {
       if (!session.appServer) {
-        session.appServer = await CodexAppServerSession.create(options, { sessionId: session.id });
+        session.appServer = await CodexAppServerSession.create(
+          options,
+          { sessionId: session.id },
+          session.codexThreadId && session.turns > 0 ? session.codexThreadId : void 0
+        );
         session.codexThreadId = session.appServer.threadId;
         session.appServerFallbackReason = void 0;
       }
@@ -24532,6 +24982,7 @@ var CodexSessionManager = class {
     if (session.cancelRequested && session.appServer) void session.appServer.close("cancelled");
     this.notifyTurn(turn);
     this.notifySession(session);
+    this.persist();
   }
   findTurn(session, turnId) {
     if (session.activeTurn?.id === turnId) return session.activeTurn;
@@ -24607,9 +25058,81 @@ var CodexSessionManager = class {
     void session.appServer?.close("cancelled").catch(() => {
     });
     this.notifySession(session);
+    this.persist();
+  }
+  loadPersistedSessions() {
+    const store = this.stateStore;
+    if (!store) return;
+    for (const persisted of store.load()) {
+      const record2 = this.recordFromState(persisted);
+      if (!record2) continue;
+      this.sessions.set(record2.id, record2);
+    }
+    logger.info("session.state.loaded", { stateFile: store.file, sessions: this.sessions.size });
+  }
+  recordFromState(state) {
+    const hasThread = Boolean(state.codexThreadId && state.turns > 0);
+    if (!hasThread && state.status === "active") return void 0;
+    return {
+      id: state.id,
+      name: state.name,
+      status: hasThread ? state.status : "failed",
+      createdAt: state.createdAt,
+      updatedAt: state.updatedAt,
+      projectDir: state.projectDir,
+      cwd: state.cwd,
+      codexThreadId: state.codexThreadId,
+      protocol: state.protocol,
+      appServerFallbackReason: void 0,
+      turns: state.turns,
+      partial: void 0,
+      error: state.error,
+      baseOptions: {
+        ...state.baseOptions,
+        projectDir: state.projectDir ?? state.baseOptions.projectDir,
+        cwd: state.cwd ?? state.baseOptions.cwd,
+        ephemeral: false
+      },
+      queuedTurns: [],
+      recentTurns: [],
+      draining: false,
+      cancelRequested: state.status === "cancelled",
+      waiters: /* @__PURE__ */ new Set(),
+      persisted: true,
+      recovered: true,
+      stateFile: this.stateStore?.file
+    };
+  }
+  persist() {
+    const store = this.stateStore;
+    if (!store) return;
+    const states = [...this.sessions.values()].filter((session) => session.codexThreadId && session.turns > 0).map((session) => ({
+      id: session.id,
+      name: session.name,
+      status: session.status === "running" ? "active" : session.status,
+      createdAt: session.createdAt,
+      updatedAt: session.updatedAt,
+      projectDir: session.projectDir,
+      cwd: session.cwd,
+      codexThreadId: session.codexThreadId,
+      protocol: session.protocol,
+      turns: session.turns,
+      baseOptions: durableRunOptions({
+        ...session.baseOptions,
+        prompt: "",
+        projectDir: session.projectDir ?? session.baseOptions.projectDir,
+        cwd: session.cwd ?? session.baseOptions.cwd
+      }),
+      error: session.error
+    }));
+    try {
+      store.save(states);
+    } catch (error2) {
+      logger.error("session.state.save_failed", { stateFile: store.file, error: errorForLog(error2) });
+    }
   }
 };
-var sessionManager = new CodexSessionManager();
+var sessionManager = new CodexSessionManager({ persist: true });
 
 // src/index.ts
 var usageGuide = [
@@ -24625,6 +25148,8 @@ var usageGuide = [
   "- Use send_codex_session_prompt to add prompts to an active or idle Codex session queue without losing context.",
   "- Use steer_codex_session to send real live steering into a running app-server turn; use interrupt_current only when the active turn should be cancelled and redirected. If a session had to fall back to codex exec, steering degrades to the next high-priority queued turn.",
   "- Use get_codex_session or wait_codex_session to inspect or wait for long-running Codex sessions. Session snapshots include appServer.supports and appServerFallbackReason for protocol diagnostics.",
+  "- Use recover_codex_session when Claude has a persisted session_id from before a Claude/MCP restart and wants to reattach to that Codex thread before sending a follow-up.",
+  "- Use codex_export_debug_bundle after repeated failures; it writes recent diagnostics, selected session/job state, status, and optional log tail into one local JSON bundle.",
   "- Use codex_choose_tool if you are unsure which Codex tool fits the request.",
   "- Use run_agent, run_agents, run_agents_aggregate, start_session, and send_session_prompt for lower-level/manual control; they are compatibility tools behind the intuitive front doors.",
   "- Use run_agents_aggregate when Claude needs a concise consensus object from several independent Codex agents.",
@@ -24638,11 +25163,14 @@ var usageGuide = [
   "- If the user explicitly asks for non-sandbox/full local capabilities, set dangerously_bypass_approvals_and_sandbox true. This maps to Codex's --dangerously-bypass-approvals-and-sandbox flag and allows DNS/network plus unrestricted file and git writes.",
   "- Approvals are non-interactive; do not expect Codex to ask permission.",
   '- If wait_codex_session returns completed false with timeoutReason "wait_timeout", the session is still running unless its status says otherwise.',
+  '- If a tool returns recovery.reason "backpressure", reduce max_parallel or wait before retrying. codex_status exposes current queue/session limits.',
+  "- If a response mentions outputArtifacts, use the artifact paths for full retained output instead of asking Codex to resend huge stdout/stderr.",
   '- Prefer model_preset "spark" for responsive focused checks, small reviews, UI iteration, and sidecar analysis.',
   '- Use reasoning_effort "medium" by default, "low" for simple checks, and "high" or "xhigh" only for difficult analysis. Do not use "minimal"; Codex currently auto-attaches web_search and the API rejects that tool with minimal reasoning.',
   '- Do not combine model_preset "spark" with reasoning_summary values other than "none"; Spark does not support reasoning.summary.',
   "- Do not set service_tier by default. Let Codex use its normal account/default service tier unless the user explicitly asks for a service tier.",
   "- Pass project_dir whenever Claude knows the active project directory so Codex works in the same tree as Claude Code.",
+  "- Persistent sessions are durable across MCP restarts when Codex has produced a thread id. After restart, list_sessions can show recovered sessions and recover_codex_session can validate the thread.",
   "- Do not use Bash, Read, or filesystem inspection to locate Codex. The MCP server resolves Codex automatically, preferring the Codex desktop app binary when installed.",
   "- Set isolated_codex_home true when a run should ignore the user's Codex MCP server config and use only this request's temporary Codex configuration.",
   '- Use mcp_config_policy "explicit" with codex_mcp_servers for intentional MCP sharing. Use "inherit_claude_project" only when the project has a Claude MCP config that should be shared with Codex.',
@@ -24854,6 +25382,17 @@ async function loggedToolCall(tool, args, extra, run) {
       isError: Boolean(result.isError),
       result: summarizeRawTrafficForLog(result)
     });
+    if (result.isError) {
+      recordDiagnosticEvent({
+        severity: "error",
+        source: "mcp.tool",
+        message: `MCP tool ${tool} returned an error.`,
+        correlationId: toolCallId,
+        tool,
+        recovery: result.structuredContent?.recovery,
+        detail: result.structuredContent
+      });
+    }
     return result;
   } catch (error2) {
     logger.error("mcp.tool.exception", {
@@ -24861,6 +25400,15 @@ async function loggedToolCall(tool, args, extra, run) {
       tool,
       durationMs: Date.now() - started,
       error: errorForLog(error2)
+    });
+    recordDiagnosticEvent({
+      severity: "error",
+      source: "mcp.tool",
+      message: error2 instanceof Error ? error2.message : String(error2),
+      correlationId: toolCallId,
+      tool,
+      recovery: recoveryForError(error2, tool),
+      detail: errorForLog(error2)
     });
     return errorResult(error2, tool);
   }
@@ -25087,6 +25635,8 @@ server.registerTool(
         steerRunningSession: "steer_codex_session",
         inspectSession: "get_codex_session",
         waitForSession: "wait_codex_session",
+        recoverSessionAfterRestart: "recover_codex_session",
+        exportDiagnostics: "codex_export_debug_bundle",
         longRunningOneTask: "start_agent_run",
         longRunningParallelTasks: "start_agents_run",
         lowerLevelSingle: "run_agent",
@@ -25139,6 +25689,7 @@ server.registerTool(
       continuing_session: external_exports.boolean().optional().describe("Whether Claude already has a Codex session id to continue."),
       wants_async_session: external_exports.boolean().optional().describe("Whether Claude needs a Codex session id immediately while work continues."),
       wants_steering: external_exports.boolean().optional().describe("Whether the user wants to steer or redirect an already-running Codex session."),
+      recovering_after_restart: external_exports.boolean().optional().describe("Whether Claude has a persisted session id from before an MCP/Claude restart."),
       long_running: external_exports.boolean().optional().describe("Whether the work is likely to exceed a normal MCP request timeout."),
       wants_aggregation: external_exports.boolean().optional().describe("Whether Claude needs a deterministic consensus object.")
     }
@@ -25146,7 +25697,8 @@ server.registerTool(
   async (args, extra) => loggedToolCall("codex_choose_tool", args, extra, async () => {
     const taskCount = args.task_count ?? (args.wants_parallel ? 2 : 1);
     let recommendedTool = "ask_codex";
-    if (args.wants_steering) recommendedTool = "steer_codex_session";
+    if (args.recovering_after_restart) recommendedTool = "recover_codex_session";
+    else if (args.wants_steering) recommendedTool = "steer_codex_session";
     else if (args.continuing_session && args.long_running) recommendedTool = "send_codex_session_prompt";
     else if (args.continuing_session) recommendedTool = "continue_codex_session";
     else if (args.wants_session && (args.wants_async_session || args.long_running)) recommendedTool = "start_codex_session_async";
@@ -25162,12 +25714,14 @@ server.registerTool(
         "Use ask_codex for one normal Codex task.",
         "Use ask_codex_parallel for multiple independent Codex tasks.",
         "Use start_codex_session for a new multi-turn Codex worker and continue_codex_session for follow-ups.",
+        "Use recover_codex_session after an MCP restart when Claude has a previous persisted session id.",
         "Use start_codex_session_async when Claude needs the session id immediately and will poll or wait later.",
         "Use send_codex_session_prompt to queue additional prompts onto an active or idle Codex session.",
         "Use steer_codex_session to send live app-server steering into a running session; interrupt_current cancels the active turn before running the steering turn.",
         "Use start_agent_run/start_agents_run for slow jobs that should not hold a blocking MCP request open.",
         "Use run_agents_aggregate only when Claude needs a deterministic consensus object.",
         "Pass project_dir whenever Claude knows the active project directory.",
+        "When recovery.reason is backpressure, inspect codex_status and retry with less parallelism after a short wait.",
         "Do not use Bash or Read to locate Codex; this MCP server resolves the binary."
       ],
       aliases: {
@@ -25177,7 +25731,8 @@ server.registerTool(
         continue_codex_session: ["send_session_prompt"],
         start_codex_session_async: ["start_session + return immediately"],
         send_codex_session_prompt: ["queued continue_codex_session"],
-        steer_codex_session: ["live app-server turn steering"]
+        steer_codex_session: ["live app-server turn steering"],
+        recover_codex_session: ["reattach persisted Codex thread"]
       }
     });
   })
@@ -26037,6 +26592,36 @@ server.registerTool(
   })
 );
 server.registerTool(
+  "recover_codex_session",
+  {
+    title: "Recover Codex session",
+    description: "Reattach a durable Codex session after Claude Code or the MCP server restarted. Use this before continue_codex_session when list_sessions shows durable.recovered true or Claude has an older session_id. App-server sessions resume the Codex thread via thread/resume; exec sessions reuse their persisted thread id on the next prompt.",
+    inputSchema: {
+      session_id: sessionIdSchema
+    }
+  },
+  async (args, extra) => loggedToolCall("recover_codex_session", args, extra, async () => {
+    const progress = createProgressReporter(extra);
+    await progress.send(`Recovering Codex session ${args.session_id}`);
+    const recovered = await sessionManager.recover(args.session_id);
+    await progress.flush();
+    if (recovered.error || !recovered.session) {
+      return jsonResult(
+        {
+          error: recovered.error,
+          session: recovered.session ? compactSessionSnapshotForMcp(recovered.session) : recovered.session,
+          recovery: recoveryForError(new Error(recovered.error ?? "Codex session could not be recovered."), "recover_codex_session")
+        },
+        true
+      );
+    }
+    return jsonResult({
+      recovered: recovered.recovered,
+      session: compactSessionSnapshotForMcp(recovered.session)
+    });
+  })
+);
+server.registerTool(
   "wait_codex_session",
   {
     title: "Wait for Codex session",
@@ -26107,6 +26692,49 @@ server.registerTool(
   })
 );
 server.registerTool(
+  "codex_export_debug_bundle",
+  {
+    title: "Export Codex debug bundle",
+    description: "Write a local diagnostics bundle for debugging repeated Claude/Codex MCP failures. Includes recent in-memory failures, status, selected session/job snapshots, and the configured log file tail when available. Use after a failed or flaky Codex tool call.",
+    inputSchema: {
+      session_id: sessionIdSchema.optional(),
+      job_id: jobIdSchema.optional(),
+      include_all_sessions: external_exports.boolean().default(false)
+    }
+  },
+  async (args, extra) => loggedToolCall("codex_export_debug_bundle", args, extra, async () => {
+    const progress = createProgressReporter(extra);
+    await progress.send("Writing Codex debug bundle");
+    const session = args.session_id ? sessionManager.get(args.session_id) : void 0;
+    const job = args.job_id ? jobManager.get(args.job_id) : void 0;
+    if (args.session_id && !session) return errorResult(new Error(`Unknown session_id: ${args.session_id}`), "codex_export_debug_bundle");
+    if (args.job_id && !job) return errorResult(new Error(`Unknown job_id: ${args.job_id}`), "codex_export_debug_bundle");
+    const bundle = await createDebugBundle({
+      session: args.include_all_sessions ? sessionManager.list().map(compactSessionSnapshotForMcp) : session ? compactSessionSnapshotForMcp(session) : void 0,
+      job: job ? compactJobSnapshotForMcp(job) : void 0,
+      status: {
+        cwd: process.cwd(),
+        queue: jobManager.stats(),
+        sessions: sessionManager.stats(),
+        logging: loggingDiagnostics(),
+        artifacts: outputArtifactDiagnostics(),
+        lifecycle: lifecycleStats(),
+        diagnostics: diagnosticStats()
+      },
+      notes: [
+        "The bundle intentionally records environment key names, not environment values.",
+        "If CODEX_SUBAGENTS_LOG_FILE is configured, diagnostics.json includes a bounded tail of that log file."
+      ]
+    });
+    await progress.flush();
+    return jsonResult({
+      ok: true,
+      ...bundle,
+      recentDiagnostics: recentDiagnosticEvents(20)
+    });
+  })
+);
+server.registerTool(
   "codex_status",
   {
     title: "Codex status",
@@ -26136,6 +26764,7 @@ server.registerTool(
           default: process.env.CODEX_SUBAGENTS_SESSION_PROTOCOL === "exec" ? "exec" : "app-server",
           requiredMethods: ["initialize", "thread/start", "turn/start"],
           liveSteeringMethods: ["turn/steer", "turn/interrupt"],
+          recoveryMethods: ["thread/resume", "thread/read"],
           passiveMethods: ["thread/read"],
           fallbackToExec: process.env.CODEX_SUBAGENTS_DISABLE_EXEC_FALLBACK === "1" ? "disabled" : "enabled"
         },
@@ -26151,6 +26780,11 @@ server.registerTool(
         queue: jobManager.stats(),
         sessions: sessionManager.stats(),
         logging: loggingDiagnostics(),
+        artifacts: outputArtifactDiagnostics(),
+        diagnostics: {
+          ...diagnosticStats(),
+          recentFailures: recentDiagnosticEvents(20)
+        },
         lifecycle: lifecycleStats()
       });
     } catch (error2) {
@@ -26216,6 +26850,8 @@ server.registerTool(
     checks.push({ name: "queue", ok: true, detail: jobManager.stats() });
     checks.push({ name: "sessions", ok: true, detail: sessionManager.stats() });
     checks.push({ name: "logging", ok: true, detail: loggingDiagnostics() });
+    checks.push({ name: "artifacts", ok: true, detail: outputArtifactDiagnostics() });
+    checks.push({ name: "diagnostics", ok: true, detail: diagnosticStats() });
     checks.push({ name: "lifecycle", ok: true, detail: lifecycleStats() });
     return jsonResult({
       ok,

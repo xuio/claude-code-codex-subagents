@@ -15,6 +15,7 @@ const transport = new StdioClientTransport({
   env: {
     PATH: process.env.PATH ?? "",
     CLAUDE_PROJECT_DIR: projectDir,
+    CODEX_SUBAGENTS_SESSION_STATE_FILE: path.join(projectDir, "sessions.json"),
   },
   stderr: "pipe",
 });

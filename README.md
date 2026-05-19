@@ -14,15 +14,18 @@ The plugin lets Claude Code launch one Codex agent or several Codex agents in pa
 - Full local access: opt in per call with `dangerously_bypass_approvals_and_sandbox: true`, which maps to Codex's `--dangerously-bypass-approvals-and-sandbox` flag and allows DNS/network access plus unrestricted file and git writes.
 - Service tier: omitted by default so Codex uses its normal account/default service tier. Pass `service_tier` only when you explicitly want one.
 - Transport: stdio MCP, launched by Claude Code for the active session. No daemon is required.
-- Session protocol: persistent sessions use `codex app-server --listen stdio://` by default so `steer_codex_session` can deliver real live steering into an active turn. If app-server startup fails, the plugin falls back to the older `codex exec resume` session path.
+- Session protocol: persistent sessions use `codex app-server --listen stdio://` by default so `steer_codex_session` can deliver real live steering into an active turn. If app-server startup fails, the plugin falls back to the older `codex exec resume` session path. App-server sessions can be reattached after restart through `thread/resume` when Codex has produced a thread id.
 - Prompt delivery: stdin, not command-line arguments.
 - Codex home: uses the user's Codex home by default; pass `isolated_codex_home: true` to use a temporary Codex home with auth but without inherited `config.toml` MCP servers.
-- Concurrency: Codex processes run through a global queue. Defaults are `CODEX_SUBAGENTS_MAX_GLOBAL_PROCESSES=4` and `CODEX_SUBAGENTS_MAX_PROJECT_PROCESSES=2`.
+- Concurrency: Codex processes run through a global queue. Defaults are `CODEX_SUBAGENTS_MAX_GLOBAL_PROCESSES=4`, `CODEX_SUBAGENTS_MAX_PROJECT_PROCESSES=2`, and `CODEX_SUBAGENTS_MAX_QUEUE_PENDING=64`.
+- Backpressure: the server rejects excess queued jobs, sessions, or session turns with a structured `recovery.reason: "backpressure"` instead of letting Claude flood the MCP process.
 - Retention: completed async jobs and idle/terminal sessions are pruned in-process so a long Claude session cannot grow unbounded.
+- Durable sessions: the MCP server persists resumable session metadata to disk, then reloads it after Claude or the MCP process restarts. Prompt text and environment values are not persisted.
 - Progress: long-running tools emit MCP `notifications/progress` events when the client supplies a progress token.
 - Logging: verbose JSONL logs are written to stderr by default. The logs include raw MCP JSON-RPC frames, tool arguments/results, prompt outputs, progress notifications, queue/job/session lifecycle, and Codex stdin/stdout/stderr traffic.
 - Recovery hints: failed and timed-out tool calls include a structured `recovery` object with the recommended next tool or action.
-- MCP responses: long Codex outputs are compacted before returning to Claude so successful runs do not trip Claude Code's tool-result size limits. The full raw traffic remains available in the verbose server logs.
+- Diagnostics: recent failures are retained in-memory and exposed through `codex_status`; `codex_export_debug_bundle` writes a local JSON bundle with status, selected session/job state, recent failures, and a bounded log tail.
+- MCP responses: long Codex outputs are compacted before returning to Claude so successful runs do not trip Claude Code's tool-result size limits. When output is truncated, full retained final/stdout/stderr artifacts are written under the configured artifact directory.
 - Security: secret-looking output is redacted before it is returned to Claude, and secret-looking environment variables are not forwarded to Codex unless `forward_sensitive_env` is explicitly true.
 - Sessions: `start_session` and `send_session_prompt` use Codex app-server by default and preserve Codex context across turns without an external daemon.
 
@@ -33,10 +36,13 @@ Optional environment overrides:
 - `CODEX_SUBAGENTS_DEFAULT_REASONING_EFFORT`: `low`, `medium`, `high`, or `xhigh`. `minimal` is ignored as a default and falls back to `medium`.
 - `CODEX_SUBAGENTS_MAX_GLOBAL_PROCESSES`: maximum Codex child processes across this MCP server.
 - `CODEX_SUBAGENTS_MAX_PROJECT_PROCESSES`: maximum Codex child processes per project key.
+- `CODEX_SUBAGENTS_MAX_QUEUE_PENDING`: maximum queued one-shot/async Codex process tasks waiting for capacity. Defaults to `64`.
 - `CODEX_SUBAGENTS_JOB_TTL_SECONDS`: completed async job retention window. Defaults to one hour.
 - `CODEX_SUBAGENTS_MAX_SESSIONS`: maximum retained persistent sessions. Defaults to `100`.
+- `CODEX_SUBAGENTS_MAX_SESSION_QUEUED_TURNS`: maximum queued follow-up turns per persistent session. Defaults to `32`.
 - `CODEX_SUBAGENTS_SESSION_COMPLETED_TTL_SECONDS`: retention window for failed/cancelled sessions. Defaults to one hour.
 - `CODEX_SUBAGENTS_SESSION_IDLE_TTL_SECONDS`: retention window for idle resumable sessions. Defaults to one day.
+- `CODEX_SUBAGENTS_SESSION_STATE_FILE`: durable session metadata path. Defaults to `~/.codex-subagents/sessions.json`.
 - `CODEX_SUBAGENTS_LOG_PROFILE`: `debug` or `production`. Defaults to `debug`; `production` defaults to `info` level and redacts raw traffic unless overridden.
 - `CODEX_SUBAGENTS_LOG_LEVEL`: `debug`, `info`, `warn`, `error`, or `silent`. Defaults to `debug`.
 - `CODEX_SUBAGENTS_LOG_RAW_REDACT`: set `1` to redact raw traffic logs or `0` to keep raw traffic unredacted.
@@ -46,6 +52,12 @@ Optional environment overrides:
 - `CODEX_SUBAGENTS_PROGRESS_HEARTBEAT_MS`: interval for progress heartbeats on blocking tool calls. Defaults to `10000`.
 - `CODEX_SUBAGENTS_SESSION_PROTOCOL`: set to `exec` to force the legacy `codex exec resume` session protocol. Defaults to `app-server`.
 - `CODEX_SUBAGENTS_DISABLE_EXEC_FALLBACK`: set to `1` to fail instead of falling back to `codex exec` when app-server is unavailable.
+- `CODEX_SUBAGENTS_OUTPUT_ARTIFACTS`: set to `0` to disable output artifact files. Defaults to enabled.
+- `CODEX_SUBAGENTS_ARTIFACT_DIR`: directory for retained output artifacts. Defaults to the system temp directory under `codex-subagents-artifacts`.
+- `CODEX_SUBAGENTS_ARTIFACT_REDACT`: set to `0` to keep output artifacts unredacted. Defaults to redacted.
+- `CODEX_SUBAGENTS_KEEP_OUTPUT_ARTIFACTS`: set to `1` to retain output artifacts even when output was not truncated.
+- `CODEX_SUBAGENTS_DIAGNOSTIC_EVENTS`: number of recent diagnostic events retained in memory. Defaults to `100`.
+- `CODEX_SUBAGENTS_DEBUG_BUNDLE_DIR`: parent directory for `codex_export_debug_bundle`. Defaults to the system temp directory.
 
 ## Spark And Nested Subagents
 
@@ -150,7 +162,7 @@ npm run test:claude-desktop
 
 `test:real-app-server-steering` is an opt-in live Codex test that calls the MCP server directly, starts a real app-server session, sends `turn/steer` during an active turn, and verifies the final answer reflects the steering prompt.
 
-`test:app-server-contract` generates Codex app-server JSON Schemas and verifies the methods this plugin depends on (`thread/start`, `turn/start`, `turn/steer`, `turn/interrupt`, and completion/message notifications).
+`test:app-server-contract` generates Codex app-server JSON Schemas and verifies the methods this plugin depends on (`thread/start`, `thread/resume`, `thread/read`, `turn/start`, `turn/steer`, `turn/interrupt`, and completion/message notifications).
 
 `test:real-matrix` checks every available real Codex binary candidate without invoking a model: desktop app binary, configured binary, and `codex` on `PATH`. It validates version probing, app-server schema generation, and `codex_status` through the MCP server.
 
@@ -190,6 +202,8 @@ After startup, ask Claude to use Codex subagents, or invoke the plugin skill:
 
 `get_codex_session` and `wait_codex_session` inspect or wait for long-running Codex sessions and queued turns. Session snapshots include app-server capability status and fallback reasons; `wait_codex_session` returns `timeoutReason: "wait_timeout"` when the wait call times out without cancelling the session.
 
+`recover_codex_session` reattaches a durable persisted Codex session after Claude Code or the MCP server restarts. For app-server sessions it validates the Codex thread with `thread/resume` and `thread/read`; for exec sessions the next prompt uses the persisted thread id.
+
 `run_agent` launches one Codex `exec` process and waits for it. It uses the same bounded queue as async jobs and remains available for lower-level/manual control.
 
 `run_agents` launches multiple Codex `exec` processes concurrently with a bounded `max_parallel` setting and the global queue.
@@ -207,6 +221,8 @@ After startup, ask Claude to use Codex subagents, or invoke the plugin skill:
 `codex_status` reports the resolved Codex binary, server working directory, Claude project directory, default model, default reasoning effort, app-server protocol methods, feature sets, and version probe.
 
 `codex_doctor` runs installation and safety diagnostics without invoking a model.
+
+`codex_export_debug_bundle` writes a local diagnostics bundle for a failed/flaky run. It can include a selected session, selected async job, recent in-memory failures, status, queue/session limits, logging/artifact settings, lifecycle stats, and a bounded log file tail when `CODEX_SUBAGENTS_LOG_FILE` is set.
 
 Each agent accepts model, reasoning effort, sandbox, full-access bypass, project directory, timeout, isolated Codex home, and output-size controls. Pass `project_dir` when Claude Code wants Codex to inspect the same repository or subdirectory Claude is currently working in. If `project_dir` is omitted, the server uses `CLAUDE_PROJECT_DIR` when Claude Code provides it. Omit model to use Codex's configured default or the plugin's optional configured default model.
 

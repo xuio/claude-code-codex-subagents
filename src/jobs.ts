@@ -6,11 +6,19 @@ import {
   runAgent,
 } from "./runner.js";
 import { errorForLog, logger, summarizeRawTrafficForLog } from "./logging.js";
+import { recordDiagnosticEvent } from "./diagnostics.js";
 
 export class AbortError extends Error {
   constructor(message = "Operation was cancelled.") {
     super(message);
     this.name = "AbortError";
+  }
+}
+
+export class BackpressureError extends Error {
+  constructor(message = "Codex subagent queue is full.") {
+    super(message);
+    this.name = "BackpressureError";
   }
 }
 
@@ -71,6 +79,7 @@ export interface QueueStats {
   pending: number;
   maxGlobal: number;
   maxPerProject: number;
+  maxPending: number;
 }
 
 function readPositiveInt(value: string | undefined, fallback: number, max: number): number {
@@ -118,7 +127,7 @@ async function callQueueCallback(callback: () => void | Promise<void>): Promise<
   }
 }
 
-class AgentRunQueue {
+export class AgentRunQueue {
   private pending: Array<QueueTask<unknown>> = [];
   private active = 0;
   private readonly projectActive = new Map<string, number>();
@@ -126,6 +135,7 @@ class AgentRunQueue {
   constructor(
     private readonly maxGlobal = readPositiveInt(process.env.CODEX_SUBAGENTS_MAX_GLOBAL_PROCESSES, 4, 32),
     private readonly maxPerProject = readPositiveInt(process.env.CODEX_SUBAGENTS_MAX_PROJECT_PROCESSES, 2, 32),
+    private readonly maxPending = readPositiveInt(process.env.CODEX_SUBAGENTS_MAX_QUEUE_PENDING, 64, 10_000),
   ) {}
 
   stats(): QueueStats {
@@ -134,6 +144,7 @@ class AgentRunQueue {
       pending: this.pending.length,
       maxGlobal: this.maxGlobal,
       maxPerProject: this.maxPerProject,
+      maxPending: this.maxPending,
     };
   }
 
@@ -141,6 +152,14 @@ class AgentRunQueue {
     if (options.signal?.aborted) {
       logger.warn("queue.enqueue_rejected_cancelled", { projectKey: options.projectKey ?? "__default__" });
       return Promise.reject(new AbortError("Codex run was cancelled before it entered the queue."));
+    }
+    if (this.pending.length >= this.maxPending) {
+      logger.warn("queue.enqueue_rejected_backpressure", { projectKey: options.projectKey ?? "__default__", stats: this.stats() });
+      return Promise.reject(
+        new BackpressureError(
+          `Codex queue is full (${this.pending.length}/${this.maxPending} pending). Retry later or reduce parallelism.`,
+        ),
+      );
     }
 
     return new Promise((resolve, reject) => {
@@ -368,6 +387,11 @@ export class CodexJobManager {
     return job ? snapshot(job) : undefined;
   }
 
+  list(): JobSnapshot[] {
+    this.prune();
+    return [...this.jobs.values()].map(snapshot);
+  }
+
   cancel(id: string): JobSnapshot | undefined {
     const job = this.jobs.get(id);
     if (!job) return undefined;
@@ -470,6 +494,13 @@ export class CodexJobManager {
       .catch((error) => {
         job.error = error instanceof Error ? error.message : String(error);
         job.status = error instanceof AbortError ? "cancelled" : "failed";
+        recordDiagnosticEvent({
+          severity: job.status === "cancelled" ? "warn" : "error",
+          source: "job",
+          message: job.error,
+          jobId: job.id,
+          detail: { kind: job.kind, status: job.status },
+        });
         logger.error("job.failed", {
           jobId: job.id,
           kind: job.kind,

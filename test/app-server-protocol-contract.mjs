@@ -36,6 +36,8 @@ try {
     "JSONRPCResponse.json",
     "v1/InitializeParams.json",
     "v2/ThreadStartParams.json",
+    "v2/ThreadResumeParams.json",
+    "v2/ThreadResumeResponse.json",
     "v2/TurnStartParams.json",
     "v2/TurnSteerParams.json",
     "v2/TurnInterruptParams.json",
@@ -58,6 +60,12 @@ try {
   assert(required(turnStart).has("input"), "turn/start must require input", turnStart.required);
   assert(turnStart.properties?.sandboxPolicy, "turn/start must keep sandboxPolicy override support");
   assert(turnStart.properties?.effort, "turn/start must keep effort override support");
+
+  const threadResume = await readSchema(out, "v2/ThreadResumeParams.json");
+  assert(required(threadResume).has("threadId"), "thread/resume must require threadId", threadResume.required);
+  assert(threadResume.properties?.cwd, "thread/resume must keep cwd override support");
+  assert(threadResume.properties?.model, "thread/resume must keep model override support");
+  assert(threadResume.properties?.sandbox, "thread/resume must keep sandbox override support");
 
   const turnSteer = await readSchema(out, "v2/TurnSteerParams.json");
   assert(required(turnSteer).has("threadId"), "turn/steer must require threadId", turnSteer.required);

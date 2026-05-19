@@ -1,8 +1,8 @@
-import { mkdtemp, readFile, realpath, rm } from "node:fs/promises";
+import { access, mkdtemp, readFile, realpath, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { CodexJobManager } from "../src/jobs.js";
+import { AgentRunQueue, BackpressureError, CodexJobManager } from "../src/jobs.js";
 import { CodexSessionManager } from "../src/sessions.js";
 
 const fakeCodex = path.resolve("test/fixtures/fake-codex.mjs");
@@ -65,6 +65,8 @@ describe("app-server hardening", () => {
     expect(result.ok).toBe(true);
     expect(result.truncated.stdoutChars).toBeGreaterThan(0);
     expect(result.truncated.stderrChars).toBeGreaterThan(0);
+    expect(result.outputArtifacts?.stdoutPath).toBeTruthy();
+    if (result.outputArtifacts?.stdoutPath) await access(result.outputArtifacts.stdoutPath);
     expect(result.eventSummary.errors.join("\n")).toContain("Unparseable Codex app-server line");
     expect(result.eventSummary.errors.join("\n")).toContain("fake app-server error");
     expect(session.appServer?.supports.turnStart).toBe(true);
@@ -244,6 +246,93 @@ describe("app-server hardening", () => {
     expect(steered.session?.appServer?.supports.turnSteer).toBe(false);
     expect(steered.session?.appServer?.lastError).toContain("fake steer error");
     manager.cancel(session.id);
+  });
+
+  it("recovers a persisted app-server session through thread/resume", async () => {
+    const stateDir = await tempDir("codex-subagents-state-");
+    const stateFile = path.join(stateDir, "sessions.json");
+    const projectDir = await tempDir("codex-subagents-recover-project-");
+    const recordDir = await tempDir("codex-subagents-recover-record-");
+    const firstManager = new CodexSessionManager({ persist: true, stateFile });
+    const previousRecordDir = process.env.FAKE_CODEX_RECORD_DIR;
+
+    try {
+      process.env.FAKE_CODEX_RECORD_DIR = recordDir;
+      const started = await firstManager.start({
+        prompt: "recoverable first",
+        projectDir,
+        codexBin: fakeCodex,
+      });
+
+      const secondManager = new CodexSessionManager({ persist: true, stateFile });
+      const loaded = secondManager.get(started.session.id);
+      expect(loaded?.durable?.recovered).toBe(true);
+      expect(loaded?.codexThreadId).toBe(started.session.codexThreadId);
+
+      const recovered = await secondManager.recover(started.session.id);
+      expect(recovered.recovered).toBe(true);
+      expect(recovered.session?.appServer?.supports.threadResume).toBe(true);
+
+      const followUp = await secondManager.send(started.session.id, "recoverable second");
+      expect(followUp.result?.ok).toBe(true);
+      expect(followUp.result?.finalMessage).toContain("recoverable second");
+
+      const calls = await recordedCalls(recordDir);
+      expect(calls.some((call) => call.method === "thread/resume" && call.threadId === started.session.codexThreadId)).toBe(true);
+      expect(calls.filter((call) => call.method === "turn/start")).toHaveLength(2);
+      await Promise.all([firstManager.shutdown("test_cleanup"), secondManager.shutdown("test_cleanup")]);
+    } finally {
+      if (previousRecordDir === undefined) delete process.env.FAKE_CODEX_RECORD_DIR;
+      else process.env.FAKE_CODEX_RECORD_DIR = previousRecordDir;
+    }
+  });
+
+  it("returns a failed result if the app-server exits mid-turn", async () => {
+    const manager = new CodexSessionManager();
+    const projectDir = await tempDir("codex-subagents-app-exit-project-");
+
+    const { result, session } = await manager.start({
+      prompt: "APP_EXIT_DURING_TURN",
+      projectDir,
+      codexBin: fakeCodex,
+      timeoutMs: 1_000,
+    });
+
+    expect(result.ok).toBe(false);
+    expect(result.status).toBe("failed");
+    expect(result.eventSummary.errors.join("\n")).toContain("Codex app-server exited");
+    manager.cancel(session.id);
+  });
+
+  it("applies explicit backpressure to queued session turns", async () => {
+    const previous = process.env.CODEX_SUBAGENTS_MAX_SESSION_QUEUED_TURNS;
+    process.env.CODEX_SUBAGENTS_MAX_SESSION_QUEUED_TURNS = "1";
+    const manager = new CodexSessionManager();
+    const projectDir = await tempDir("codex-subagents-session-backpressure-project-");
+    try {
+      const { session } = manager.startAsync({
+        prompt: "session backpressure DELAY_MS=200",
+        projectDir,
+        codexBin: fakeCodex,
+      });
+      const queued = await manager.send(session.id, "queued once", {}, { wait: false });
+      expect(queued.turn?.status).toBe("queued");
+      await expect(manager.send(session.id, "queued twice", {}, { wait: false })).rejects.toBeInstanceOf(BackpressureError);
+      manager.cancel(session.id);
+    } finally {
+      if (previous === undefined) delete process.env.CODEX_SUBAGENTS_MAX_SESSION_QUEUED_TURNS;
+      else process.env.CODEX_SUBAGENTS_MAX_SESSION_QUEUED_TURNS = previous;
+      await manager.shutdown("test_cleanup");
+    }
+  });
+
+  it("applies explicit backpressure to pending queued agent runs", async () => {
+    const queue = new AgentRunQueue(0, 1, 1);
+    const controller = new AbortController();
+    const first = queue.enqueue(() => Promise.resolve("first"), { projectKey: "p", signal: controller.signal });
+    await expect(queue.enqueue(() => Promise.resolve("second"), { projectKey: "p" })).rejects.toBeInstanceOf(BackpressureError);
+    controller.abort();
+    await expect(first).rejects.toThrow(/cancelled/);
   });
 
   it("marks wait timeouts without cancelling the running session", async () => {

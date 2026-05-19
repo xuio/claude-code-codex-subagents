@@ -20,11 +20,14 @@ import {
   type PreparedSubagents,
   prepareSubagents,
 } from "./subagents.js";
+import { OutputArtifactWriter } from "./artifacts.js";
+import { recordDiagnosticEvent } from "./diagnostics.js";
 
 type JsonObject = Record<string, unknown>;
 type AppServerRequestMethod =
   | "initialize"
   | "thread/start"
+  | "thread/resume"
   | "turn/start"
   | "turn/steer"
   | "turn/interrupt"
@@ -33,6 +36,7 @@ type AppServerRequestMethod =
 export interface AppServerCapabilities {
   initialize: boolean;
   threadStart: boolean;
+  threadResume: boolean;
   turnStart: boolean;
   turnSteer: boolean;
   turnInterrupt: boolean;
@@ -102,6 +106,7 @@ interface ActiveTurnState {
   publishSnapshot: (force?: boolean) => void;
   resetIdleTimeout?: () => void;
   lastSnapshotAt: number;
+  artifactWriter: OutputArtifactWriter;
 }
 
 function userText(text: string): JsonObject {
@@ -216,10 +221,11 @@ export class CodexAppServerSession {
   private readonly capabilities: AppServerCapabilities = {
     initialize: false,
     threadStart: false,
+    threadResume: false,
     turnStart: false,
     turnSteer: true,
     turnInterrupt: true,
-    threadRead: true,
+    threadRead: false,
   };
 
   private constructor(
@@ -257,6 +263,14 @@ export class CodexAppServerSession {
         exitCode: code,
         signal,
       });
+      recordDiagnosticEvent({
+        severity: code === 0 ? "warn" : "error",
+        source: "codex.app_server",
+        message,
+        sessionId: this.logContext.sessionId,
+        codexBinary: this.codexBinary.path,
+        detail: { appServerId: this.id, threadId: this.threadId || undefined, exitCode: code, signal },
+      });
       this.rejectAll(new AppServerUnavailableError(message));
     });
   }
@@ -264,6 +278,7 @@ export class CodexAppServerSession {
   static async create(
     options: AgentRunOptions,
     logContext: { sessionId?: string } = {},
+    resumeThreadId?: string,
   ): Promise<CodexAppServerSession> {
     const mergedEnv = { ...process.env, ...options.env };
     const cwd = await resolveWorkingDirectory(options.projectDir ?? options.cwd, mergedEnv);
@@ -302,21 +317,34 @@ export class CodexAppServerSession {
     try {
       await session.initialize(options.spawnTimeoutMs ?? 10_000);
       const { model, reasoningEffort } = validateRunConfiguration(options, childEnv);
-      const thread = await session.request("thread/start", {
-        cwd,
-        model,
-        serviceTier: options.serviceTier ?? null,
-        approvalPolicy: "never",
-        sandbox: sandboxMode(options),
-        config: appServerConfig(options, reasoningEffort),
-        serviceName: "claude-code-codex-subagents",
-        ephemeral: options.ephemeral ?? false,
-        threadSource: "subagent",
-      }, options.spawnTimeoutMs ?? 30_000) as { thread?: { id?: string }; cwd?: string };
+      const thread = resumeThreadId
+        ? await session.request("thread/resume", {
+            threadId: resumeThreadId,
+            cwd,
+            model,
+            serviceTier: options.serviceTier ?? null,
+            approvalPolicy: "never",
+            sandbox: sandboxMode(options),
+            config: appServerConfig(options, reasoningEffort),
+            excludeTurns: true,
+          }, options.spawnTimeoutMs ?? 30_000) as { thread?: { id?: string }; cwd?: string }
+        : await session.request("thread/start", {
+            cwd,
+            model,
+            serviceTier: options.serviceTier ?? null,
+            approvalPolicy: "never",
+            sandbox: sandboxMode(options),
+            config: appServerConfig(options, reasoningEffort),
+            serviceName: "claude-code-codex-subagents",
+            ephemeral: options.ephemeral ?? false,
+            threadSource: "subagent",
+          }, options.spawnTimeoutMs ?? 30_000) as { thread?: { id?: string }; cwd?: string };
       const threadId = thread.thread?.id;
       if (!threadId) throw new AppServerUnavailableError("Codex app-server did not return a thread id.");
       session.threadId = threadId;
-      session.capabilities.threadStart = true;
+      if (resumeThreadId) session.capabilities.threadResume = true;
+      else session.capabilities.threadStart = true;
+      await session.probeThreadRead(options.spawnTimeoutMs ?? 30_000);
       return session;
     } catch (error) {
       await session.close();
@@ -349,6 +377,15 @@ export class CodexAppServerSession {
       supports: { ...this.capabilities },
       lastError: this.lastError,
     };
+  }
+
+  async readThread(includeTurns = false): Promise<unknown> {
+    const response = await this.request("thread/read", {
+      threadId: this.threadId,
+      includeTurns,
+    }, 10_000);
+    this.capabilities.threadRead = true;
+    return response;
   }
 
   async startTurn(
@@ -411,6 +448,10 @@ export class CodexAppServerSession {
 
     const finish = (status: AgentRunResult["status"], error?: string): AgentRunResult => {
       const final = truncate(redactSensitiveText(summary.lastAgentMessage ?? ""), maxOutputChars);
+      const outputArtifacts = this.activeTurn?.artifactWriter.finish({
+        finalMessage: summary.lastAgentMessage ?? "",
+        keep: final.truncatedChars > 0 || stdout.truncated() > 0 || stderr.truncated() > 0,
+      });
       const result: AgentRunResult = {
         name: options.name,
         ok: status === "completed",
@@ -434,6 +475,7 @@ export class CodexAppServerSession {
           stderrChars: stderr.truncated(),
           finalMessageChars: final.truncatedChars,
         },
+        outputArtifacts,
         eventSummary: cloneSummary(summary),
         commandPreview: [this.codexBinary.path, "app-server", "--listen", "stdio://", "turn/start"],
         timeoutReason,
@@ -493,6 +535,7 @@ export class CodexAppServerSession {
         resolve: resolveOnce,
         publishSnapshot,
         lastSnapshotAt: 0,
+        artifactWriter: new OutputArtifactWriter(`${this.id}-${turnId}`, this.env),
       };
       publishSnapshot(true);
 
@@ -669,6 +712,7 @@ export class CodexAppServerSession {
       activeTurnId: this.activeTurnId,
       chunk: summarizeRawTrafficForLog(chunk),
     });
+    this.activeTurn?.artifactWriter.appendStderr(chunk);
     this.activeTurn?.stderr.append(chunk);
     this.activeTurn?.publishSnapshot(true);
   }
@@ -683,6 +727,7 @@ export class CodexAppServerSession {
       this.lastError = error;
       this.activeTurn?.summary.errors.push(error);
       this.activeTurn?.stdout.append(`${line}\n`);
+      this.activeTurn?.artifactWriter.appendStdout(`${line}\n`);
       this.activeTurn?.publishSnapshot(true);
       return;
     }
@@ -759,6 +804,7 @@ export class CodexAppServerSession {
     }
     for (const handler of this.notificationHandlers) handler(message);
     active.stdout.append(`${JSON.stringify(message)}\n`);
+    active.artifactWriter.appendStdout(`${JSON.stringify(message)}\n`);
     active.summary.counts[method] = (active.summary.counts[method] ?? 0) + 1;
     if (active.summary.events) active.summary.events.push(message);
 
@@ -818,6 +864,10 @@ export class CodexAppServerSession {
     if (!active) throw new Error("No active app-server turn to finish.");
     const maxOutputChars = active.options.maxOutputChars ?? 60_000;
     const final = truncate(redactSensitiveText(active.summary.lastAgentMessage ?? ""), maxOutputChars);
+    const outputArtifacts = active.artifactWriter.finish({
+      finalMessage: active.summary.lastAgentMessage ?? "",
+      keep: final.truncatedChars > 0 || active.stdout.truncated() > 0 || active.stderr.truncated() > 0,
+    });
     const result: AgentRunResult = {
       name: active.options.name,
       ok: status === "completed",
@@ -841,6 +891,7 @@ export class CodexAppServerSession {
         stderrChars: active.stderr.truncated(),
         finalMessageChars: final.truncatedChars,
       },
+      outputArtifacts,
       eventSummary: cloneSummary(active.summary),
       commandPreview: [this.codexBinary.path, "app-server", "--listen", "stdio://", "turn/start"],
       timeoutReason: active.timeoutReason,
@@ -874,6 +925,25 @@ export class CodexAppServerSession {
       this.activeTurn.summary.errors.push(error.message);
       this.activeTurn.resolve(this.finishActiveTurn(status));
       this.activeTurn = undefined;
+    }
+  }
+
+  private async probeThreadRead(timeoutMs: number): Promise<void> {
+    try {
+      await this.request("thread/read", {
+        threadId: this.threadId,
+        includeTurns: false,
+      }, Math.min(timeoutMs, 10_000));
+      this.capabilities.threadRead = true;
+    } catch (error) {
+      this.capabilities.threadRead = false;
+      this.lastError = error instanceof Error ? error.message : String(error);
+      logger.warn("codex.app_server.thread_read_unavailable", {
+        ...this.logContext,
+        appServerId: this.id,
+        threadId: this.threadId,
+        error: errorForLog(error),
+      });
     }
   }
 

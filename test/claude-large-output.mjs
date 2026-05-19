@@ -119,6 +119,7 @@ const result = spawnSync(
     env: {
       ...process.env,
       CODEX_SUBAGENTS_CODEX_BIN: fakeCodex,
+      CODEX_SUBAGENTS_SESSION_STATE_FILE: path.join(os.tmpdir(), `codex-subagents-large-output-${process.pid}.sessions.json`),
     },
     maxBuffer: 16 * 1024 * 1024,
   },

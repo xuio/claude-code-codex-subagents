@@ -133,6 +133,7 @@ Return exactly one compact JSON object and no markdown. Shape: {"ok": boolean, "
       env: {
         ...process.env,
         CODEX_SUBAGENTS_CODEX_BIN: fakeCodex,
+        CODEX_SUBAGENTS_SESSION_STATE_FILE: path.join(recordDir, "sessions.json"),
         FAKE_CODEX_RECORD_DIR: recordDir,
       },
       maxBuffer: 16 * 1024 * 1024,

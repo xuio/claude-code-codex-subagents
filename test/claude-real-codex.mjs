@@ -86,6 +86,7 @@ console.log(`Using real Codex binary: ${codexBin}`);
 
 const env = { ...process.env };
 delete env.CODEX_SUBAGENTS_CODEX_BIN;
+env.CODEX_SUBAGENTS_SESSION_STATE_FILE = path.join(os.tmpdir(), `codex-subagents-real-codex-${process.pid}.sessions.json`);
 
 const result = spawnSync(
   binary,

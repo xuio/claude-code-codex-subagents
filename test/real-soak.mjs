@@ -1,5 +1,7 @@
 #!/usr/bin/env node
 import { spawnSync } from "node:child_process";
+import os from "node:os";
+import path from "node:path";
 import { performance } from "node:perf_hooks";
 
 const rounds = Number(process.env.CODEX_SUBAGENTS_REAL_SOAK_ROUNDS ?? "3");
@@ -42,6 +44,7 @@ for (let round = 1; round <= rounds; round += 1) {
       env: {
         ...process.env,
         CODEX_SUBAGENTS_REAL_SOAK_ROUND: String(round),
+        CODEX_SUBAGENTS_SESSION_STATE_FILE: path.join(os.tmpdir(), `codex-subagents-real-soak-${process.pid}-${round}.sessions.json`),
       },
     });
     const durationMs = Math.round(performance.now() - scenarioStarted);

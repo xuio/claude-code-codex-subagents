@@ -29,6 +29,7 @@ import {
   type SubagentRuntimeOptions,
   type SubagentTask,
 } from "./subagents.js";
+import { OutputArtifactWriter, type OutputArtifacts } from "./artifacts.js";
 
 export const reasoningEfforts = ["minimal", "low", "medium", "high", "xhigh"] as const;
 export const sandboxModes = ["read-only", "workspace-write", "danger-full-access"] as const;
@@ -134,6 +135,7 @@ export interface AgentRunResult {
   commandPreview: string[];
   validationError?: string;
   timeoutReason?: "timeout" | "idle_timeout" | "spawn_timeout" | "app_server_no_completion";
+  outputArtifacts?: OutputArtifacts;
   queue?: {
     queuedMs: number;
   };
@@ -606,6 +608,7 @@ export async function runAgent(options: AgentRunOptions): Promise<AgentRunResult
     throw error;
   }
   const tempDir = await mkdtemp(path.join(os.tmpdir(), "codex-subagents-"));
+  const artifactWriter = new OutputArtifactWriter(runId, mergedEnv);
   const preparedSubagents = await prepareSubagents({
     definitions: options.codexSubagents,
     tasks: options.subagentTasks,
@@ -733,6 +736,7 @@ export async function runAgent(options: AgentRunOptions): Promise<AgentRunResult
         runId,
         chunk: summarizeRawTrafficForLog(chunk),
       });
+      artifactWriter.appendStdout(chunk);
       resetIdleTimeout();
       stdout.append(chunk);
       publishSnapshot(true);
@@ -753,6 +757,7 @@ export async function runAgent(options: AgentRunOptions): Promise<AgentRunResult
         runId,
         chunk: summarizeRawTrafficForLog(chunk),
       });
+      artifactWriter.appendStderr(chunk);
       resetIdleTimeout();
       stderr.append(chunk);
       publishSnapshot(true);
@@ -829,6 +834,10 @@ export async function runAgent(options: AgentRunOptions): Promise<AgentRunResult
         ? parseStructuredOutput(finalMessage)
         : { value: undefined, error: undefined };
     const final = truncate(redactSensitiveText(finalMessage), maxOutputChars);
+    const outputArtifacts = artifactWriter.finish({
+      finalMessage,
+      keep: final.truncatedChars > 0 || stdout.truncated() > 0 || stderr.truncated() > 0,
+    });
     const redactedSummary = cloneEventSummary(summary);
     const redactedStructuredOutput = structured.value === undefined ? undefined : redactJsonValue(structured.value);
     const status = cancelled
@@ -856,6 +865,7 @@ export async function runAgent(options: AgentRunOptions): Promise<AgentRunResult
         stderrChars: stderr.truncated(),
         finalMessageChars: final.truncatedChars,
       },
+      outputArtifacts,
     });
 
     return {
@@ -888,6 +898,7 @@ export async function runAgent(options: AgentRunOptions): Promise<AgentRunResult
       structuredOutputError: structured.error,
       commandPreview: [codexBinary.path, ...args.filter((arg) => arg !== options.prompt)],
       timeoutReason,
+      outputArtifacts,
       codexSubagents: {
         customAgents: preparedSubagents.names,
         requestedTasks: options.subagentTasks?.length ?? 0,
@@ -901,6 +912,7 @@ export async function runAgent(options: AgentRunOptions): Promise<AgentRunResult
     if (killTimeout) clearTimeout(killTimeout);
     if (abortHandler) options.abortSignal?.removeEventListener("abort", abortHandler);
     await rm(tempDir, { recursive: true, force: true }).catch(() => {});
+    artifactWriter.discard();
     await preparedSubagents.cleanup().catch(() => {});
   }
 }

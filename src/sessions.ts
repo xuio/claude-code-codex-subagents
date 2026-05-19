@@ -1,7 +1,13 @@
 import { AppServerUnavailableError, CodexAppServerSession, type AppServerStatus } from "./app-server.js";
-import { runQueuedAgent } from "./jobs.js";
+import { BackpressureError, runQueuedAgent } from "./jobs.js";
 import { errorForLog, logger, summarizeRawTrafficForLog } from "./logging.js";
 import type { AgentRunOptions, AgentRunPartial, AgentRunResult } from "./runner.js";
+import { recordDiagnosticEvent } from "./diagnostics.js";
+import {
+  durableRunOptions,
+  type DurableSessionState,
+  SessionStateStore,
+} from "./session-state.js";
 
 type SessionStatus = "active" | "running" | "failed" | "cancelled";
 type SessionTurnKind = "prompt" | "steer";
@@ -34,6 +40,12 @@ export interface CodexSessionSnapshot {
   supportsRealSteering: boolean;
   appServer?: AppServerStatus;
   appServerFallbackReason?: string;
+  durable?: {
+    persisted: boolean;
+    recovered: boolean;
+    canResume: boolean;
+    stateFile?: string;
+  };
   turns: number;
   active: boolean;
   activeTurn?: CodexSessionTurnSnapshot;
@@ -50,8 +62,10 @@ export interface CodexSessionStats {
   queuedTurns: number;
   waiters: number;
   maxSessions: number;
+  maxQueuedTurns: number;
   completedTtlSeconds: number;
   idleTtlSeconds: number;
+  durableStateFile?: string;
 }
 
 interface CodexSessionTurnRecord extends CodexSessionTurnSnapshot {
@@ -84,6 +98,9 @@ interface CodexSessionRecord {
   draining: boolean;
   cancelRequested: boolean;
   waiters: Set<() => void>;
+  persisted: boolean;
+  recovered: boolean;
+  stateFile?: string;
 }
 
 function withoutUndefined<T extends Record<string, unknown>>(value: T): Partial<T> {
@@ -122,6 +139,14 @@ function snapshot(session: CodexSessionRecord): CodexSessionSnapshot {
       Boolean(session.appServer?.status().supports.turnSteer),
     appServer: session.appServer?.status(),
     appServerFallbackReason: session.appServerFallbackReason,
+    durable: session.persisted
+      ? {
+          persisted: true,
+          recovered: session.recovered,
+          canResume: Boolean(session.codexThreadId && session.turns > 0),
+          stateFile: session.stateFile,
+        }
+      : undefined,
     turns: session.turns,
     active: Boolean(session.controller),
     activeTurn: session.activeTurn ? turnSnapshot(session.activeTurn) : undefined,
@@ -154,6 +179,7 @@ function readPositiveInt(value: string | undefined, fallback: number, max: numbe
 
 export class CodexSessionManager {
   private readonly sessions = new Map<string, CodexSessionRecord>();
+  private readonly stateStore: SessionStateStore | undefined;
   private readonly completedTtlSeconds = readPositiveInt(
     process.env.CODEX_SUBAGENTS_SESSION_COMPLETED_TTL_SECONDS,
     3600,
@@ -165,6 +191,14 @@ export class CodexSessionManager {
     604_800,
   );
   private readonly maxSessions = readPositiveInt(process.env.CODEX_SUBAGENTS_MAX_SESSIONS, 100, 1_000);
+  private readonly maxQueuedTurns = readPositiveInt(process.env.CODEX_SUBAGENTS_MAX_SESSION_QUEUED_TURNS, 32, 1_000);
+
+  constructor(options: { persist?: boolean; stateFile?: string } = {}) {
+    if (options.persist) {
+      this.stateStore = new SessionStateStore(options.stateFile);
+      this.loadPersistedSessions();
+    }
+  }
 
   list(): CodexSessionSnapshot[] {
     this.prune();
@@ -195,8 +229,10 @@ export class CodexSessionManager {
         0,
       ),
       maxSessions: this.maxSessions,
+      maxQueuedTurns: this.maxQueuedTurns,
       completedTtlSeconds: this.completedTtlSeconds,
       idleTtlSeconds: this.idleTtlSeconds,
+      durableStateFile: this.stateStore?.file,
     };
   }
 
@@ -237,6 +273,11 @@ export class CodexSessionManager {
     metadata: { sessionName?: string } = {},
   ): { session: CodexSessionRecord; turn: CodexSessionTurnRecord } {
     this.prune();
+    if (this.sessions.size >= this.maxSessions && ![...this.sessions.values()].some((session) => this.isPrunable(session))) {
+      throw new BackpressureError(
+        `Codex session table is full (${this.sessions.size}/${this.maxSessions}). Cancel old sessions or lower session retention before starting another session.`,
+      );
+    }
     const now = new Date().toISOString();
     const { prompt: _prompt, abortSignal: _abortSignal, onSnapshot: _onSnapshot, ...baseOptions } = options;
     const session: CodexSessionRecord = {
@@ -258,6 +299,9 @@ export class CodexSessionManager {
       draining: false,
       cancelRequested: false,
       waiters: new Set(),
+      persisted: Boolean(this.stateStore),
+      recovered: false,
+      stateFile: this.stateStore?.file,
     };
     this.sessions.set(session.id, session);
     const turn = this.enqueueTurn(session, {
@@ -272,6 +316,7 @@ export class CodexSessionManager {
       session: summarizeRawTrafficForLog(snapshot(session)),
       prompt: options.prompt,
     });
+    this.persist();
     return { session, turn };
   }
 
@@ -527,7 +572,61 @@ export class CodexSessionManager {
       void session.appServer?.close("cancelled");
     }
     this.notifySession(session);
+    this.persist();
     return snapshot(session);
+  }
+
+  async recover(id: string): Promise<{ session?: CodexSessionSnapshot; recovered?: boolean; error?: string }> {
+    this.prune();
+    const session = this.sessions.get(id);
+    if (!session) return { error: `Unknown session_id: ${id}` };
+    if (!session.codexThreadId || session.turns < 1) {
+      return {
+        session: snapshot(session),
+        recovered: false,
+        error: `Session ${id} does not have a persisted Codex thread id to recover.`,
+      };
+    }
+    if (session.protocol === "exec") {
+      session.recovered = true;
+      this.persist();
+      return { session: snapshot(session), recovered: true };
+    }
+    try {
+      if (!session.appServer) {
+        session.appServer = await CodexAppServerSession.create(
+          {
+            ...session.baseOptions,
+            prompt: "",
+            projectDir: session.projectDir ?? session.baseOptions.projectDir,
+            cwd: session.cwd ?? session.baseOptions.cwd,
+            ephemeral: false,
+          },
+          { sessionId: session.id },
+          session.codexThreadId,
+        );
+        session.codexThreadId = session.appServer.threadId;
+      } else {
+        await session.appServer.readThread(false);
+      }
+      session.status = session.status === "failed" ? "active" : session.status;
+      session.recovered = true;
+      session.updatedAt = new Date().toISOString();
+      this.persist();
+      return { session: snapshot(session), recovered: true };
+    } catch (error) {
+      session.error = error instanceof Error ? error.message : String(error);
+      session.updatedAt = new Date().toISOString();
+      recordDiagnosticEvent({
+        severity: "error",
+        source: "session.recover",
+        message: session.error,
+        sessionId: session.id,
+        detail: { protocol: session.protocol, codexThreadId: session.codexThreadId },
+      });
+      this.persist();
+      return { session: snapshot(session), recovered: false, error: session.error };
+    }
   }
 
   async shutdown(reason = "shutdown"): Promise<CodexSessionSnapshot[]> {
@@ -560,6 +659,7 @@ export class CodexSessionManager {
     }
 
     await Promise.allSettled(closePromises);
+    this.persist();
     return snapshots;
   }
 
@@ -572,6 +672,11 @@ export class CodexSessionManager {
       priority?: "normal" | "front";
     },
   ): CodexSessionTurnRecord {
+    if (session.queuedTurns.length >= this.maxQueuedTurns) {
+      throw new BackpressureError(
+        `Codex session ${session.id} has too many queued turns (${session.queuedTurns.length}/${this.maxQueuedTurns}). Wait for existing turns or start a separate session.`,
+      );
+    }
     const now = new Date().toISOString();
     const turn: CodexSessionTurnRecord = {
       id: `turn-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`,
@@ -593,6 +698,7 @@ export class CodexSessionManager {
       queuedTurns: session.queuedTurns.length,
     });
     this.notifySession(session);
+    this.persist();
     return turn;
   }
 
@@ -695,8 +801,17 @@ export class CodexSessionManager {
         turnId: turn.id,
         error: errorForLog(error),
       });
+      recordDiagnosticEvent({
+        severity: session.status === "cancelled" ? "warn" : "error",
+        source: "session",
+        message: session.error,
+        sessionId: session.id,
+        codexBinary: session.lastResult?.codexBinary.path,
+        detail: { turnId: turn.id, protocol: session.protocol },
+      });
       this.notifyTurn(turn);
       this.notifySession(session);
+      this.persist();
       throw error;
     } finally {
       session.controller = undefined;
@@ -735,7 +850,11 @@ export class CodexSessionManager {
   ): Promise<AgentRunResult> {
     try {
       if (!session.appServer) {
-        session.appServer = await CodexAppServerSession.create(options, { sessionId: session.id });
+        session.appServer = await CodexAppServerSession.create(
+          options,
+          { sessionId: session.id },
+          session.codexThreadId && session.turns > 0 ? session.codexThreadId : undefined,
+        );
         session.codexThreadId = session.appServer.threadId;
         session.appServerFallbackReason = undefined;
       }
@@ -808,6 +927,7 @@ export class CodexSessionManager {
     if (session.cancelRequested && session.appServer) void session.appServer.close("cancelled");
     this.notifyTurn(turn);
     this.notifySession(session);
+    this.persist();
   }
 
   private findTurn(session: CodexSessionRecord, turnId: string): CodexSessionTurnRecord | undefined {
@@ -906,7 +1026,84 @@ export class CodexSessionManager {
     this.sessions.delete(id);
     void session.appServer?.close("cancelled").catch(() => {});
     this.notifySession(session);
+    this.persist();
+  }
+
+  private loadPersistedSessions(): void {
+    const store = this.stateStore;
+    if (!store) return;
+    for (const persisted of store.load()) {
+      const record = this.recordFromState(persisted);
+      if (!record) continue;
+      this.sessions.set(record.id, record);
+    }
+    logger.info("session.state.loaded", { stateFile: store.file, sessions: this.sessions.size });
+  }
+
+  private recordFromState(state: DurableSessionState): CodexSessionRecord | undefined {
+    const hasThread = Boolean(state.codexThreadId && state.turns > 0);
+    if (!hasThread && state.status === "active") return undefined;
+    return {
+      id: state.id,
+      name: state.name,
+      status: hasThread ? state.status : "failed",
+      createdAt: state.createdAt,
+      updatedAt: state.updatedAt,
+      projectDir: state.projectDir,
+      cwd: state.cwd,
+      codexThreadId: state.codexThreadId,
+      protocol: state.protocol,
+      appServerFallbackReason: undefined,
+      turns: state.turns,
+      partial: undefined,
+      error: state.error,
+      baseOptions: {
+        ...(state.baseOptions as Omit<AgentRunOptions, "prompt" | "abortSignal" | "onSnapshot">),
+        projectDir: state.projectDir ?? state.baseOptions.projectDir,
+        cwd: state.cwd ?? state.baseOptions.cwd,
+        ephemeral: false,
+      },
+      queuedTurns: [],
+      recentTurns: [],
+      draining: false,
+      cancelRequested: state.status === "cancelled",
+      waiters: new Set(),
+      persisted: true,
+      recovered: true,
+      stateFile: this.stateStore?.file,
+    };
+  }
+
+  private persist(): void {
+    const store = this.stateStore;
+    if (!store) return;
+    const states: DurableSessionState[] = [...this.sessions.values()]
+      .filter((session) => session.codexThreadId && session.turns > 0)
+      .map((session) => ({
+        id: session.id,
+        name: session.name,
+        status: session.status === "running" ? "active" : session.status,
+        createdAt: session.createdAt,
+        updatedAt: session.updatedAt,
+        projectDir: session.projectDir,
+        cwd: session.cwd,
+        codexThreadId: session.codexThreadId,
+        protocol: session.protocol,
+        turns: session.turns,
+        baseOptions: durableRunOptions({
+          ...session.baseOptions,
+          prompt: "",
+          projectDir: session.projectDir ?? session.baseOptions.projectDir,
+          cwd: session.cwd ?? session.baseOptions.cwd,
+        }),
+        error: session.error,
+      }));
+    try {
+      store.save(states);
+    } catch (error) {
+      logger.error("session.state.save_failed", { stateFile: store.file, error: errorForLog(error) });
+    }
   }
 }
 
-export const sessionManager = new CodexSessionManager();
+export const sessionManager = new CodexSessionManager({ persist: true });

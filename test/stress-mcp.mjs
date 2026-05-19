@@ -16,6 +16,7 @@ const transport = new StdioClientTransport({
     ...process.env,
     CODEX_SUBAGENTS_CODEX_BIN: fakeCodex,
     CLAUDE_PROJECT_DIR: projectDir,
+    CODEX_SUBAGENTS_SESSION_STATE_FILE: path.join(projectDir, "sessions.json"),
   },
   stderr: "pipe",
 });

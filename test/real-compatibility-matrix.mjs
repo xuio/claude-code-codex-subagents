@@ -58,6 +58,8 @@ async function checkContract(codexBin) {
     });
     for (const name of [
       "v2/ThreadStartParams.json",
+      "v2/ThreadResumeParams.json",
+      "v2/ThreadReadParams.json",
       "v2/TurnStartParams.json",
       "v2/TurnSteerParams.json",
       "v2/TurnInterruptParams.json",
@@ -66,6 +68,12 @@ async function checkContract(codexBin) {
       await access(path.join(out, name));
     }
     const turnSteer = JSON.parse(await readFile(path.join(out, "v2/TurnSteerParams.json"), "utf8"));
+    const threadResume = JSON.parse(await readFile(path.join(out, "v2/ThreadResumeParams.json"), "utf8"));
+    assert(
+      threadResume.required?.includes("threadId"),
+      "thread/resume schema lost threadId",
+      { codexBin, required: threadResume.required },
+    );
     assert(
       ["threadId", "expectedTurnId", "input"].every((field) => turnSteer.required?.includes(field)),
       "turn/steer schema lost a required field",
@@ -86,6 +94,7 @@ async function checkMcpStatus(codexBin) {
       PATH: process.env.PATH ?? "",
       CLAUDE_PROJECT_DIR: projectDir,
       CODEX_SUBAGENTS_LOG_PROFILE: "production",
+      CODEX_SUBAGENTS_SESSION_STATE_FILE: path.join(projectDir, "sessions.json"),
     },
     stderr: "pipe",
   });

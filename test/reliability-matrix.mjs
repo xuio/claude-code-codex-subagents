@@ -17,6 +17,7 @@ const transport = new StdioClientTransport({
     ...process.env,
     CODEX_SUBAGENTS_CODEX_BIN: fakeCodex,
     CLAUDE_PROJECT_DIR: projectDir,
+    CODEX_SUBAGENTS_SESSION_STATE_FILE: path.join(projectDir, "sessions.json"),
     FAKE_CODEX_RECORD_DIR: recordDir,
   },
   stderr: "pipe",
@@ -447,7 +448,10 @@ try {
     "wait_codex_session should wait for queued prompt and steering turns",
     queuedWait.structuredContent,
   );
-  const queuedCalls = (await readCalls()).slice(queuedCallsBefore).map((call) => call.prompt);
+  const queuedCalls = (await readCalls())
+    .slice(queuedCallsBefore)
+    .filter((call) => call.method === "turn/start")
+    .map((call) => call.prompt);
   assert(
     queuedCalls[0]?.includes("matrix-queued-session-start") &&
       queuedCalls[1]?.includes("matrix-queued-session-steer") &&

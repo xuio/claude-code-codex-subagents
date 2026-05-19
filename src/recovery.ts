@@ -42,6 +42,16 @@ export function recoveryForError(error: unknown, context = "tool_call"): Recover
     };
   }
 
+  if (lower.includes("queue is full") || lower.includes("backpressure") || lower.includes("too many queued")) {
+    return {
+      recoverable: true,
+      reason: "backpressure",
+      recommendedAction: "Reduce max_parallel or wait briefly, then retry. Inspect codex_status for queue/session limits.",
+      recommendedTool: "codex_status",
+      retryAfterMs: 2_000,
+    };
+  }
+
   if (lower.includes("timed out") || lower.includes("timeout")) {
     return {
       recoverable: true,

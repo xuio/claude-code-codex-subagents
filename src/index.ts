@@ -16,7 +16,14 @@ import {
   serviceTiers,
 } from "./runner.js";
 import { aggregateAgentResults } from "./aggregate.js";
+import { outputArtifactDiagnostics } from "./artifacts.js";
 import { cleanOption } from "./binary.js";
+import {
+  createDebugBundle,
+  diagnosticStats,
+  recentDiagnosticEvents,
+  recordDiagnosticEvent,
+} from "./diagnostics.js";
 import { jobManager, runQueuedAgent, runQueuedAgents } from "./jobs.js";
 import { cleanupRuntime, lifecycleStats, registerCleanupHandler } from "./lifecycle.js";
 import { errorForLog, logger, loggingDiagnostics, makeLogId, summarizeRawTrafficForLog } from "./logging.js";
@@ -46,6 +53,8 @@ const usageGuide = [
   "- Use send_codex_session_prompt to add prompts to an active or idle Codex session queue without losing context.",
   "- Use steer_codex_session to send real live steering into a running app-server turn; use interrupt_current only when the active turn should be cancelled and redirected. If a session had to fall back to codex exec, steering degrades to the next high-priority queued turn.",
   "- Use get_codex_session or wait_codex_session to inspect or wait for long-running Codex sessions. Session snapshots include appServer.supports and appServerFallbackReason for protocol diagnostics.",
+  "- Use recover_codex_session when Claude has a persisted session_id from before a Claude/MCP restart and wants to reattach to that Codex thread before sending a follow-up.",
+  "- Use codex_export_debug_bundle after repeated failures; it writes recent diagnostics, selected session/job state, status, and optional log tail into one local JSON bundle.",
   "- Use codex_choose_tool if you are unsure which Codex tool fits the request.",
   "- Use run_agent, run_agents, run_agents_aggregate, start_session, and send_session_prompt for lower-level/manual control; they are compatibility tools behind the intuitive front doors.",
   "- Use run_agents_aggregate when Claude needs a concise consensus object from several independent Codex agents.",
@@ -59,11 +68,14 @@ const usageGuide = [
   "- If the user explicitly asks for non-sandbox/full local capabilities, set dangerously_bypass_approvals_and_sandbox true. This maps to Codex's --dangerously-bypass-approvals-and-sandbox flag and allows DNS/network plus unrestricted file and git writes.",
   "- Approvals are non-interactive; do not expect Codex to ask permission.",
   "- If wait_codex_session returns completed false with timeoutReason \"wait_timeout\", the session is still running unless its status says otherwise.",
+  "- If a tool returns recovery.reason \"backpressure\", reduce max_parallel or wait before retrying. codex_status exposes current queue/session limits.",
+  "- If a response mentions outputArtifacts, use the artifact paths for full retained output instead of asking Codex to resend huge stdout/stderr.",
   "- Prefer model_preset \"spark\" for responsive focused checks, small reviews, UI iteration, and sidecar analysis.",
   "- Use reasoning_effort \"medium\" by default, \"low\" for simple checks, and \"high\" or \"xhigh\" only for difficult analysis. Do not use \"minimal\"; Codex currently auto-attaches web_search and the API rejects that tool with minimal reasoning.",
   "- Do not combine model_preset \"spark\" with reasoning_summary values other than \"none\"; Spark does not support reasoning.summary.",
   "- Do not set service_tier by default. Let Codex use its normal account/default service tier unless the user explicitly asks for a service tier.",
   "- Pass project_dir whenever Claude knows the active project directory so Codex works in the same tree as Claude Code.",
+  "- Persistent sessions are durable across MCP restarts when Codex has produced a thread id. After restart, list_sessions can show recovered sessions and recover_codex_session can validate the thread.",
   "- Do not use Bash, Read, or filesystem inspection to locate Codex. The MCP server resolves Codex automatically, preferring the Codex desktop app binary when installed.",
   "- Set isolated_codex_home true when a run should ignore the user's Codex MCP server config and use only this request's temporary Codex configuration.",
   "- Use mcp_config_policy \"explicit\" with codex_mcp_servers for intentional MCP sharing. Use \"inherit_claude_project\" only when the project has a Claude MCP config that should be shared with Codex.",
@@ -448,6 +460,17 @@ async function loggedToolCall(
       isError: Boolean(result.isError),
       result: summarizeRawTrafficForLog(result),
     });
+    if (result.isError) {
+      recordDiagnosticEvent({
+        severity: "error",
+        source: "mcp.tool",
+        message: `MCP tool ${tool} returned an error.`,
+        correlationId: toolCallId,
+        tool,
+        recovery: (result.structuredContent as { recovery?: unknown } | undefined)?.recovery,
+        detail: result.structuredContent,
+      });
+    }
     return result;
   } catch (error) {
     logger.error("mcp.tool.exception", {
@@ -455,6 +478,15 @@ async function loggedToolCall(
       tool,
       durationMs: Date.now() - started,
       error: errorForLog(error),
+    });
+    recordDiagnosticEvent({
+      severity: "error",
+      source: "mcp.tool",
+      message: error instanceof Error ? error.message : String(error),
+      correlationId: toolCallId,
+      tool,
+      recovery: recoveryForError(error, tool),
+      detail: errorForLog(error),
     });
     return errorResult(error, tool);
   }
@@ -810,6 +842,8 @@ server.registerTool(
           steerRunningSession: "steer_codex_session",
           inspectSession: "get_codex_session",
           waitForSession: "wait_codex_session",
+          recoverSessionAfterRestart: "recover_codex_session",
+          exportDiagnostics: "codex_export_debug_bundle",
           longRunningOneTask: "start_agent_run",
           longRunningParallelTasks: "start_agents_run",
           lowerLevelSingle: "run_agent",
@@ -865,6 +899,7 @@ server.registerTool(
       continuing_session: z.boolean().optional().describe("Whether Claude already has a Codex session id to continue."),
       wants_async_session: z.boolean().optional().describe("Whether Claude needs a Codex session id immediately while work continues."),
       wants_steering: z.boolean().optional().describe("Whether the user wants to steer or redirect an already-running Codex session."),
+      recovering_after_restart: z.boolean().optional().describe("Whether Claude has a persisted session id from before an MCP/Claude restart."),
       long_running: z.boolean().optional().describe("Whether the work is likely to exceed a normal MCP request timeout."),
       wants_aggregation: z.boolean().optional().describe("Whether Claude needs a deterministic consensus object."),
     },
@@ -873,7 +908,8 @@ server.registerTool(
     loggedToolCall("codex_choose_tool", args, extra, async () => {
       const taskCount = args.task_count ?? (args.wants_parallel ? 2 : 1);
       let recommendedTool = "ask_codex";
-      if (args.wants_steering) recommendedTool = "steer_codex_session";
+      if (args.recovering_after_restart) recommendedTool = "recover_codex_session";
+      else if (args.wants_steering) recommendedTool = "steer_codex_session";
       else if (args.continuing_session && args.long_running) recommendedTool = "send_codex_session_prompt";
       else if (args.continuing_session) recommendedTool = "continue_codex_session";
       else if (args.wants_session && (args.wants_async_session || args.long_running)) recommendedTool = "start_codex_session_async";
@@ -890,12 +926,14 @@ server.registerTool(
           "Use ask_codex for one normal Codex task.",
           "Use ask_codex_parallel for multiple independent Codex tasks.",
           "Use start_codex_session for a new multi-turn Codex worker and continue_codex_session for follow-ups.",
+          "Use recover_codex_session after an MCP restart when Claude has a previous persisted session id.",
           "Use start_codex_session_async when Claude needs the session id immediately and will poll or wait later.",
           "Use send_codex_session_prompt to queue additional prompts onto an active or idle Codex session.",
           "Use steer_codex_session to send live app-server steering into a running session; interrupt_current cancels the active turn before running the steering turn.",
           "Use start_agent_run/start_agents_run for slow jobs that should not hold a blocking MCP request open.",
           "Use run_agents_aggregate only when Claude needs a deterministic consensus object.",
           "Pass project_dir whenever Claude knows the active project directory.",
+          "When recovery.reason is backpressure, inspect codex_status and retry with less parallelism after a short wait.",
           "Do not use Bash or Read to locate Codex; this MCP server resolves the binary.",
         ],
         aliases: {
@@ -906,6 +944,7 @@ server.registerTool(
           start_codex_session_async: ["start_session + return immediately"],
           send_codex_session_prompt: ["queued continue_codex_session"],
           steer_codex_session: ["live app-server turn steering"],
+          recover_codex_session: ["reattach persisted Codex thread"],
         },
       });
     }),
@@ -1884,6 +1923,39 @@ server.registerTool(
 );
 
 server.registerTool(
+  "recover_codex_session",
+  {
+    title: "Recover Codex session",
+    description:
+      "Reattach a durable Codex session after Claude Code or the MCP server restarted. Use this before continue_codex_session when list_sessions shows durable.recovered true or Claude has an older session_id. App-server sessions resume the Codex thread via thread/resume; exec sessions reuse their persisted thread id on the next prompt.",
+    inputSchema: {
+      session_id: sessionIdSchema,
+    },
+  },
+  async (args, extra) =>
+    loggedToolCall("recover_codex_session", args, extra, async () => {
+      const progress = createProgressReporter(extra);
+      await progress.send(`Recovering Codex session ${args.session_id}`);
+      const recovered = await sessionManager.recover(args.session_id);
+      await progress.flush();
+      if (recovered.error || !recovered.session) {
+        return jsonResult(
+          {
+            error: recovered.error,
+            session: recovered.session ? compactSessionSnapshotForMcp(recovered.session) : recovered.session,
+            recovery: recoveryForError(new Error(recovered.error ?? "Codex session could not be recovered."), "recover_codex_session"),
+          },
+          true,
+        );
+      }
+      return jsonResult({
+        recovered: recovered.recovered,
+        session: compactSessionSnapshotForMcp(recovered.session),
+      });
+    }),
+);
+
+server.registerTool(
   "wait_codex_session",
   {
     title: "Wait for Codex session",
@@ -1967,6 +2039,56 @@ server.registerTool(
 );
 
 server.registerTool(
+  "codex_export_debug_bundle",
+  {
+    title: "Export Codex debug bundle",
+    description:
+      "Write a local diagnostics bundle for debugging repeated Claude/Codex MCP failures. Includes recent in-memory failures, status, selected session/job snapshots, and the configured log file tail when available. Use after a failed or flaky Codex tool call.",
+    inputSchema: {
+      session_id: sessionIdSchema.optional(),
+      job_id: jobIdSchema.optional(),
+      include_all_sessions: z.boolean().default(false),
+    },
+  },
+  async (args, extra) =>
+    loggedToolCall("codex_export_debug_bundle", args, extra, async () => {
+      const progress = createProgressReporter(extra);
+      await progress.send("Writing Codex debug bundle");
+      const session = args.session_id ? sessionManager.get(args.session_id) : undefined;
+      const job = args.job_id ? jobManager.get(args.job_id) : undefined;
+      if (args.session_id && !session) return errorResult(new Error(`Unknown session_id: ${args.session_id}`), "codex_export_debug_bundle");
+      if (args.job_id && !job) return errorResult(new Error(`Unknown job_id: ${args.job_id}`), "codex_export_debug_bundle");
+      const bundle = await createDebugBundle({
+        session: args.include_all_sessions
+          ? sessionManager.list().map(compactSessionSnapshotForMcp)
+          : session
+            ? compactSessionSnapshotForMcp(session)
+            : undefined,
+        job: job ? compactJobSnapshotForMcp(job) : undefined,
+        status: {
+          cwd: process.cwd(),
+          queue: jobManager.stats(),
+          sessions: sessionManager.stats(),
+          logging: loggingDiagnostics(),
+          artifacts: outputArtifactDiagnostics(),
+          lifecycle: lifecycleStats(),
+          diagnostics: diagnosticStats(),
+        },
+        notes: [
+          "The bundle intentionally records environment key names, not environment values.",
+          "If CODEX_SUBAGENTS_LOG_FILE is configured, diagnostics.json includes a bounded tail of that log file.",
+        ],
+      });
+      await progress.flush();
+      return jsonResult({
+        ok: true,
+        ...bundle,
+        recentDiagnostics: recentDiagnosticEvents(20),
+      });
+    }),
+);
+
+server.registerTool(
   "codex_status",
   {
     title: "Codex status",
@@ -1998,6 +2120,7 @@ server.registerTool(
             default: process.env.CODEX_SUBAGENTS_SESSION_PROTOCOL === "exec" ? "exec" : "app-server",
             requiredMethods: ["initialize", "thread/start", "turn/start"],
             liveSteeringMethods: ["turn/steer", "turn/interrupt"],
+            recoveryMethods: ["thread/resume", "thread/read"],
             passiveMethods: ["thread/read"],
             fallbackToExec:
               process.env.CODEX_SUBAGENTS_DISABLE_EXEC_FALLBACK === "1" ? "disabled" : "enabled",
@@ -2014,6 +2137,11 @@ server.registerTool(
           queue: jobManager.stats(),
           sessions: sessionManager.stats(),
           logging: loggingDiagnostics(),
+          artifacts: outputArtifactDiagnostics(),
+          diagnostics: {
+            ...diagnosticStats(),
+            recentFailures: recentDiagnosticEvents(20),
+          },
           lifecycle: lifecycleStats(),
         });
       } catch (error) {
@@ -2085,6 +2213,8 @@ server.registerTool(
       checks.push({ name: "queue", ok: true, detail: jobManager.stats() });
       checks.push({ name: "sessions", ok: true, detail: sessionManager.stats() });
       checks.push({ name: "logging", ok: true, detail: loggingDiagnostics() });
+      checks.push({ name: "artifacts", ok: true, detail: outputArtifactDiagnostics() });
+      checks.push({ name: "diagnostics", ok: true, detail: diagnosticStats() });
       checks.push({ name: "lifecycle", ok: true, detail: lifecycleStats() });
 
       return jsonResult({

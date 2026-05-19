@@ -216,6 +216,51 @@ if (args[0] === "app-server") {
       send({ method: "thread/started", params: { thread: { id: threadId, cwd: params?.cwd ?? process.cwd(), turns: [] } } });
       return;
     }
+    if (method === "thread/resume") {
+      if (hasMode("THREAD_RESUME_ERROR")) {
+        send({ id, error: { code: -32000, message: "fake thread resume error" } });
+        return;
+      }
+      threadId = params?.threadId ?? threadId;
+      recordCall({ protocol: "app-server", method, threadId, cwd: params?.cwd ?? process.cwd() });
+      send({
+        id,
+        result: {
+          thread: {
+            id: threadId,
+            sessionId: threadId,
+            forkedFromId: null,
+            preview: "",
+            ephemeral: false,
+            modelProvider: "fake",
+            createdAt: Math.floor(Date.now() / 1000),
+            updatedAt: Math.floor(Date.now() / 1000),
+            status: { type: "idle" },
+            path: null,
+            cwd: params?.cwd ?? process.cwd(),
+            cliVersion: "fake",
+            source: "vscode",
+            threadSource: "subagent",
+            agentNickname: null,
+            agentRole: null,
+            gitInfo: null,
+            name: null,
+            turns: [],
+          },
+          model: params?.model ?? "fake-model",
+          modelProvider: "fake",
+          serviceTier: params?.serviceTier ?? null,
+          cwd: params?.cwd ?? process.cwd(),
+          instructionSources: [],
+          approvalPolicy: params?.approvalPolicy ?? "never",
+          approvalsReviewer: "client",
+          sandbox: { type: "readOnly", networkAccess: false },
+          reasoningEffort: params?.config?.model_reasoning_effort ?? "medium",
+        },
+      });
+      send({ method: "thread/started", params: { thread: { id: threadId, cwd: params?.cwd ?? process.cwd(), turns: [] } } });
+      return;
+    }
     if (method === "turn/start") {
       activeTurn = `fake-turn-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
       activePrompt = params?.input?.find?.((item) => item.type === "text")?.text ?? "";
@@ -289,6 +334,10 @@ if (args[0] === "app-server") {
         finishTurn();
         return;
       }
+      if (hasMode("APP_EXIT_DURING_TURN")) {
+        setTimeout(() => process.exit(2), 5);
+        return;
+      }
       const delayMatch = activePrompt.match(/DELAY_MS=(\d+)/);
       activeTimer = setTimeout(finishTurn, delayMatch ? Number(delayMatch[1]) : 10);
       return;
@@ -325,6 +374,7 @@ if (args[0] === "app-server") {
       return;
     }
     if (method === "thread/read") {
+      recordCall({ protocol: "app-server", method, threadId, includeTurns: Boolean(params?.includeTurns) });
       send({ id, result: { thread: { id: threadId, turns: [] } } });
       return;
     }
