@@ -39,6 +39,36 @@ describe("buildCodexExecArgs", () => {
     expect(args.at(-1)).toBe("-");
   });
 
+  it("can bypass Codex sandboxing and approvals for explicit full-access runs", () => {
+    const args = buildCodexExecArgs(
+      {
+        cwd: "/repo",
+        dangerouslyBypassApprovalsAndSandbox: true,
+      },
+      "/tmp/out.md",
+      {},
+    );
+
+    expect(args).toContain("--dangerously-bypass-approvals-and-sandbox");
+    expect(args).not.toContain("--sandbox");
+    expect(args).toContain('approval_policy="never"');
+  });
+
+  it("passes the bypass flag through resumed sessions", () => {
+    const args = buildCodexExecArgs(
+      {
+        cwd: "/repo",
+        resumeLast: true,
+        dangerouslyBypassApprovalsAndSandbox: true,
+      },
+      "/tmp/out.md",
+      {},
+    );
+
+    expect(args).toContain("resume");
+    expect(args).toContain("--dangerously-bypass-approvals-and-sandbox");
+  });
+
   it("applies explicit model and reasoning settings", () => {
     const args = buildCodexExecArgs(
       {
@@ -164,6 +194,7 @@ describe("runAgent", () => {
 
     expect(result.ok).toBe(true);
     expect(result.sandbox).toBe("read-only");
+    expect(result.dangerouslyBypassApprovalsAndSandbox).toBe(false);
     expect(result.cwd).toBe(projectDir);
     expect(result.codexBinary.source).toBe("explicit");
     expect(result.finalMessage).toContain("inspect the repository");
@@ -180,6 +211,32 @@ describe("runAgent", () => {
     expect(calls[0].cwd).toBe(projectDir);
     expect(calls[0].args).toContain("--sandbox");
     expect(calls[0].args[calls[0].args.indexOf("--sandbox") + 1]).toBe("read-only");
+  });
+
+  it("runs fake Codex with the no-sandbox bypass flag when explicitly requested", async () => {
+    const projectDir = await tempDir("codex-subagents-repo-");
+    const recordDir = await tempDir("codex-subagents-record-");
+
+    const result = await runAgent({
+      prompt: "needs DNS and git writes",
+      projectDir,
+      codexBin: fakeCodex,
+      dangerouslyBypassApprovalsAndSandbox: true,
+      env: {
+        FAKE_CODEX_RECORD_DIR: recordDir,
+      },
+    });
+
+    expect(result.ok).toBe(true);
+    expect(result.dangerouslyBypassApprovalsAndSandbox).toBe(true);
+
+    const calls = (await readFile(path.join(recordDir, "calls.jsonl"), "utf8"))
+      .trim()
+      .split("\n")
+      .map((line) => JSON.parse(line));
+    expect(calls).toHaveLength(1);
+    expect(calls[0].args).toContain("--dangerously-bypass-approvals-and-sandbox");
+    expect(calls[0].args).not.toContain("--sandbox");
   });
 
   it("materializes custom Codex subagents in a temporary Codex home", async () => {
@@ -397,5 +454,33 @@ describe("runAgents", () => {
     expect(calls).toHaveLength(2);
     expect(calls.every((call) => call.cwd === projectDir)).toBe(true);
     expect(Math.max(...calls.map((call) => call.at)) - Math.min(...calls.map((call) => call.at))).toBeLessThan(150);
+  });
+
+  it("applies the no-sandbox bypass flag to parallel agents from shared options", async () => {
+    const projectDir = await tempDir("codex-subagents-repo-");
+    const recordDir = await tempDir("codex-subagents-record-");
+    const results = await runAgents({
+      agents: [
+        { name: "one", prompt: "agent one", projectDir },
+        { name: "two", prompt: "agent two", projectDir },
+      ],
+      maxParallel: 2,
+      codexBin: fakeCodex,
+      dangerouslyBypassApprovalsAndSandbox: true,
+      env: {
+        FAKE_CODEX_RECORD_DIR: recordDir,
+      },
+    });
+
+    expect(results.every((result) => result.ok)).toBe(true);
+    expect(results.every((result) => result.dangerouslyBypassApprovalsAndSandbox)).toBe(true);
+
+    const calls = (await readFile(path.join(recordDir, "calls.jsonl"), "utf8"))
+      .trim()
+      .split("\n")
+      .map((line) => JSON.parse(line));
+    expect(calls).toHaveLength(2);
+    expect(calls.every((call) => call.args.includes("--dangerously-bypass-approvals-and-sandbox"))).toBe(true);
+    expect(calls.every((call) => !call.args.includes("--sandbox"))).toBe(true);
   });
 });

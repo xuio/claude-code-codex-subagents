@@ -1,10 +1,10 @@
 ---
-description: Launch one or more OpenAI Codex agents from Claude Code for read-only exploration, review, planning, second opinions, Spark checks, or parallel codebase analysis. Use automatically when the user asks for Codex, OpenAI Codex, Codex Spark, Codex subagents, parallel Codex agents, a Codex second opinion, or for Claude Code to delegate work to Codex.
+description: Launch one or more OpenAI Codex agents from Claude Code for read-only-by-default exploration, review, planning, second opinions, Spark checks, parallel codebase analysis, or explicit full-access Codex work. Use automatically when the user asks for Codex, OpenAI Codex, Codex Spark, Codex subagents, parallel Codex agents, a Codex second opinion, or for Claude Code to delegate work to Codex.
 ---
 
 # Codex Subagents
 
-Use the `codex-subagents` MCP server when the task benefits from delegating read-only work to OpenAI Codex from inside Claude Code. If the user asks to "use Codex", "ask Codex", "launch Codex subagents", "use Spark", "get a Codex second opinion", or "run parallel Codex agents", call the MCP tools directly. Do not wait for the user to name the MCP tool.
+Use the `codex-subagents` MCP server when the task benefits from delegating work to OpenAI Codex from inside Claude Code. If the user asks to "use Codex", "ask Codex", "launch Codex subagents", "use Spark", "get a Codex second opinion", or "run parallel Codex agents", call the MCP tools directly. Do not wait for the user to name the MCP tool.
 
 Default behavior:
 
@@ -12,6 +12,7 @@ Default behavior:
 - Prefers the Codex desktop app binary at `/Applications/Codex.app/Contents/Resources/codex` when it exists.
 - Runs Codex in `read-only` sandbox mode unless the user explicitly requests a different sandbox.
 - Uses non-interactive approvals so write or privileged operations fail instead of prompting.
+- Supports explicit non-sandbox/full-access execution with `dangerously_bypass_approvals_and_sandbox: true`, which maps to Codex's `--dangerously-bypass-approvals-and-sandbox` flag and allows DNS/network plus unrestricted file and git writes.
 - Lets the caller set model, reasoning effort, project directory, timeout, and parallelism per agent.
 - Supports `model_preset: "spark"` for Codex Spark (`gpt-5.3-codex-spark`) without requiring Claude to remember the exact model string.
 - Supports nested Codex subagents by passing `codex_subagents`, `subagent_tasks`, and `subagent_runtime`; custom agents are sent as Codex `agents.<name>...` config overrides for the child run.
@@ -30,6 +31,8 @@ For slow, broad, or potentially flaky Codex work, prefer `start_agent_run` or `s
 For multi-turn Codex work, call `start_session` for the initial prompt and `send_session_prompt` for follow-ups. Session tools use Codex's recorded thread id and remain daemonless; the MCP server keeps only metadata and the last result.
 
 When Claude wants Codex to work in the same repository or folder as the active Claude Code session, pass that folder as `project_dir`. Use `cwd` only as a compatibility alias.
+
+When the user explicitly asks Codex to edit files, write to git, use DNS/network, install packages, or otherwise run with normal non-sandbox Codex capabilities, set `dangerously_bypass_approvals_and_sandbox: true`. Keep it off for routine review or exploration.
 
 Prefer `reasoning_effort: "medium"` for exploration and `high` or `xhigh` only when the task is complex enough to justify the extra latency and token usage. Do not use `minimal`; the plugin rejects it because Codex currently auto-attaches `web_search`, which the API does not allow with minimal reasoning.
 

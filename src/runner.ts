@@ -43,6 +43,7 @@ export interface AgentRunOptions {
   modelPreset?: ModelPreset;
   reasoningEffort?: ReasoningEffort;
   sandbox?: SandboxMode;
+  dangerouslyBypassApprovalsAndSandbox?: boolean;
   serviceTier?: ServiceTier;
   modelVerbosity?: ModelVerbosity;
   reasoningSummary?: ReasoningSummary;
@@ -107,6 +108,7 @@ export interface AgentRunResult {
   modelPreset?: ModelPreset;
   reasoningEffort: ReasoningEffort;
   sandbox: SandboxMode;
+  dangerouslyBypassApprovalsAndSandbox: boolean;
   serviceTier?: ServiceTier;
   exitCode: number | null;
   signal: NodeJS.Signals | null;
@@ -142,6 +144,7 @@ export interface ParallelRunOptions
         Pick<
           AgentRunOptions,
           | "sandbox"
+          | "dangerouslyBypassApprovalsAndSandbox"
           | "serviceTier"
           | "modelVerbosity"
           | "reasoningSummary"
@@ -279,6 +282,7 @@ export function buildCodexExecArgs(
 ): string[] {
   const { model, reasoningEffort, reasoningSummary } = validateRunConfiguration(options, env);
   const sandbox = options.sandbox ?? "read-only";
+  const bypassSandbox = options.dangerouslyBypassApprovalsAndSandbox ?? false;
   const ephemeral = options.ephemeral ?? true;
 
   const resume = Boolean(options.resumeSessionId || options.resumeLast);
@@ -299,8 +303,6 @@ export function buildCodexExecArgs(
         "--json",
         "--color",
         "never",
-        "--sandbox",
-        sandbox,
         "-c",
         `approval_policy=${tomlString("never")}`,
         "-c",
@@ -308,6 +310,12 @@ export function buildCodexExecArgs(
         "--output-last-message",
         outputPath,
       ];
+
+  if (bypassSandbox) {
+    args.push("--dangerously-bypass-approvals-and-sandbox");
+  } else if (!resume) {
+    args.push("--sandbox", sandbox);
+  }
 
   if (model) args.push("--model", model);
   if (!resume && options.profile) args.push("--profile", options.profile);
@@ -368,6 +376,9 @@ function validationFailureResult(options: {
     modelPreset: options.runOptions.modelPreset,
     reasoningEffort,
     sandbox: options.runOptions.sandbox ?? "read-only",
+    dangerouslyBypassApprovalsAndSandbox: Boolean(
+      options.runOptions.dangerouslyBypassApprovalsAndSandbox,
+    ),
     serviceTier: options.runOptions.serviceTier,
     exitCode: null,
     signal: null,
@@ -418,6 +429,9 @@ function baseFailureResult(options: {
     modelPreset: options.runOptions.modelPreset,
     reasoningEffort: options.runOptions.reasoningEffort ?? defaultReasoningEffort(options.env),
     sandbox: options.runOptions.sandbox ?? "read-only",
+    dangerouslyBypassApprovalsAndSandbox: Boolean(
+      options.runOptions.dangerouslyBypassApprovalsAndSandbox,
+    ),
     serviceTier: options.runOptions.serviceTier,
     exitCode: options.exitCode ?? null,
     signal: options.signal ?? null,
@@ -771,6 +785,9 @@ export async function runAgent(options: AgentRunOptions): Promise<AgentRunResult
       modelPreset: options.modelPreset,
       reasoningEffort: options.reasoningEffort ?? defaultReasoningEffort(childEnv),
       sandbox: options.sandbox ?? "read-only",
+      dangerouslyBypassApprovalsAndSandbox: Boolean(
+        options.dangerouslyBypassApprovalsAndSandbox,
+      ),
       serviceTier: options.serviceTier,
       exitCode,
       signal,

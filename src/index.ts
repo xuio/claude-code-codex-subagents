@@ -41,6 +41,7 @@ const usageGuide = [
   "",
   "Default operating rules:",
   "- Keep sandbox read-only unless the user explicitly asks for a different sandbox.",
+  "- If the user explicitly asks for non-sandbox/full local capabilities, set dangerously_bypass_approvals_and_sandbox true. This maps to Codex's --dangerously-bypass-approvals-and-sandbox flag and allows DNS/network plus unrestricted file and git writes.",
   "- Approvals are non-interactive; do not expect Codex to ask permission.",
   "- Prefer model_preset \"spark\" for responsive focused checks, small reviews, UI iteration, and sidecar analysis.",
   "- Use reasoning_effort \"medium\" by default, \"low\" for simple checks, and \"high\" or \"xhigh\" only for difficult analysis. Do not use \"minimal\"; Codex currently auto-attaches web_search and the API rejects that tool with minimal reasoning.",
@@ -162,6 +163,12 @@ const commonInputSchema = {
   sandbox: sandboxModeSchema
     .default("read-only")
     .describe("Codex sandbox mode. Keep read-only unless the user explicitly asks otherwise."),
+  dangerously_bypass_approvals_and_sandbox: z
+    .boolean()
+    .default(false)
+    .describe(
+      "Bypass all Codex sandboxing and approval prompts with Codex's --dangerously-bypass-approvals-and-sandbox flag. This gives Codex normal local capabilities such as DNS/network access and unrestricted file/git writes. Only set when the user explicitly asks for non-sandbox/full-access execution.",
+    ),
   service_tier: serviceTierSchema
     .optional()
     .describe(
@@ -383,6 +390,7 @@ function toRunOptions(args: {
   model_preset?: (typeof modelPresets)[number];
   reasoning_effort?: (typeof reasoningEfforts)[number];
   sandbox?: (typeof sandboxModes)[number];
+  dangerously_bypass_approvals_and_sandbox?: boolean;
   service_tier?: (typeof serviceTiers)[number];
   model_verbosity?: (typeof modelVerbosities)[number];
   reasoning_summary?: (typeof reasoningSummaries)[number];
@@ -420,6 +428,7 @@ function toRunOptions(args: {
     modelPreset: args.model_preset,
     reasoningEffort: args.reasoning_effort,
     sandbox: args.sandbox,
+    dangerouslyBypassApprovalsAndSandbox: args.dangerously_bypass_approvals_and_sandbox,
     serviceTier: args.service_tier,
     modelVerbosity: args.model_verbosity,
     reasoningSummary: args.reasoning_summary,
@@ -461,6 +470,7 @@ type ParallelAgentInput = {
   model_preset?: (typeof modelPresets)[number];
   reasoning_effort?: (typeof reasoningEfforts)[number];
   sandbox?: (typeof sandboxModes)[number];
+  dangerously_bypass_approvals_and_sandbox?: boolean;
   service_tier?: (typeof serviceTiers)[number];
   model_verbosity?: (typeof modelVerbosities)[number];
   reasoning_summary?: (typeof reasoningSummaries)[number];
@@ -512,6 +522,9 @@ function toParallelRunOptions(args: ParallelToolInput) {
       modelPreset: agent.model_preset ?? args.model_preset,
       reasoningEffort: agent.reasoning_effort ?? args.reasoning_effort,
       sandbox: agent.sandbox ?? args.sandbox,
+      dangerouslyBypassApprovalsAndSandbox:
+        agent.dangerously_bypass_approvals_and_sandbox ??
+        args.dangerously_bypass_approvals_and_sandbox,
       serviceTier: agent.service_tier ?? args.service_tier,
       modelVerbosity: agent.model_verbosity ?? args.model_verbosity,
       reasoningSummary: agent.reasoning_summary ?? args.reasoning_summary,
@@ -607,7 +620,7 @@ server.registerTool(
   {
     title: "Run one Codex agent",
     description:
-      "Launch one OpenAI Codex agent via codex exec. Use automatically when the user asks Claude to use Codex, ask Codex, get a Codex second opinion, run a Codex subagent, use Codex Spark, or delegate one read-only analysis task. Defaults to the Codex desktop app binary when installed, read-only sandbox, Codex's normal service tier, and non-interactive approvals.",
+      "Launch one OpenAI Codex agent via codex exec. Use automatically when the user asks Claude to use Codex, ask Codex, get a Codex second opinion, run a Codex subagent, use Codex Spark, or delegate one read-only analysis task. Defaults to the Codex desktop app binary when installed, read-only sandbox, Codex's normal service tier, and non-interactive approvals. For explicit non-sandbox/full-access requests, set dangerously_bypass_approvals_and_sandbox true.",
     inputSchema: {
       prompt: z
         .string()
@@ -685,6 +698,8 @@ const parallelAgentSchema = z.object({
   model_preset: commonInputSchema.model_preset,
   reasoning_effort: commonInputSchema.reasoning_effort,
   sandbox: commonInputSchema.sandbox.optional(),
+  dangerously_bypass_approvals_and_sandbox:
+    commonInputSchema.dangerously_bypass_approvals_and_sandbox.optional(),
   service_tier: commonInputSchema.service_tier.optional(),
   model_verbosity: commonInputSchema.model_verbosity,
   reasoning_summary: commonInputSchema.reasoning_summary,
@@ -717,7 +732,7 @@ server.registerTool(
   {
     title: "Run parallel Codex agents",
     description:
-      "Launch multiple independent OpenAI Codex agents concurrently and return one structured result per agent. Use automatically when the user asks for parallel Codex agents, multiple Codex subagents, broad review by independent agents, or several concurrent Codex workstreams. Split work by clear ownership, pass project_dir, keep defaults read-only, and use max_parallel to bound concurrency.",
+      "Launch multiple independent OpenAI Codex agents concurrently and return one structured result per agent. Use automatically when the user asks for parallel Codex agents, multiple Codex subagents, broad review by independent agents, or several concurrent Codex workstreams. Split work by clear ownership, pass project_dir, keep defaults read-only, and use max_parallel to bound concurrency. For explicit non-sandbox/full-access requests, set dangerously_bypass_approvals_and_sandbox true.",
     inputSchema: {
       agents: z
         .array(parallelAgentSchema)
@@ -1074,6 +1089,7 @@ server.registerTool(
         defaultModel: defaultModel(),
         defaultReasoningEffort: defaultReasoningEffort(),
         defaultSandbox: "read-only",
+        fullAccessFlag: "dangerously_bypass_approvals_and_sandbox",
         defaultServiceTier: "codex-default",
         modelPresets: {
           codex: "gpt-5.3-codex",
@@ -1146,6 +1162,7 @@ server.registerTool(
       ok: defaultReasoningEffort() !== "minimal",
       detail: {
         sandbox: "read-only",
+        dangerouslyBypassApprovalsAndSandbox: false,
         approvalPolicy: "never",
         defaultModel: defaultModel(),
         defaultReasoningEffort: defaultReasoningEffort(),
@@ -1160,6 +1177,8 @@ server.registerTool(
       supported: {
         modelPresets,
         reasoningEfforts,
+        sandboxModes,
+        fullAccessFlag: "dangerously_bypass_approvals_and_sandbox",
         outputContracts,
         mcpConfigPolicies,
       },
@@ -1171,7 +1190,7 @@ server.registerPrompt(
   "codex_agent",
   {
     title: "Delegate to one Codex agent",
-    description: "Prompt Claude to launch one read-only Codex agent through this MCP server.",
+    description: "Prompt Claude to launch one Codex agent through this MCP server; read-only by default.",
     argsSchema: {
       prompt: z.string().describe("Task for the Codex agent."),
       model: z.string().optional().describe("Optional Codex model."),
@@ -1187,7 +1206,8 @@ server.registerPrompt(
           type: "text",
           text: [
             "Use the codex-subagents MCP tool `run_agent` for this task.",
-            "Keep the sandbox read-only unless I explicitly say otherwise.",
+            "Keep the sandbox read-only unless I explicitly ask for another sandbox or full non-sandbox access.",
+            "For full non-sandbox access, set dangerously_bypass_approvals_and_sandbox true.",
             model ? `Use model ${model}.` : "Use the configured Codex model default.",
             model_preset ? `Use model_preset ${model_preset}.` : "",
             reasoning_effort
@@ -1207,7 +1227,7 @@ server.registerPrompt(
   {
     title: "Delegate to parallel Codex agents",
     description:
-      "Prompt Claude to split independent work across multiple read-only Codex agents through this MCP server.",
+      "Prompt Claude to split independent work across multiple Codex agents through this MCP server; read-only by default.",
     argsSchema: {
       prompt: z.string().describe("Parallel delegation request."),
       max_parallel: z.string().optional().describe("Optional max parallelism."),
@@ -1222,7 +1242,8 @@ server.registerPrompt(
           type: "text",
           text: [
             "Use the codex-subagents MCP tool `run_agents` for this task.",
-            "Create one agent object per independent workstream and run them read-only.",
+            "Create one agent object per independent workstream and run them read-only unless I explicitly ask for full non-sandbox access.",
+            "For full non-sandbox access, set dangerously_bypass_approvals_and_sandbox true.",
             max_parallel ? `Use max_parallel ${max_parallel}.` : "Use max_parallel 4 unless fewer agents are needed.",
             model_preset ? `Use model_preset ${model_preset} unless an agent needs a different model.` : "",
             "Ask each Codex agent for concise findings with file paths and line references when relevant.",

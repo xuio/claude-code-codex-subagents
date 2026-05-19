@@ -132,6 +132,18 @@ try {
   });
   assert(explicitMcp.structuredContent?.agent?.ok, "explicit MCP config run should succeed", explicitMcp.structuredContent);
 
+  const fullAccess = await callTool("run_agent", {
+    prompt: "full access path",
+    project_dir: projectDir,
+    dangerously_bypass_approvals_and_sandbox: true,
+  });
+  assert(fullAccess.structuredContent?.agent?.ok, "full-access run should succeed", fullAccess.structuredContent);
+  assert(
+    fullAccess.structuredContent?.agent?.dangerouslyBypassApprovalsAndSandbox === true,
+    "full-access result should report the bypass flag",
+    fullAccess.structuredContent,
+  );
+
   const calls = (await readFile(path.join(recordDir, "calls.jsonl"), "utf8"))
     .trim()
     .split("\n")
@@ -145,6 +157,16 @@ try {
   assert(
     calls.some((call) => call.prompt.includes("JSON_FINAL=review_findings") && call.args.includes("--output-schema")),
     "structured output contracts should pass --output-schema to Codex",
+    calls,
+  );
+  assert(
+    calls.some(
+      (call) =>
+        call.prompt.includes("full access path") &&
+        call.args.includes("--dangerously-bypass-approvals-and-sandbox") &&
+        !call.args.includes("--sandbox"),
+    ),
+    "full-access MCP calls should pass the Codex bypass flag without --sandbox",
     calls,
   );
   assert(

@@ -4,13 +4,14 @@
 
 Claude Code plugin that exposes OpenAI Codex agents through a daemonless stdio MCP server.
 
-The plugin lets Claude Code launch one Codex agent or several Codex agents in parallel. It is designed for read-only delegation by default: codebase exploration, review, planning, risk checks, documentation mapping, and other sidecar work where Claude should collect independent Codex results without giving those agents write access.
+The plugin lets Claude Code launch one Codex agent or several Codex agents in parallel. It is designed for read-only delegation by default: codebase exploration, review, planning, risk checks, documentation mapping, and other sidecar work where Claude should collect independent Codex results without giving those agents write access. When explicitly requested, Claude can also launch Codex with the same full local capabilities as normal non-sandbox Codex.
 
 ## Defaults
 
 - Codex binary: prefers `/Applications/Codex.app/Contents/Resources/codex` when the Codex desktop app is installed, then falls back to configured overrides and `codex` on `PATH`.
 - Sandbox: `read-only`.
 - Approvals: non-interactive `approval_policy="never"`.
+- Full local access: opt in per call with `dangerously_bypass_approvals_and_sandbox: true`, which maps to Codex's `--dangerously-bypass-approvals-and-sandbox` flag and allows DNS/network access plus unrestricted file and git writes.
 - Service tier: omitted by default so Codex uses its normal account/default service tier. Pass `service_tier` only when you explicitly want one.
 - Transport: stdio MCP, launched by Claude Code for the active session. No daemon is required.
 - Prompt delivery: stdin, not command-line arguments.
@@ -44,6 +45,18 @@ To let a Codex agent spawn its own Codex subagents, pass:
 - `subagent_runtime`: runtime limits such as `max_threads`, `max_depth`, and `job_max_runtime_seconds`.
 
 Custom subagents are passed to Codex as `agents.<name>...` config overrides and also materialized in a temporary Codex home for the duration of one run. The target project is not modified, and the default sandbox remains `read-only`.
+
+## Full Access Mode
+
+By default, all tools run Codex with `--sandbox read-only`. If the user explicitly asks Codex to edit files, use network/DNS, run git writes, install packages, or otherwise behave like an unrestricted local Codex run, pass:
+
+```json
+{
+  "dangerously_bypass_approvals_and_sandbox": true
+}
+```
+
+This uses Codex's `--dangerously-bypass-approvals-and-sandbox` flag. It bypasses all sandboxing and approval prompts for that Codex process, so keep it request-scoped and do not set it as a default.
 
 ## Structured Output And MCP Config
 
@@ -136,7 +149,7 @@ After startup, ask Claude to use Codex subagents, or invoke the plugin skill:
 
 `codex_doctor` runs installation and safety diagnostics without invoking a model.
 
-Each agent accepts model, reasoning effort, sandbox, project directory, timeout, isolated Codex home, and output-size controls. Pass `project_dir` when Claude Code wants Codex to inspect the same repository or subdirectory Claude is currently working in. If `project_dir` is omitted, the server uses `CLAUDE_PROJECT_DIR` when Claude Code provides it. Omit model to use Codex's configured default or the plugin's optional configured default model.
+Each agent accepts model, reasoning effort, sandbox, full-access bypass, project directory, timeout, isolated Codex home, and output-size controls. Pass `project_dir` when Claude Code wants Codex to inspect the same repository or subdirectory Claude is currently working in. If `project_dir` is omitted, the server uses `CLAUDE_PROJECT_DIR` when Claude Code provides it. Omit model to use Codex's configured default or the plugin's optional configured default model.
 
 Prefer `start_agent_run` or `start_agents_run` for work that may run longer than a normal MCP request. The async job API keeps Claude responsive, supports cancellation, and avoids request failures caused by long-running Codex subprocesses.
 
