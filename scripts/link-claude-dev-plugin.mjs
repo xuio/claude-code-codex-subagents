@@ -1,4 +1,4 @@
-import { lstat, mkdir, readFile, realpath, rename, rm, symlink, writeFile } from "node:fs/promises";
+import { lstat, mkdir, readFile, realpath, rename, symlink, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -90,9 +90,6 @@ async function ensureInstalledPluginsEntry() {
 const marketplaceLink = await replaceWithSymlink(marketplacePluginPath, root);
 const cacheLink = await replaceWithSymlink(installPath, root);
 const entry = await ensureInstalledPluginsEntry();
-
-// Remove stale Claude marker files that can be left behind when replacing cache copies.
-await rm(path.join(installPath, ".in_use"), { force: true });
 
 console.log(`Marketplace plugin path: ${marketplaceLink.path} -> ${root}`);
 console.log(`Installed plugin path: ${cacheLink.path} -> ${root}`);

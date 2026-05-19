@@ -15,6 +15,7 @@ const transport = new StdioClientTransport({
   env: {
     ...process.env,
     CODEX_SUBAGENTS_CODEX_BIN: fakeCodex,
+    CODEX_SUBAGENTS_PROGRESS_HEARTBEAT_MS: "50",
     CLAUDE_PROJECT_DIR: projectDir,
   },
   stderr: "pipe",
@@ -74,6 +75,22 @@ try {
     singleProgress,
   );
 
+  const heartbeatProgress = [];
+  const heartbeat = await callTool(
+    "run_agent",
+    {
+      prompt: "progress heartbeat DELAY_MS=180",
+      project_dir: projectDir,
+    },
+    heartbeatProgress,
+  );
+  assert(heartbeat.structuredContent?.agent?.ok, "run_agent heartbeat case should succeed", heartbeat.structuredContent);
+  assert(
+    heartbeatProgress.some((event) => event.message?.includes("Still running Codex run")),
+    "run_agent should emit heartbeat progress while a blocking run is still active",
+    heartbeatProgress,
+  );
+
   const parallelProgress = [];
   const parallel = await callTool(
     "run_agents",
@@ -125,6 +142,45 @@ try {
       waitProgress.some((event) => event.message?.includes("completed")),
     "wait_agent_run should emit wait and completion progress",
     waitProgress,
+  );
+
+  const sessionStartProgress = [];
+  const sessionStart = await callTool(
+    "start_session",
+    {
+      prompt: "progress session start DELAY_MS=180",
+      project_dir: projectDir,
+    },
+    sessionStartProgress,
+  );
+  const sessionId = sessionStart.structuredContent?.session?.id;
+  assert(sessionStart.structuredContent?.agent?.ok, "start_session should succeed", sessionStart.structuredContent);
+  assert(sessionId, "start_session should return a session id", sessionStart.structuredContent);
+  assert(
+    sessionStartProgress.some((event) => event.message?.includes("Still starting persistent Codex session")),
+    "start_session should emit heartbeat progress while the initial turn is active",
+    sessionStartProgress,
+  );
+
+  const sessionSendProgress = [];
+  const sessionSend = await callTool(
+    "send_session_prompt",
+    {
+      session_id: sessionId,
+      prompt: "progress session follow-up DELAY_MS=180",
+    },
+    sessionSendProgress,
+  );
+  assert(sessionSend.structuredContent?.agent?.ok, "send_session_prompt should succeed", sessionSend.structuredContent);
+  assert(
+    sessionSend.structuredContent?.agent?.cwd === projectDir,
+    "send_session_prompt should preserve the session project_dir when omitted",
+    sessionSend.structuredContent,
+  );
+  assert(
+    sessionSendProgress.some((event) => event.message?.includes("Still running Codex session")),
+    "send_session_prompt should emit heartbeat progress while the resumed turn is active",
+    sessionSendProgress,
   );
 
   console.log("MCP progress test passed");

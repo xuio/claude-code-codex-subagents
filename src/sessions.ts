@@ -25,6 +25,12 @@ interface CodexSessionRecord extends CodexSessionSnapshot {
   controller?: AbortController;
 }
 
+function withoutUndefined<T extends Record<string, unknown>>(value: T): Partial<T> {
+  return Object.fromEntries(
+    Object.entries(value).filter(([, child]) => child !== undefined),
+  ) as Partial<T>;
+}
+
 function snapshot(session: CodexSessionRecord): CodexSessionSnapshot {
   return {
     id: session.id,
@@ -114,7 +120,7 @@ export class CodexSessionManager {
     });
     const result = await this.runTurn(session, {
       ...session.baseOptions,
-      ...overrides,
+      ...withoutUndefined(overrides),
       prompt,
       resumeSessionId: session.codexThreadId,
       ephemeral: false,
@@ -175,6 +181,12 @@ export class CodexSessionManager {
       session.lastResult = result;
       session.codexThreadId = result.eventSummary.threadId ?? session.codexThreadId;
       session.projectDir = result.cwd;
+      session.cwd = result.cwd;
+      session.baseOptions = {
+        ...session.baseOptions,
+        projectDir: result.cwd,
+        cwd: undefined,
+      };
       session.status = result.ok ? "active" : result.status === "cancelled" ? "cancelled" : "failed";
       session.updatedAt = new Date().toISOString();
       logger.rawInfo("session.turn.finish", {

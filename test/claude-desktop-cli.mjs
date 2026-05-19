@@ -73,6 +73,20 @@ function run(command, args, options = {}) {
   return output;
 }
 
+function summarizeAuthStatus(output) {
+  try {
+    const parsed = JSON.parse(output);
+    return {
+      loggedIn: parsed.loggedIn,
+      authMethod: parsed.authMethod,
+      apiProvider: parsed.apiProvider,
+      subscriptionType: parsed.subscriptionType,
+    };
+  } catch {
+    return { raw: output.trim() ? "[non-json auth status output]" : "[empty auth status output]" };
+  }
+}
+
 const { version, binary } = await resolveClaudeCodeBinary();
 console.log(`Using Claude Code desktop CLI ${version}: ${binary}`);
 
@@ -90,6 +104,5 @@ if (!pluginListOutput.includes("codex-subagents@inline")) {
 }
 console.log("Embedded CLI session plugin load passed");
 
-console.log(
-  `Embedded CLI auth status: ${run(binary, ["auth", "status"], { allowedStatuses: [0, 1] }).trim()}`,
-);
+const authOutput = run(binary, ["auth", "status"], { allowedStatuses: [0, 1] });
+console.log(`Embedded CLI auth status: ${JSON.stringify(summarizeAuthStatus(authOutput), null, 2)}`);

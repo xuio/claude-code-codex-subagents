@@ -82,27 +82,50 @@ Codex should stay read-only and include the token AUTODISCOVERY_OK in its reply.
 
 After the Codex result comes back, return exactly one compact JSON object and no markdown. Shape: {"ok": boolean, "tokenSeen": boolean, "model": string, "cwd": string}. Set ok true when the Codex tool call completed successfully.`;
 
+  const systemPrompt =
+    "You are validating the codex-subagents plugin. You may use Skill only for codex-subagents guidance, then codex_usage_guide or run_agent. Do not use Bash, Read, shell commands, or filesystem inspection. The MCP server already resolves the Codex binary.";
+  const resultSchema = JSON.stringify({
+    type: "object",
+    additionalProperties: false,
+    properties: {
+      ok: { type: "boolean" },
+      tokenSeen: { type: "boolean" },
+      model: { type: "string" },
+      cwd: { type: "string" },
+    },
+    required: ["ok", "tokenSeen", "model", "cwd"],
+  });
+
   const { version, binary } = await resolveClaudeCodeBinary();
   console.log(`Using Claude Code for autodiscovery ${version}: ${binary}`);
 
   const result = spawnSync(
     binary,
     [
+      "--plugin-dir",
+      ".",
       "--permission-mode",
       "dontAsk",
+      "--setting-sources",
+      "local",
       "--allowedTools",
       [
         "mcp__plugin_codex-subagents_codex-subagents__codex_usage_guide",
         "mcp__plugin_codex-subagents_codex-subagents__codex_status",
         "mcp__plugin_codex-subagents_codex-subagents__run_agent",
         "mcp__plugin_codex-subagents_codex-subagents__run_agents",
+        "Skill",
       ].join(","),
+      "--append-system-prompt",
+      systemPrompt,
       "--model",
-      process.env.CLAUDE_ORCHESTRATION_MODEL ?? "claude-haiku-4-5-20251001",
+      process.env.CLAUDE_ORCHESTRATION_MODEL ?? "sonnet",
       "--effort",
       process.env.CLAUDE_ORCHESTRATION_EFFORT ?? "low",
       "--max-budget-usd",
       process.env.CLAUDE_ORCHESTRATION_MAX_BUDGET_USD ?? "0.50",
+      "--json-schema",
+      resultSchema,
       "--no-session-persistence",
       "--output-format",
       "json",

@@ -82,6 +82,9 @@ Perform exactly these checks:
 
 Return exactly one compact JSON object and no markdown. Shape: {"ok": boolean, "checks": {"status": boolean, "single": boolean, "parallel": boolean, "nested": boolean}, "details": {"statusVersion": string, "singleModel": string, "parallelCount": number, "nestedTempHome": boolean}}`;
 
+const systemPrompt =
+  "You are a deterministic Claude Code plugin validation harness. You may use Skill only to load codex-subagents guidance, then use only the explicitly named codex-subagents MCP tools. Do not use Bash, Read, files, shell commands, or any other non-MCP tool. Return only the requested JSON.";
+
 const { version, binary } = await resolveClaudeCodeBinary();
 console.log(`Using Claude Code for real Codex orchestration ${version}: ${binary}`);
 console.log(`Using real Codex binary: ${codexBin}`);
@@ -96,14 +99,20 @@ const result = spawnSync(
     ".",
     "--permission-mode",
     "dontAsk",
+    "--setting-sources",
+    "local",
+    "--disable-slash-commands",
     "--allowedTools",
     [
       "mcp__plugin_codex-subagents_codex-subagents__codex_status",
       "mcp__plugin_codex-subagents_codex-subagents__run_agent",
       "mcp__plugin_codex-subagents_codex-subagents__run_agents",
+      "Skill",
     ].join(","),
+    "--append-system-prompt",
+    systemPrompt,
     "--model",
-    process.env.CLAUDE_REAL_CODEX_MODEL ?? "claude-haiku-4-5-20251001",
+    process.env.CLAUDE_REAL_CODEX_MODEL ?? "sonnet",
     "--effort",
     process.env.CLAUDE_REAL_CODEX_EFFORT ?? "low",
     "--max-budget-usd",

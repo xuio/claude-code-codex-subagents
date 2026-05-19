@@ -33,6 +33,7 @@ Optional environment overrides:
 - `CODEX_SUBAGENTS_JOB_TTL_SECONDS`: completed async job retention window. Defaults to one hour.
 - `CODEX_SUBAGENTS_LOG_LEVEL`: `debug`, `info`, `warn`, `error`, or `silent`. Defaults to `debug`.
 - `CODEX_SUBAGENTS_LOG_MAX_STRING_CHARS`: maximum string payload retained per log field before truncation metadata is used. Defaults to `20000`.
+- `CODEX_SUBAGENTS_PROGRESS_HEARTBEAT_MS`: interval for progress heartbeats on blocking tool calls. Defaults to `10000`.
 
 ## Spark And Nested Subagents
 
@@ -130,7 +131,9 @@ npm run test:claude-desktop
 
 `test:claude-real-codex` is the full opt-in live path: Claude Code loads the plugin and calls real Codex through the desktop app binary, including one single agent, one parallel run, and one nested Spark subagent run. It spends both Claude and Codex tokens, so it is intentionally not part of the default suite.
 
-`test:claude-autodiscovery` is an opt-in live Claude Code test for automatic tool selection. It gives Claude a natural "ask Codex" request, uses the installed plugin and fake Codex binary, and verifies that Claude chooses the Codex MCP tool without being told the exact tool name.
+`test:claude-real-session` is an opt-in live Claude Code test for daemonless persistent sessions. It loads the symlinked installed plugin, starts a real Codex session, sends a follow-up without `project_dir`, and verifies the session stays pinned to the original project directory.
+
+`test:claude-autodiscovery` is an opt-in live Claude Code test for automatic tool selection. It gives Claude a natural "ask Codex" request, loads the local plugin with the fake Codex binary, and verifies that Claude chooses the Codex MCP tool without being told the exact tool name.
 
 Run Claude Code with the local plugin:
 
@@ -172,7 +175,7 @@ Prefer `start_agent_run` or `start_agents_run` for work that may run longer than
 
 Async job snapshots expose partial stdout/stderr and parsed event summaries through `get_agent_run` while work is still running.
 
-When a client supports MCP progress tokens, `run_agent`, `run_agents`, `start_agent_run`, `start_agents_run`, `get_agent_run`, `wait_agent_run`, and `cancel_agent_run` send progress notifications. SDK clients should pass an `onprogress` handler and enable timeout reset on progress for long waits.
+When a client supports MCP progress tokens, `run_agent`, `run_agents`, `run_agents_aggregate`, `start_session`, `send_session_prompt`, `start_agent_run`, `start_agents_run`, `get_agent_run`, `wait_agent_run`, and `cancel_agent_run` send progress notifications. SDK clients should pass an `onprogress` handler and enable timeout reset on progress for long waits.
 
 ## License
 

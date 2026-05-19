@@ -90,6 +90,8 @@ const result = spawnSync(
     ".",
     "--permission-mode",
     "dontAsk",
+    "--setting-sources",
+    "local",
     "--allowedTools",
     [
       "mcp__plugin_codex-subagents_codex-subagents__codex_status",

@@ -75,6 +75,17 @@ const prompt = `Validate that the installed codex-subagents plugin handles overs
 Call run_agent with prompt "CLAUDE_LARGE_OUTPUT BIG_FINAL_CHARS=80000 BIG_STDOUT_CHARS=80000 BIG_STDERR_CHARS=80000", project_dir, codex_bin, reasoning_effort "low", timeout_ms 60000.
 
 Verify the tool result says agent.ok true and agent.mcpResponse.compacted true. Return exactly one compact JSON object and no markdown. Shape: {"ok": boolean, "compacted": boolean}.`;
+const systemPrompt =
+  "You are validating the codex-subagents plugin. Use only run_agent from the codex-subagents MCP server. Do not use Bash, Read, shell commands, or filesystem inspection. Return only the requested JSON.";
+const resultSchema = JSON.stringify({
+  type: "object",
+  additionalProperties: false,
+  properties: {
+    ok: { type: "boolean" },
+    compacted: { type: "boolean" },
+  },
+  required: ["ok", "compacted"],
+});
 
 const { version, binary } = await resolveClaudeCodeBinary();
 console.log(`Using Claude Code for large-output validation ${version}: ${binary}`);
@@ -82,16 +93,24 @@ console.log(`Using Claude Code for large-output validation ${version}: ${binary}
 const result = spawnSync(
   binary,
   [
+    "--plugin-dir",
+    ".",
     "--permission-mode",
     "dontAsk",
+    "--setting-sources",
+    "local",
     "--allowedTools",
     "mcp__plugin_codex-subagents_codex-subagents__run_agent",
+    "--append-system-prompt",
+    systemPrompt,
     "--model",
-    process.env.CLAUDE_ORCHESTRATION_MODEL ?? "claude-haiku-4-5-20251001",
+    process.env.CLAUDE_ORCHESTRATION_MODEL ?? "sonnet",
     "--effort",
     process.env.CLAUDE_ORCHESTRATION_EFFORT ?? "low",
     "--max-budget-usd",
     process.env.CLAUDE_ORCHESTRATION_MAX_BUDGET_USD ?? "0.50",
+    "--json-schema",
+    resultSchema,
     "--no-session-persistence",
     "--output-format",
     "json",

@@ -34,6 +34,7 @@
     "test:claude-autodiscovery": "node test/claude-autodiscovery.mjs",
     "test:claude-large-output": "node test/claude-large-output.mjs",
     "test:claude-real-codex": "node test/claude-real-codex.mjs",
+    "test:claude-real-session": "node test/claude-real-session.mjs",
     "test:ci": "npm run build && npm test && npm run smoke:mcp && npm run test:reliability && npm run test:stress && npm run test:progress && npm run test:advanced && npm run test:dev-link",
     "test:comprehensive": "npm run build && npm test && npm run smoke:mcp && npm run test:reliability && npm run test:stress && npm run test:progress && npm run test:advanced && npm run test:codex-runtime && npm run validate:plugin && npm run test:claude-desktop",
     "test:claude-desktop": "node test/claude-desktop-cli.mjs"

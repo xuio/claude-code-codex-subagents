@@ -470,6 +470,28 @@ async function reportAgentResult(progress: ProgressReporter, result: { ok?: bool
   await progress.send(result.ok ? "Codex run completed" : `Codex run ${status}`);
 }
 
+function progressHeartbeatMs(): number {
+  const parsed = Number(process.env.CODEX_SUBAGENTS_PROGRESS_HEARTBEAT_MS);
+  if (!Number.isFinite(parsed) || parsed <= 0) return 10_000;
+  return Math.max(25, Math.min(Math.floor(parsed), 60_000));
+}
+
+async function withProgressHeartbeat<T>(
+  progress: ProgressReporter,
+  message: string,
+  operation: () => Promise<T>,
+): Promise<T> {
+  const interval = setInterval(() => {
+    void progress.send(message);
+  }, progressHeartbeatMs());
+  interval.unref();
+  try {
+    return await operation();
+  } finally {
+    clearInterval(interval);
+  }
+}
+
 function toRunOptions(args: {
   prompt: string;
   name?: string;
@@ -726,11 +748,13 @@ server.registerTool(
       const progress = createProgressReporter(extra);
       try {
         await progress.send("Queued Codex run");
-        const result = await runQueuedAgent(toRunOptions(args), {
-          onStart: (queuedMs) => {
-            void progress.send(`Started Codex run after ${queuedMs}ms queued`);
-          },
-        });
+        const result = await withProgressHeartbeat(progress, "Still running Codex run", () =>
+          runQueuedAgent(toRunOptions(args), {
+            onStart: (queuedMs) => {
+              void progress.send(`Started Codex run after ${queuedMs}ms queued`);
+            },
+          }),
+        );
         await reportAgentResult(progress, result);
         await progress.flush();
         return jsonResult({ agent: compactAgentResultForMcp(result) }, !result.ok);
@@ -854,22 +878,27 @@ server.registerTool(
         let completed = 0;
         let failed = 0;
         await progress.send(`Queued ${args.agents.length} Codex agents`, { total });
-        const results = await runQueuedAgents(toParallelRunOptions(args), {
-          onStart: (queuedMs, label) => {
-            void progress.send(`Started ${label ?? "Codex agent"} after ${queuedMs}ms queued`, { total });
-          },
-          onComplete: async (result) => {
-            completed += 1;
-            if (!result.ok) failed += 1;
-            const last = completed === args.agents.length;
-            const message = last
-              ? failed === 0
-                ? `Parallel Codex run completed (${completed}/${args.agents.length})`
-                : `Parallel Codex run finished with errors (${completed}/${args.agents.length})`
-              : `${result.ok ? "Completed" : "Finished"} ${result.name ?? "Codex agent"} (${completed}/${args.agents.length})`;
-            await progress.send(message, last ? { progress: total, total } : { total });
-          },
-        });
+        const results = await withProgressHeartbeat(
+          progress,
+          `Still running ${args.agents.length} Codex agents`,
+          () =>
+            runQueuedAgents(toParallelRunOptions(args), {
+              onStart: (queuedMs, label) => {
+                void progress.send(`Started ${label ?? "Codex agent"} after ${queuedMs}ms queued`, { total });
+              },
+              onComplete: async (result) => {
+                completed += 1;
+                if (!result.ok) failed += 1;
+                const last = completed === args.agents.length;
+                const message = last
+                  ? failed === 0
+                    ? `Parallel Codex run completed (${completed}/${args.agents.length})`
+                    : `Parallel Codex run finished with errors (${completed}/${args.agents.length})`
+                  : `${result.ok ? "Completed" : "Finished"} ${result.name ?? "Codex agent"} (${completed}/${args.agents.length})`;
+                await progress.send(message, last ? { progress: total, total } : { total });
+              },
+            }),
+        );
         const ok = results.every((result) => result.ok);
         await progress.flush();
         return jsonResult(
@@ -916,21 +945,26 @@ server.registerTool(
         const total = args.agents.length * 2 + 1;
         let completed = 0;
         await progress.send(`Queued ${args.agents.length} Codex agents for aggregation`, { total });
-        const results = await runQueuedAgents(toParallelRunOptions(args), {
-          onStart: (queuedMs, label) => {
-            void progress.send(`Started ${label ?? "Codex agent"} after ${queuedMs}ms queued`, { total });
-          },
-          onComplete: async () => {
-            completed += 1;
-            const last = completed === args.agents.length;
-            await progress.send(
-              last
-                ? `Aggregating ${completed}/${args.agents.length} Codex results`
-                : `Completed ${completed}/${args.agents.length} Codex agents`,
-              last ? { progress: total, total } : { total },
-            );
-          },
-        });
+        const results = await withProgressHeartbeat(
+          progress,
+          `Still running ${args.agents.length} Codex agents for aggregation`,
+          () =>
+            runQueuedAgents(toParallelRunOptions(args), {
+              onStart: (queuedMs, label) => {
+                void progress.send(`Started ${label ?? "Codex agent"} after ${queuedMs}ms queued`, { total });
+              },
+              onComplete: async () => {
+                completed += 1;
+                const last = completed === args.agents.length;
+                await progress.send(
+                  last
+                    ? `Aggregating ${completed}/${args.agents.length} Codex results`
+                    : `Completed ${completed}/${args.agents.length} Codex agents`,
+                  last ? { progress: total, total } : { total },
+                );
+              },
+            }),
+        );
         const aggregation = aggregateAgentResults(results);
         await progress.flush();
         return jsonResult(
@@ -1090,12 +1124,17 @@ server.registerTool(
       const progress = createProgressReporter(extra);
       try {
         await progress.send("Starting persistent Codex session");
-        const { session, result } = await sessionManager.start(
-          {
-            ...toRunOptions(args),
-            ephemeral: false,
-          },
-          { sessionName: args.session_name },
+        const { session, result } = await withProgressHeartbeat(
+          progress,
+          "Still starting persistent Codex session",
+          () =>
+            sessionManager.start(
+              {
+                ...toRunOptions(args),
+                ephemeral: false,
+              },
+              { sessionName: args.session_name },
+            ),
         );
         await reportAgentResult(progress, result);
         await progress.flush();
@@ -1129,7 +1168,11 @@ server.registerTool(
       const progress = createProgressReporter(extra);
       try {
         await progress.send(`Resuming Codex session ${args.session_id}`);
-        const { session, result, error } = await sessionManager.send(args.session_id, args.prompt, toRunOptions(args));
+        const { session, result, error } = await withProgressHeartbeat(
+          progress,
+          `Still running Codex session ${args.session_id}`,
+          () => sessionManager.send(args.session_id, args.prompt, toRunOptions(args)),
+        );
         if (error || !session || !result) {
           await progress.flush();
           return jsonResult(
