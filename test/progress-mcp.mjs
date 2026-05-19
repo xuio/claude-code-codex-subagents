@@ -91,6 +91,22 @@ try {
     heartbeatProgress,
   );
 
+  const frontDoorProgress = [];
+  const frontDoor = await callTool(
+    "ask_codex",
+    {
+      task: "progress front door DELAY_MS=180",
+      project_dir: projectDir,
+    },
+    frontDoorProgress,
+  );
+  assert(frontDoor.structuredContent?.agent?.ok, "ask_codex should succeed", frontDoor.structuredContent);
+  assert(
+    frontDoorProgress.some((event) => event.message?.includes("Still running Codex run")),
+    "ask_codex should emit heartbeat progress while a blocking run is still active",
+    frontDoorProgress,
+  );
+
   const parallelProgress = [];
   const parallel = await callTool(
     "run_agents",
@@ -111,6 +127,26 @@ try {
       parallelProgress.some((event) => event.message?.includes("Parallel Codex run completed")),
     "run_agents should emit progress with total and completion",
     parallelProgress,
+  );
+
+  const frontDoorParallelProgress = [];
+  const frontDoorParallel = await callTool(
+    "ask_codex_parallel",
+    {
+      tasks: [
+        { name: "one", task: "progress front parallel one DELAY_MS=40", project_dir: projectDir },
+        { name: "two", task: "progress front parallel two DELAY_MS=40", project_dir: projectDir },
+      ],
+      max_parallel: 2,
+    },
+    frontDoorParallelProgress,
+  );
+  assert(frontDoorParallel.structuredContent?.ok, "ask_codex_parallel should succeed", frontDoorParallel.structuredContent);
+  assert(
+    frontDoorParallelProgress.some((event) => event.message?.includes("Queued 2 Codex agents")) &&
+      frontDoorParallelProgress.some((event) => event.message?.includes("Parallel Codex run completed")),
+    "ask_codex_parallel should emit progress with total and completion",
+    frontDoorParallelProgress,
   );
 
   const startProgress = [];
@@ -181,6 +217,45 @@ try {
     sessionSendProgress.some((event) => event.message?.includes("Still running Codex session")),
     "send_session_prompt should emit heartbeat progress while the resumed turn is active",
     sessionSendProgress,
+  );
+
+  const frontSessionStartProgress = [];
+  const frontSessionStart = await callTool(
+    "start_codex_session",
+    {
+      task: "progress front session start DELAY_MS=180",
+      project_dir: projectDir,
+    },
+    frontSessionStartProgress,
+  );
+  const frontSessionId = frontSessionStart.structuredContent?.session?.id;
+  assert(frontSessionStart.structuredContent?.agent?.ok, "start_codex_session should succeed", frontSessionStart.structuredContent);
+  assert(frontSessionId, "start_codex_session should return a session id", frontSessionStart.structuredContent);
+  assert(
+    frontSessionStartProgress.some((event) => event.message?.includes("Still starting persistent Codex session")),
+    "start_codex_session should emit heartbeat progress while the initial turn is active",
+    frontSessionStartProgress,
+  );
+
+  const frontSessionSendProgress = [];
+  const frontSessionSend = await callTool(
+    "continue_codex_session",
+    {
+      session_id: frontSessionId,
+      task: "progress front session follow-up DELAY_MS=180",
+    },
+    frontSessionSendProgress,
+  );
+  assert(frontSessionSend.structuredContent?.agent?.ok, "continue_codex_session should succeed", frontSessionSend.structuredContent);
+  assert(
+    frontSessionSend.structuredContent?.agent?.cwd === projectDir,
+    "continue_codex_session should preserve the session project_dir when omitted",
+    frontSessionSend.structuredContent,
+  );
+  assert(
+    frontSessionSendProgress.some((event) => event.message?.includes("Still running Codex session")),
+    "continue_codex_session should emit heartbeat progress while the resumed turn is active",
+    frontSessionSendProgress,
   );
 
   console.log("MCP progress test passed");

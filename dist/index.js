@@ -23105,11 +23105,13 @@ var usageGuide = [
   "Use this MCP server whenever the user asks Claude to use Codex, OpenAI Codex, Codex subagents, Codex Spark, a Codex second opinion, parallel Codex review, or independent Codex codebase analysis. You do not need the user to name an MCP tool.",
   "",
   "Tool choice:",
-  "- Use run_agent for one delegated Codex task.",
-  "- Use run_agents when the work can be split into independent concurrent tasks, for example separate reviewers for API flow, tests, security, performance, UI, docs, or migration risk.",
+  '- Prefer ask_codex for one delegated Codex task. This is the clearest front door for normal "ask Codex" or "Codex second opinion" requests.',
+  "- Prefer ask_codex_parallel when the work can be split into independent concurrent tasks, for example separate reviewers for API flow, tests, security, performance, UI, docs, or migration risk.",
+  "- Prefer start_codex_session and continue_codex_session when the user wants a Codex agent to keep context across multiple prompts.",
+  "- Use codex_choose_tool if you are unsure which Codex tool fits the request.",
+  "- Use run_agent, run_agents, run_agents_aggregate, start_session, and send_session_prompt for lower-level/manual control; they are compatibility tools behind the intuitive front doors.",
   "- Use run_agents_aggregate when Claude needs a concise consensus object from several independent Codex agents.",
   "- Use start_agent_run or start_agents_run for slow or broad Codex work; poll with get_agent_run, wait with wait_agent_run, and cancel with cancel_agent_run.",
-  "- Use start_session and send_session_prompt when the user wants a Codex agent to keep context across multiple prompts.",
   "- Use codex_doctor for installation, binary, auth, and default-setting diagnostics.",
   "- Use codex_status only for diagnostics or when you need to confirm the Codex binary/version.",
   "- Use codex_usage_guide if you are unsure how to structure a Codex delegation.",
@@ -23123,6 +23125,7 @@ var usageGuide = [
   '- Do not combine model_preset "spark" with reasoning_summary values other than "none"; Spark does not support reasoning.summary.',
   "- Do not set service_tier by default. Let Codex use its normal account/default service tier unless the user explicitly asks for a service tier.",
   "- Pass project_dir whenever Claude knows the active project directory so Codex works in the same tree as Claude Code.",
+  "- Do not use Bash, Read, or filesystem inspection to locate Codex. The MCP server resolves Codex automatically, preferring the Codex desktop app binary when installed.",
   "- Set isolated_codex_home true when a run should ignore the user's Codex MCP server config and use only this request's temporary Codex configuration.",
   '- Use mcp_config_policy "explicit" with codex_mcp_servers for intentional MCP sharing. Use "inherit_claude_project" only when the project has a Claude MCP config that should be shared with Codex.',
   "- Use output_contract for machine-readable results when Claude needs to merge or compare Codex outputs.",
@@ -23226,6 +23229,38 @@ var commonInputSchema = {
     "Specific built-in or custom Codex subagents the parent Codex agent should spawn and wait for."
   ),
   subagent_runtime: subagentRuntimeSchema.optional().describe("Runtime limits for nested Codex subagent orchestration. Keep max_depth at 1 by default.")
+};
+var frontDoorInputSchema = {
+  project_dir: commonInputSchema.project_dir,
+  model_preset: commonInputSchema.model_preset,
+  reasoning_effort: commonInputSchema.reasoning_effort,
+  sandbox: commonInputSchema.sandbox,
+  dangerously_bypass_approvals_and_sandbox: commonInputSchema.dangerously_bypass_approvals_and_sandbox,
+  codex_bin: commonInputSchema.codex_bin,
+  timeout_ms: commonInputSchema.timeout_ms,
+  max_output_chars: commonInputSchema.max_output_chars,
+  output_contract: commonInputSchema.output_contract,
+  output_schema: commonInputSchema.output_schema,
+  model: commonInputSchema.model,
+  service_tier: commonInputSchema.service_tier,
+  model_verbosity: commonInputSchema.model_verbosity,
+  reasoning_summary: commonInputSchema.reasoning_summary,
+  cwd: commonInputSchema.cwd,
+  profile: commonInputSchema.profile,
+  include_events: commonInputSchema.include_events,
+  ephemeral: commonInputSchema.ephemeral,
+  skip_git_repo_check: commonInputSchema.skip_git_repo_check,
+  ignore_rules: commonInputSchema.ignore_rules,
+  isolated_codex_home: commonInputSchema.isolated_codex_home,
+  mcp_config_policy: commonInputSchema.mcp_config_policy,
+  codex_mcp_servers: commonInputSchema.codex_mcp_servers,
+  forward_sensitive_env: commonInputSchema.forward_sensitive_env,
+  idle_timeout_ms: commonInputSchema.idle_timeout_ms,
+  spawn_timeout_ms: commonInputSchema.spawn_timeout_ms,
+  terminate_grace_ms: commonInputSchema.terminate_grace_ms,
+  codex_subagents: commonInputSchema.codex_subagents,
+  subagent_tasks: commonInputSchema.subagent_tasks,
+  subagent_runtime: commonInputSchema.subagent_runtime
 };
 function toCodexSubagents(agents) {
   return agents?.map((agent) => ({
@@ -23414,6 +23449,12 @@ function toRunOptions(args) {
     } : void 0
   };
 }
+function toFrontDoorRunOptions(args) {
+  return toRunOptions({
+    ...args,
+    prompt: args.task
+  });
+}
 function toParallelRunOptions(args) {
   return {
     ...toRunOptions({
@@ -23467,6 +23508,15 @@ function toParallelRunOptions(args) {
     defaultReasoningEffort: args.reasoning_effort
   };
 }
+function toFrontDoorParallelRunOptions(args) {
+  return toParallelRunOptions({
+    ...args,
+    agents: args.tasks.map((task) => ({
+      ...task,
+      prompt: task.task
+    }))
+  });
+}
 server.registerTool(
   "codex_usage_guide",
   {
@@ -23480,28 +23530,38 @@ server.registerTool(
     extra,
     async () => jsonResult({
       guide: usageGuide,
+      preferredTools: {
+        oneTask: "ask_codex",
+        parallelTasks: "ask_codex_parallel",
+        persistentSessionStart: "start_codex_session",
+        persistentSessionFollowUp: "continue_codex_session",
+        longRunningOneTask: "start_agent_run",
+        longRunningParallelTasks: "start_agents_run",
+        lowerLevelSingle: "run_agent",
+        lowerLevelParallel: "run_agents"
+      },
       examples: {
         single: {
-          tool: "run_agent",
+          tool: "ask_codex",
           arguments: {
-            prompt: "Inspect the authentication flow read-only. Return the top risks with file paths and line references.",
+            task: "Inspect the authentication flow read-only. Return the top risks with file paths and line references.",
             project_dir: "/path/to/project",
             model_preset: "spark",
             reasoning_effort: "medium"
           }
         },
         parallel: {
-          tool: "run_agents",
+          tool: "ask_codex_parallel",
           arguments: {
-            agents: [
+            tasks: [
               {
                 name: "api",
-                prompt: "Review API flow read-only. Return concrete findings with paths.",
+                task: "Review API flow read-only. Return concrete findings with paths.",
                 project_dir: "/path/to/project"
               },
               {
                 name: "tests",
-                prompt: "Review test coverage gaps read-only. Return concrete findings with paths.",
+                task: "Review test coverage gaps read-only. Return concrete findings with paths.",
                 project_dir: "/path/to/project"
               }
             ],
@@ -23513,6 +23573,89 @@ server.registerTool(
       }
     })
   )
+);
+server.registerTool(
+  "codex_choose_tool",
+  {
+    title: "Choose Codex tool",
+    description: "Return a short decision guide for which Codex MCP tool Claude should use. Call this when a user asks for Codex and Claude is unsure whether to run one agent, parallel agents, a persistent session, or an async job.",
+    inputSchema: {
+      request: external_exports.string().trim().optional().describe("Optional user request Claude is trying to map to a Codex tool."),
+      task_count: external_exports.number().int().min(1).max(24).optional().describe("Known number of independent Codex tasks."),
+      wants_parallel: external_exports.boolean().optional().describe("Whether the user asked for parallel or multiple Codex agents."),
+      wants_session: external_exports.boolean().optional().describe("Whether the user asked for Codex to keep context across prompts."),
+      continuing_session: external_exports.boolean().optional().describe("Whether Claude already has a Codex session id to continue."),
+      long_running: external_exports.boolean().optional().describe("Whether the work is likely to exceed a normal MCP request timeout."),
+      wants_aggregation: external_exports.boolean().optional().describe("Whether Claude needs a deterministic consensus object.")
+    }
+  },
+  async (args, extra) => loggedToolCall("codex_choose_tool", args, extra, async () => {
+    const taskCount = args.task_count ?? (args.wants_parallel ? 2 : 1);
+    let recommendedTool = "ask_codex";
+    if (args.continuing_session) recommendedTool = "continue_codex_session";
+    else if (args.wants_session) recommendedTool = "start_codex_session";
+    else if (args.wants_aggregation) recommendedTool = "run_agents_aggregate";
+    else if (args.long_running && taskCount > 1) recommendedTool = "start_agents_run";
+    else if (args.long_running) recommendedTool = "start_agent_run";
+    else if (args.wants_parallel || taskCount > 1) recommendedTool = "ask_codex_parallel";
+    return jsonResult({
+      recommendedTool,
+      request: args.request,
+      rules: [
+        "Use ask_codex for one normal Codex task.",
+        "Use ask_codex_parallel for multiple independent Codex tasks.",
+        "Use start_codex_session for a new multi-turn Codex worker and continue_codex_session for follow-ups.",
+        "Use start_agent_run/start_agents_run for slow jobs that should not hold a blocking MCP request open.",
+        "Use run_agents_aggregate only when Claude needs a deterministic consensus object.",
+        "Pass project_dir whenever Claude knows the active project directory.",
+        "Do not use Bash or Read to locate Codex; this MCP server resolves the binary."
+      ],
+      aliases: {
+        ask_codex: ["run_agent"],
+        ask_codex_parallel: ["run_agents"],
+        start_codex_session: ["start_session"],
+        continue_codex_session: ["send_session_prompt"]
+      }
+    });
+  })
+);
+server.registerTool(
+  "ask_codex",
+  {
+    title: "Ask Codex",
+    description: "Preferred front door for asking one OpenAI Codex agent to do a task. Use this automatically for natural requests like ask Codex, use Codex, Codex Spark, Codex second opinion, or one Codex subagent. Defaults to read-only sandbox and the Codex desktop app binary when installed. Pass project_dir so Codex works in Claude's current project. For explicit non-sandbox/full-access requests, set dangerously_bypass_approvals_and_sandbox true.",
+    inputSchema: {
+      task: external_exports.string().min(1).describe(
+        "Self-contained task for Codex. Include scope, read-only expectation, output shape, and file/line reference requirements when reviewing code."
+      ),
+      name: external_exports.string().trim().min(1).optional().describe("Optional label for this Codex run."),
+      ...frontDoorInputSchema
+    }
+  },
+  async (args, extra) => {
+    return loggedToolCall("ask_codex", args, extra, async () => {
+      const progress = createProgressReporter(extra);
+      try {
+        await progress.send("Queued Codex run");
+        const result = await withProgressHeartbeat(
+          progress,
+          "Still running Codex run",
+          () => runQueuedAgent(toFrontDoorRunOptions(args), {
+            onStart: (queuedMs) => {
+              void progress.send(`Started Codex run after ${queuedMs}ms queued`);
+            }
+          })
+        );
+        await reportAgentResult(progress, result);
+        await progress.flush();
+        return jsonResult({ agent: compactAgentResultForMcp(result) }, !result.ok);
+      } catch (error2) {
+        await progress.flush();
+        logger.error("ask_codex.failed", { error: errorForLog(error2) });
+        return jsonResult({ error: error2 instanceof Error ? error2.message : String(error2) }, true);
+      }
+    });
+  }
 );
 server.registerTool(
   "run_agent",
@@ -23621,6 +23764,90 @@ var parallelAgentSchema = external_exports.object({
   subagent_tasks: commonInputSchema.subagent_tasks,
   subagent_runtime: commonInputSchema.subagent_runtime
 });
+var frontDoorParallelTaskSchema = external_exports.object({
+  task: external_exports.string().min(1).describe(
+    "Concrete independent Codex task. Keep overlap low across parallel tasks and state the expected output shape."
+  ),
+  name: external_exports.string().trim().min(1).optional().describe("Optional label for this Codex task."),
+  project_dir: commonInputSchema.project_dir,
+  model_preset: commonInputSchema.model_preset,
+  reasoning_effort: commonInputSchema.reasoning_effort,
+  sandbox: commonInputSchema.sandbox.optional(),
+  dangerously_bypass_approvals_and_sandbox: commonInputSchema.dangerously_bypass_approvals_and_sandbox.optional(),
+  codex_bin: commonInputSchema.codex_bin,
+  timeout_ms: commonInputSchema.timeout_ms.optional(),
+  max_output_chars: commonInputSchema.max_output_chars.optional(),
+  output_contract: commonInputSchema.output_contract.optional(),
+  output_schema: commonInputSchema.output_schema,
+  model: commonInputSchema.model,
+  service_tier: commonInputSchema.service_tier.optional(),
+  model_verbosity: commonInputSchema.model_verbosity,
+  reasoning_summary: commonInputSchema.reasoning_summary,
+  cwd: commonInputSchema.cwd,
+  profile: commonInputSchema.profile,
+  include_events: commonInputSchema.include_events.optional(),
+  ephemeral: commonInputSchema.ephemeral.optional(),
+  skip_git_repo_check: commonInputSchema.skip_git_repo_check.optional(),
+  ignore_rules: commonInputSchema.ignore_rules.optional(),
+  isolated_codex_home: commonInputSchema.isolated_codex_home.optional(),
+  mcp_config_policy: commonInputSchema.mcp_config_policy.optional(),
+  codex_mcp_servers: commonInputSchema.codex_mcp_servers,
+  forward_sensitive_env: commonInputSchema.forward_sensitive_env.optional(),
+  idle_timeout_ms: commonInputSchema.idle_timeout_ms,
+  spawn_timeout_ms: commonInputSchema.spawn_timeout_ms.optional(),
+  terminate_grace_ms: commonInputSchema.terminate_grace_ms.optional(),
+  codex_subagents: commonInputSchema.codex_subagents,
+  subagent_tasks: commonInputSchema.subagent_tasks,
+  subagent_runtime: commonInputSchema.subagent_runtime
+});
+server.registerTool(
+  "ask_codex_parallel",
+  {
+    title: "Ask parallel Codex agents",
+    description: "Preferred front door for launching multiple independent Codex agents concurrently. Use this automatically for natural requests like run several Codex agents, ask Codex in parallel, use multiple Codex subagents, or split review work across independent Codex workstreams. Defaults are read-only and bounded. Pass project_dir so every Codex agent works in Claude's current project.",
+    inputSchema: {
+      tasks: external_exports.array(frontDoorParallelTaskSchema).min(1).max(12).describe(
+        "Independent Codex tasks. Use names like api, tests, security, docs, performance, or ui when helpful."
+      ),
+      max_parallel: external_exports.number().int().min(1).max(8).default(4).describe("Maximum concurrent Codex processes. Use 2-4 for most responsive parallel reviews."),
+      ...frontDoorInputSchema
+    }
+  },
+  async (args, extra) => {
+    return loggedToolCall("ask_codex_parallel", args, extra, async () => {
+      const progress = createProgressReporter(extra);
+      try {
+        const total = args.tasks.length * 2 + 1;
+        let completed = 0;
+        let failed = 0;
+        await progress.send(`Queued ${args.tasks.length} Codex agents`, { total });
+        const results = await withProgressHeartbeat(
+          progress,
+          `Still running ${args.tasks.length} Codex agents`,
+          () => runQueuedAgents(toFrontDoorParallelRunOptions(args), {
+            onStart: (queuedMs, label) => {
+              void progress.send(`Started ${label ?? "Codex agent"} after ${queuedMs}ms queued`, { total });
+            },
+            onComplete: async (result) => {
+              completed += 1;
+              if (!result.ok) failed += 1;
+              const last = completed === args.tasks.length;
+              const message = last ? failed === 0 ? `Parallel Codex run completed (${completed}/${args.tasks.length})` : `Parallel Codex run finished with errors (${completed}/${args.tasks.length})` : `${result.ok ? "Completed" : "Finished"} ${result.name ?? "Codex agent"} (${completed}/${args.tasks.length})`;
+              await progress.send(message, last ? { progress: total, total } : { total });
+            }
+          })
+        );
+        const ok = results.every((result) => result.ok);
+        await progress.flush();
+        return jsonResult({ ok, agents: compactAgentResultsForMcp(results) }, !ok);
+      } catch (error2) {
+        await progress.flush();
+        logger.error("ask_codex_parallel.failed", { error: errorForLog(error2) });
+        return jsonResult({ error: error2 instanceof Error ? error2.message : String(error2) }, true);
+      }
+    });
+  }
+);
 server.registerTool(
   "run_agents",
   {
@@ -23841,7 +24068,91 @@ server.registerTool(
     });
   }
 );
-var sessionIdSchema = external_exports.string().trim().min(1).describe("Session id returned by start_session.");
+var sessionIdSchema = external_exports.string().trim().min(1).describe("Session id returned by start_codex_session or start_session.");
+server.registerTool(
+  "start_codex_session",
+  {
+    title: "Start Codex session",
+    description: "Preferred front door for starting a multi-turn Codex worker that keeps context across later prompts. Use this when the user asks for a long-running Codex subagent, a Codex agent with memory, or to continue working with the same Codex context. Pass project_dir on the initial call so follow-ups remain pinned to the same project.",
+    inputSchema: {
+      task: external_exports.string().min(1).describe("Initial task for the persistent Codex session."),
+      session_name: external_exports.string().trim().min(1).optional().describe("Optional human label for this session."),
+      name: external_exports.string().trim().min(1).optional().describe("Optional label for the initial Codex run."),
+      ...frontDoorInputSchema
+    }
+  },
+  async (args, extra) => {
+    return loggedToolCall("start_codex_session", args, extra, async () => {
+      const progress = createProgressReporter(extra);
+      try {
+        await progress.send("Starting persistent Codex session");
+        const { session, result } = await withProgressHeartbeat(
+          progress,
+          "Still starting persistent Codex session",
+          () => sessionManager.start(
+            {
+              ...toFrontDoorRunOptions(args),
+              ephemeral: false
+            },
+            { sessionName: args.session_name }
+          )
+        );
+        await reportAgentResult(progress, result);
+        await progress.flush();
+        return jsonResult(
+          { session: compactSessionSnapshotForMcp(session), agent: compactAgentResultForMcp(result) },
+          !result.ok
+        );
+      } catch (error2) {
+        await progress.flush();
+        logger.error("start_codex_session.failed", { error: errorForLog(error2) });
+        return jsonResult({ error: error2 instanceof Error ? error2.message : String(error2) }, true);
+      }
+    });
+  }
+);
+server.registerTool(
+  "continue_codex_session",
+  {
+    title: "Continue Codex session",
+    description: "Preferred front door for sending a follow-up task to an existing Codex session. Use this after start_codex_session when the same Codex subagent should keep context. You normally do not need to pass project_dir again; the session preserves it.",
+    inputSchema: {
+      session_id: sessionIdSchema,
+      task: external_exports.string().min(1).describe("Follow-up task for the persistent Codex session."),
+      ...frontDoorInputSchema
+    }
+  },
+  async (args, extra) => {
+    return loggedToolCall("continue_codex_session", args, extra, async () => {
+      const progress = createProgressReporter(extra);
+      try {
+        await progress.send(`Resuming Codex session ${args.session_id}`);
+        const { session, result, error: error2 } = await withProgressHeartbeat(
+          progress,
+          `Still running Codex session ${args.session_id}`,
+          () => sessionManager.send(args.session_id, args.task, toFrontDoorRunOptions(args))
+        );
+        if (error2 || !session || !result) {
+          await progress.flush();
+          return jsonResult(
+            { error: error2, session: session ? compactSessionSnapshotForMcp(session) : session },
+            true
+          );
+        }
+        await reportAgentResult(progress, result);
+        await progress.flush();
+        return jsonResult(
+          { session: compactSessionSnapshotForMcp(session), agent: compactAgentResultForMcp(result) },
+          !result.ok
+        );
+      } catch (error2) {
+        await progress.flush();
+        logger.error("continue_codex_session.failed", { error: errorForLog(error2) });
+        return jsonResult({ error: error2 instanceof Error ? error2.message : String(error2) }, true);
+      }
+    });
+  }
+);
 server.registerTool(
   "start_session",
   {
@@ -24104,7 +24415,7 @@ server.registerPrompt(
           content: {
             type: "text",
             text: [
-              "Use the codex-subagents MCP tool `run_agent` for this task.",
+              "Use the codex-subagents MCP tool `ask_codex` for this task.",
               "Keep the sandbox read-only unless I explicitly ask for another sandbox or full non-sandbox access.",
               "For full non-sandbox access, set dangerously_bypass_approvals_and_sandbox true.",
               model ? `Use model ${model}.` : "Use the configured Codex model default.",
@@ -24144,8 +24455,8 @@ server.registerPrompt(
           content: {
             type: "text",
             text: [
-              "Use the codex-subagents MCP tool `run_agents` for this task.",
-              "Create one agent object per independent workstream and run them read-only unless I explicitly ask for full non-sandbox access.",
+              "Use the codex-subagents MCP tool `ask_codex_parallel` for this task.",
+              "Create one task object per independent workstream and run them read-only unless I explicitly ask for full non-sandbox access.",
               "For full non-sandbox access, set dangerously_bypass_approvals_and_sandbox true.",
               max_parallel ? `Use max_parallel ${max_parallel}.` : "Use max_parallel 4 unless fewer agents are needed.",
               model_preset ? `Use model_preset ${model_preset} unless an agent needs a different model.` : "",

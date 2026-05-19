@@ -84,10 +84,10 @@ function assert(condition, message, details) {
 const prompt = `Validate the installed codex-subagents plugin persistent-session path using the real Codex binary. Use only the codex-subagents MCP tools. Use this exact real Codex binary for every Codex tool call: ${codexBin}. Use this exact project_dir only on start_session: ${root}.
 
 Perform exactly these checks:
-1. Call start_session with prompt "Real persistent session validation. Stay read-only. Reply exactly REAL_SESSION_START_OK", project_dir "${root}", codex_bin "${codexBin}", model_preset "spark", reasoning_effort "low", timeout_ms 180000.
-2. Verify the start_session result has agent.ok true, agent.cwd equal to "${root}", session.projectDir equal to "${root}", a non-empty session.id, and finalMessage containing REAL_SESSION_START_OK.
-3. Call send_session_prompt for that session id with prompt "Follow-up persistent session validation. Stay read-only. Reply exactly REAL_SESSION_FOLLOW_OK", codex_bin "${codexBin}", model_preset "spark", reasoning_effort "low", timeout_ms 180000. Important: intentionally omit project_dir and cwd from this follow-up call.
-4. Verify the send_session_prompt result has agent.ok true, agent.cwd equal to "${root}", session.projectDir equal to "${root}", and finalMessage containing REAL_SESSION_FOLLOW_OK.
+1. Call start_codex_session with task "Real persistent session validation. Stay read-only. Reply exactly REAL_SESSION_START_OK", project_dir "${root}", codex_bin "${codexBin}", model_preset "spark", reasoning_effort "low", timeout_ms 180000.
+2. Verify the start_codex_session result has agent.ok true, agent.cwd equal to "${root}", session.projectDir equal to "${root}", a non-empty session.id, and finalMessage containing REAL_SESSION_START_OK.
+3. Call continue_codex_session for that session id with task "Follow-up persistent session validation. Stay read-only. Reply exactly REAL_SESSION_FOLLOW_OK", codex_bin "${codexBin}", model_preset "spark", reasoning_effort "low", timeout_ms 180000. Important: intentionally omit project_dir and cwd from this follow-up call.
+4. Verify the continue_codex_session result has agent.ok true, agent.cwd equal to "${root}", session.projectDir equal to "${root}", and finalMessage containing REAL_SESSION_FOLLOW_OK.
 5. Call get_session for the same session id and verify session.projectDir is still "${root}" and turns is at least 2.
 
 Return exactly one compact JSON object and no markdown. Shape: {"ok": boolean, "checks": {"start": boolean, "follow": boolean, "get": boolean}, "details": {"sessionId": string, "startCwd": string, "followCwd": string, "projectDir": string, "turns": number}}`;
@@ -117,6 +117,8 @@ const result = spawnSync(
     [
       "mcp__plugin_codex-subagents_codex-subagents__start_session",
       "mcp__plugin_codex-subagents_codex-subagents__send_session_prompt",
+      "mcp__plugin_codex-subagents_codex-subagents__start_codex_session",
+      "mcp__plugin_codex-subagents_codex-subagents__continue_codex_session",
       "mcp__plugin_codex-subagents_codex-subagents__get_session",
       "Skill",
     ].join(","),
@@ -157,10 +159,11 @@ assert(
   envelope.permission_denials,
 );
 
+assert(String(envelope.result ?? "").trim() !== "", "Claude real Codex session validation returned an empty result", envelope);
 const validation = extractJsonResult(envelope.result);
 assert(validation.ok === true, "Claude should report overall session success", validation);
-assert(validation.checks?.start === true, "Claude should validate start_session", validation);
-assert(validation.checks?.follow === true, "Claude should validate send_session_prompt", validation);
+assert(validation.checks?.start === true, "Claude should validate start_codex_session", validation);
+assert(validation.checks?.follow === true, "Claude should validate continue_codex_session", validation);
 assert(validation.checks?.get === true, "Claude should validate get_session", validation);
 assert(validation.details?.startCwd === root, "start_session should run in project root", validation);
 assert(validation.details?.followCwd === root, "send_session_prompt should preserve project root", validation);

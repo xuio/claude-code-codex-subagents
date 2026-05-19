@@ -84,6 +84,21 @@ try {
     defaultAgent.eventSummary,
   );
 
+  const frontDoorSingle = await callTool("ask_codex", {
+    task: "matrix-front-door-single RUN_COMMAND_EVENT",
+    project_dir: projectDir,
+    model_preset: "spark",
+  });
+  const frontDoorAgent = frontDoorSingle.structuredContent?.agent;
+  assert(frontDoorAgent?.ok, "ask_codex should succeed", frontDoorSingle);
+  assert(frontDoorAgent.cwd === projectDir, "ask_codex should pass project_dir", frontDoorAgent);
+  assert(frontDoorAgent.model === "gpt-5.3-codex-spark", "ask_codex should use Spark preset", frontDoorAgent);
+  assert(
+    frontDoorAgent.eventSummary?.commands?.[0]?.command === "rg example",
+    "ask_codex should share run_agent event parsing",
+    frontDoorAgent.eventSummary,
+  );
+
   const explicitProject = await callTool("run_agent", {
     prompt: "matrix-explicit-project",
     project_dir: projectDir,
@@ -193,6 +208,24 @@ try {
   assert(parallelDuration < 650, "parallel agents should complete substantially faster than sequential", {
     parallelDuration,
   });
+
+  const frontDoorParallel = await callTool("ask_codex_parallel", {
+    tasks: [
+      { name: "front-a", task: "matrix-front-parallel-a DELAY_MS=40", project_dir: projectDir },
+      { name: "front-b", task: "matrix-front-parallel-b DELAY_MS=40", project_dir: projectDir },
+    ],
+    max_parallel: 2,
+    model_preset: "spark",
+  });
+  assert(frontDoorParallel.structuredContent?.ok, "ask_codex_parallel should succeed", frontDoorParallel);
+  assert(
+    frontDoorParallel.structuredContent?.agents?.length === 2 &&
+      frontDoorParallel.structuredContent.agents.every(
+        (agent) => agent.cwd === projectDir && agent.model === "gpt-5.3-codex-spark",
+      ),
+    "ask_codex_parallel should pass shared project_dir and Spark preset",
+    frontDoorParallel.structuredContent,
+  );
 
   const mixed = await callTool("run_agents", {
     agents: [
@@ -337,6 +370,34 @@ try {
     .catch((error) => {
       if (error?.code !== "ENOENT") throw error;
     });
+
+  const choice = await callTool("codex_choose_tool", {
+    request: "run three independent Codex reviewers",
+    task_count: 3,
+    wants_parallel: true,
+  });
+  assert(
+    choice.structuredContent?.recommendedTool === "ask_codex_parallel",
+    "codex_choose_tool should recommend ask_codex_parallel for parallel work",
+    choice.structuredContent,
+  );
+
+  const frontSessionStart = await callTool("start_codex_session", {
+    task: "matrix-front-session first",
+    project_dir: projectDir,
+  });
+  const frontSessionId = frontSessionStart.structuredContent?.session?.id;
+  assert(frontSessionId, "start_codex_session should return a session id", frontSessionStart.structuredContent);
+  const frontSessionNext = await callTool("continue_codex_session", {
+    session_id: frontSessionId,
+    task: "matrix-front-session second",
+  });
+  assert(
+    frontSessionNext.structuredContent?.session?.turns === 2 &&
+      frontSessionNext.structuredContent?.agent?.cwd === projectDir,
+    "continue_codex_session should preserve the session project_dir",
+    frontSessionNext.structuredContent,
+  );
 
   const isolated = await callTool("run_agent", {
     prompt: "matrix-isolated-home",

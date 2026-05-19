@@ -133,7 +133,7 @@ npm run test:claude-desktop
 
 `test:claude-real-session` is an opt-in live Claude Code test for daemonless persistent sessions. It loads the symlinked installed plugin, starts a real Codex session, sends a follow-up without `project_dir`, and verifies the session stays pinned to the original project directory.
 
-`test:claude-autodiscovery` is an opt-in live Claude Code test for automatic tool selection. It gives Claude a natural "ask Codex" request, loads the local plugin with the fake Codex binary, and verifies that Claude chooses the Codex MCP tool without being told the exact tool name.
+`test:claude-autodiscovery` is an opt-in live Claude Code test for automatic tool selection. It gives Claude a natural "ask Codex" request, loads the local plugin with the fake Codex binary, and verifies that Claude chooses the intuitive Codex MCP front door without being told the exact low-level tool name.
 
 Run Claude Code with the local plugin:
 
@@ -151,7 +151,15 @@ After startup, ask Claude to use Codex subagents, or invoke the plugin skill:
 
 `codex_usage_guide` returns the operating guide and example calls Claude can use when deciding how to delegate to Codex.
 
-`run_agent` launches one Codex `exec` process and waits for it. It uses the same bounded queue as async jobs.
+`codex_choose_tool` returns a concise decision guide for picking between one agent, parallel agents, persistent sessions, aggregation, and async jobs.
+
+`ask_codex` is the preferred front door for one Codex task. It launches one Codex `exec` process and waits for it.
+
+`ask_codex_parallel` is the preferred front door for multiple independent Codex tasks. It launches bounded parallel Codex `exec` processes and returns one structured result per task.
+
+`start_codex_session` and `continue_codex_session` are the preferred front doors for daemonless persistent Codex sessions.
+
+`run_agent` launches one Codex `exec` process and waits for it. It uses the same bounded queue as async jobs and remains available for lower-level/manual control.
 
 `run_agents` launches multiple Codex `exec` processes concurrently with a bounded `max_parallel` setting and the global queue.
 
@@ -163,7 +171,7 @@ After startup, ask Claude to use Codex subagents, or invoke the plugin skill:
 
 `get_agent_run`, `wait_agent_run`, and `cancel_agent_run` inspect, wait for, or cancel async jobs.
 
-`start_session`, `send_session_prompt`, `get_session`, `list_sessions`, and `cancel_session` manage daemonless persistent Codex sessions using Codex's own resumable thread ids.
+`start_session`, `send_session_prompt`, `get_session`, `list_sessions`, and `cancel_session` manage daemonless persistent Codex sessions using Codex's own resumable thread ids. They are compatibility aliases behind `start_codex_session` and `continue_codex_session`.
 
 `codex_status` reports the resolved Codex binary, server working directory, Claude project directory, default model, default reasoning effort, feature sets, and version probe.
 
@@ -175,7 +183,7 @@ Prefer `start_agent_run` or `start_agents_run` for work that may run longer than
 
 Async job snapshots expose partial stdout/stderr and parsed event summaries through `get_agent_run` while work is still running.
 
-When a client supports MCP progress tokens, `run_agent`, `run_agents`, `run_agents_aggregate`, `start_session`, `send_session_prompt`, `start_agent_run`, `start_agents_run`, `get_agent_run`, `wait_agent_run`, and `cancel_agent_run` send progress notifications. SDK clients should pass an `onprogress` handler and enable timeout reset on progress for long waits.
+When a client supports MCP progress tokens, `ask_codex`, `ask_codex_parallel`, `start_codex_session`, `continue_codex_session`, `run_agent`, `run_agents`, `run_agents_aggregate`, `start_session`, `send_session_prompt`, `start_agent_run`, `start_agents_run`, `get_agent_run`, `wait_agent_run`, and `cancel_agent_run` send progress notifications. SDK clients should pass an `onprogress` handler and enable timeout reset on progress for long waits.
 
 ## License
 

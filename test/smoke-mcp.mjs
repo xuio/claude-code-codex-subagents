@@ -41,17 +41,49 @@ try {
     },
     CallToolResultSchema,
   );
-  if (!guide.structuredContent?.guide?.includes("Use run_agent for one delegated Codex task.")) {
+  if (!guide.structuredContent?.guide?.includes("Prefer ask_codex for one delegated Codex task.")) {
     throw new Error(`codex_usage_guide failed: ${JSON.stringify(guide.structuredContent)}`);
+  }
+  if (guide.structuredContent?.preferredTools?.oneTask !== "ask_codex") {
+    throw new Error(`codex_usage_guide did not advertise ask_codex: ${JSON.stringify(guide.structuredContent)}`);
+  }
+
+  const choice = await client.callTool(
+    {
+      name: "codex_choose_tool",
+      arguments: {
+        request: "ask Codex for a quick second opinion",
+      },
+    },
+    CallToolResultSchema,
+  );
+  if (choice.structuredContent?.recommendedTool !== "ask_codex") {
+    throw new Error(`codex_choose_tool chose the wrong single-agent tool: ${JSON.stringify(choice.structuredContent)}`);
+  }
+
+  const single = await client.callTool(
+    {
+      name: "ask_codex",
+      arguments: {
+        task: "single smoke RUN_COMMAND_EVENT",
+        project_dir: projectDir,
+        model_preset: "spark",
+      },
+    },
+    CallToolResultSchema,
+  );
+  const singleAgent = single.structuredContent?.agent;
+  if (!singleAgent?.ok || singleAgent.cwd !== projectDir || singleAgent.model !== "gpt-5.3-codex-spark") {
+    throw new Error(`ask_codex failed: ${JSON.stringify(single.structuredContent)}`);
   }
 
   const result = await client.callTool(
     {
-      name: "run_agents",
+      name: "ask_codex_parallel",
       arguments: {
-        agents: [
-          { name: "alpha", prompt: "alpha DELAY_MS=20", project_dir: projectDir },
-          { name: "beta", prompt: "beta DELAY_MS=20", project_dir: projectDir },
+        tasks: [
+          { name: "alpha", task: "alpha DELAY_MS=20", project_dir: projectDir },
+          { name: "beta", task: "beta DELAY_MS=20", project_dir: projectDir },
         ],
         max_parallel: 2,
       },
@@ -60,7 +92,7 @@ try {
   );
 
   if (!result.structuredContent?.ok) {
-    throw new Error(`run_agents failed: ${JSON.stringify(result.structuredContent)}`);
+    throw new Error(`ask_codex_parallel failed: ${JSON.stringify(result.structuredContent)}`);
   }
 
   const agents = result.structuredContent.agents;
@@ -103,6 +135,37 @@ try {
     nestedAgent.codexSubagents?.customAgents?.[0] !== "ui_spark"
   ) {
     throw new Error(`nested subagent smoke failed: ${JSON.stringify(nested.structuredContent)}`);
+  }
+
+  const sessionStart = await client.callTool(
+    {
+      name: "start_codex_session",
+      arguments: {
+        task: "session smoke first",
+        project_dir: projectDir,
+      },
+    },
+    CallToolResultSchema,
+  );
+  const sessionId = sessionStart.structuredContent?.session?.id;
+  if (!sessionId || sessionStart.structuredContent?.session?.projectDir !== projectDir) {
+    throw new Error(`start_codex_session failed: ${JSON.stringify(sessionStart.structuredContent)}`);
+  }
+  const sessionNext = await client.callTool(
+    {
+      name: "continue_codex_session",
+      arguments: {
+        session_id: sessionId,
+        task: "session smoke second",
+      },
+    },
+    CallToolResultSchema,
+  );
+  if (
+    sessionNext.structuredContent?.session?.turns !== 2 ||
+    sessionNext.structuredContent?.agent?.cwd !== projectDir
+  ) {
+    throw new Error(`continue_codex_session failed: ${JSON.stringify(sessionNext.structuredContent)}`);
   }
 
   const asyncStart = await client.callTool(

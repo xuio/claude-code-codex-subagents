@@ -83,7 +83,7 @@ Codex should stay read-only and include the token AUTODISCOVERY_OK in its reply.
 After the Codex result comes back, return exactly one compact JSON object and no markdown. Shape: {"ok": boolean, "tokenSeen": boolean, "model": string, "cwd": string}. Set ok true when the Codex tool call completed successfully.`;
 
   const systemPrompt =
-    "You are validating the codex-subagents plugin. You may use Skill only for codex-subagents guidance, then codex_usage_guide or run_agent. Do not use Bash, Read, shell commands, or filesystem inspection. The MCP server already resolves the Codex binary.";
+    "You are validating the codex-subagents plugin. You may use Skill only for codex-subagents guidance, then codex_choose_tool, codex_usage_guide, or ask_codex. Do not use Bash, Read, shell commands, or filesystem inspection. The MCP server already resolves the Codex binary.";
   const resultSchema = JSON.stringify({
     type: "object",
     additionalProperties: false,
@@ -111,9 +111,8 @@ After the Codex result comes back, return exactly one compact JSON object and no
       "--allowedTools",
       [
         "mcp__plugin_codex-subagents_codex-subagents__codex_usage_guide",
-        "mcp__plugin_codex-subagents_codex-subagents__codex_status",
-        "mcp__plugin_codex-subagents_codex-subagents__run_agent",
-        "mcp__plugin_codex-subagents_codex-subagents__run_agents",
+        "mcp__plugin_codex-subagents_codex-subagents__codex_choose_tool",
+        "mcp__plugin_codex-subagents_codex-subagents__ask_codex",
         "Skill",
       ].join(","),
       "--append-system-prompt",
@@ -159,6 +158,7 @@ After the Codex result comes back, return exactly one compact JSON object and no
     envelope.permission_denials,
   );
 
+  assert(String(envelope.result ?? "").trim() !== "", "Claude autodiscovery returned an empty result", envelope);
   const validation = extractJsonResult(envelope.result);
   assert(
     validation.model === "gpt-5.3-codex-spark",
