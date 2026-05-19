@@ -66,6 +66,7 @@ describe("logging", () => {
         api_key: "plain-api-key-canary",
         authorization: "plain-authorization-canary",
         nested: { cookie: "plain-cookie-canary" },
+        tokenUsage: { totalTokens: 15 },
       }),
     });
 
@@ -76,6 +77,7 @@ describe("logging", () => {
     expect(lines[0]).not.toContain("plain-api-key-canary");
     expect(lines[0]).not.toContain("plain-authorization-canary");
     expect(lines[0]).not.toContain("plain-cookie-canary");
+    expect(lines[0]).toContain("totalTokens");
     expect(JSON.parse(lines[0]!).event).toBe("mcp.tool.call");
   });
 
