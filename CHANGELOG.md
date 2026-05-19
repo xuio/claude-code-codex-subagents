@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+- Refreshed the README into a shorter onboarding page.
+- Added usage, architecture, development, and troubleshooting docs.
+- Added GitHub issue templates and a pull request template.
+
 ## 0.1.1
 
 - Compacted large MCP tool responses so successful long Codex runs do not surface as Claude Code tool-result overflow errors.

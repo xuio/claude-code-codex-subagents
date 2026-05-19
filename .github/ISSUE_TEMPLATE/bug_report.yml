@@ -1,0 +1,61 @@
+name: Bug report
+description: Report a reproducible problem with the Claude Code Codex Subagents plugin.
+title: "[Bug]: "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting a problem. Please avoid pasting secrets, auth logs, private prompts, or raw MCP traffic that contains sensitive project data.
+  - type: textarea
+    id: summary
+    attributes:
+      label: Summary
+      description: What happened, and what did you expect instead?
+      placeholder: Claude called the plugin, but...
+    validations:
+      required: true
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: Reproduction steps
+      description: Include the smallest prompt/tool call that reproduces the issue.
+      placeholder: |
+        1. Start Claude Code with ...
+        2. Ask Claude ...
+        3. Observe ...
+    validations:
+      required: true
+  - type: input
+    id: plugin-version
+    attributes:
+      label: Plugin version or commit
+      placeholder: 0.1.1 or git SHA
+  - type: input
+    id: claude-version
+    attributes:
+      label: Claude Code version
+      placeholder: claude --version
+  - type: input
+    id: codex-version
+    attributes:
+      label: Codex version
+      placeholder: codex --version
+  - type: dropdown
+    id: path
+    attributes:
+      label: Execution path
+      options:
+        - ask_codex
+        - ask_codex_parallel
+        - persistent session
+        - async job
+        - app-server steering
+        - plugin install/loading
+        - other
+  - type: textarea
+    id: diagnostics
+    attributes:
+      label: Diagnostics
+      description: Paste sanitized `codex_status`, `codex_doctor`, or debug bundle excerpts. Redact private data.
+      render: text
