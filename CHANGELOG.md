@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.3.0
+
+- Refactored the default Claude-facing MCP surface to three native tools: `codex_task`, `codex_task_group`, and `codex_followup`.
+- Made every `codex_task` result return a `session_id` so Claude can continue or steer Codex context naturally.
+- Moved uncommon settings under `advanced` and replaced the default full-access flag with `full_access`.
+- Hid debug and legacy tools by default; diagnostics are now available through `codex://usage`, `codex://status`, and `codex://doctor`.
+- Updated the Claude skill, README, wiki, and validation scripts for the native follow-up flow.
+
 ## 0.2.0
 
 - Refreshed the README into a shorter onboarding page.

@@ -1,5 +1,20 @@
 # Release Notes
 
+## v0.3.0
+
+`v0.3.0` focuses on making Codex subagents feel native to Claude.
+
+Highlights:
+
+- Default tool surface is now `codex_task`, `codex_task_group`, and
+  `codex_followup`.
+- `codex_task` always returns a `session_id` for follow-up, wait, or steering.
+- Power-user knobs moved under `advanced`; routine calls use `description`,
+  `prompt`, `project_dir`, `reasoning`, `subagent_type`, and `full_access`.
+- Diagnostics are resources by default: `codex://usage`, `codex://status`, and
+  `codex://doctor`.
+- Debug and legacy tools are hidden unless explicitly enabled by environment.
+
 ## v0.2.0
 
 `v0.2.0` is the first public-ready release candidate for
@@ -44,4 +59,3 @@ npm run test:claude-orchestration
 npm run test:claude-real-codex
 npm run test:claude-real-session
 ```
-

@@ -25,62 +25,59 @@ try {
   await client.connect(transport);
   const start = await client.callTool(
     {
-      name: "codex_session_start",
+      name: "codex_task",
       arguments: {
         description: "Real app-server steering probe",
         prompt: "Real app-server steering probe. Stay read-only. Run the shell command `sleep 6`, then reply exactly REAL_APP_SERVER_START_OK unless a later steering instruction changes the exact final reply.",
         project_dir: projectDir,
-        codex_bin: codexBin,
-        model_preset: "spark",
-        reasoning_effort: "low",
-        timeout_ms: 180_000,
-        isolated_codex_home: true,
+        background: true,
+        reasoning: "low",
+        advanced: {
+          codex_bin: codexBin,
+          model: "spark",
+          timeout_ms: 180_000,
+          isolated_codex_home: true,
+        },
       },
     },
     CallToolResultSchema,
     { timeout: 20_000, resetTimeoutOnProgress: true },
   );
-  const sessionId = start.structuredContent?.session?.id;
+  const sessionId = start.structuredContent?.session_id;
   if (!sessionId) {
-    throw new Error(`codex_session_start did not return a session id: ${JSON.stringify(start.structuredContent)}`);
-  }
-
-  for (let attempt = 0; attempt < 30; attempt += 1) {
-    const current = await client.callTool(
-      { name: "codex_session_status", arguments: { session_id: sessionId } },
-      CallToolResultSchema,
-      { timeout: 10_000, resetTimeoutOnProgress: true },
-    );
-    if (current.structuredContent?.session?.supportsRealSteering && current.structuredContent?.session?.activeTurn) break;
-    await new Promise((resolve) => setTimeout(resolve, 250));
+    throw new Error(`codex_task did not return a session id: ${JSON.stringify(start.structuredContent)}`);
   }
 
   const steer = await client.callTool(
     {
-      name: "codex_session_steer",
+      name: "codex_followup",
       arguments: {
         session_id: sessionId,
+        mode: "steer",
         prompt: "Steering update: change the exact final reply to REAL_APP_SERVER_STEER_OK.",
-        codex_bin: codexBin,
-        model_preset: "spark",
-        reasoning_effort: "low",
-        wait_for_completion: false,
-        isolated_codex_home: true,
+        background: true,
+        reasoning: "low",
+        advanced: {
+          codex_bin: codexBin,
+          model: "spark",
+          timeout_ms: 180_000,
+          isolated_codex_home: true,
+        },
       },
     },
     CallToolResultSchema,
     { timeout: 30_000, resetTimeoutOnProgress: true },
   );
   if (steer.structuredContent?.delivery !== "delivered_to_active_turn") {
-    throw new Error(`codex_session_steer was not delivered live: ${JSON.stringify(steer.structuredContent)}`);
+    throw new Error(`codex_followup steer was not delivered live: ${JSON.stringify(steer.structuredContent)}`);
   }
 
   const wait = await client.callTool(
-    { name: "codex_session_wait", arguments: { session_id: sessionId, timeout_ms: 240_000 } },
+    { name: "codex_followup", arguments: { session_id: sessionId, mode: "wait", wait_timeout_ms: 240_000 } },
     CallToolResultSchema,
     { timeout: 260_000, resetTimeoutOnProgress: true },
   );
-  const finalMessage = wait.structuredContent?.session?.lastResult?.finalMessage ?? "";
+  const finalMessage = wait.structuredContent?.result ?? "";
   if (!wait.structuredContent?.completed || !finalMessage.includes("REAL_APP_SERVER_STEER_OK")) {
     throw new Error(`real app-server steering did not affect the final reply: ${JSON.stringify(wait.structuredContent)}`);
   }

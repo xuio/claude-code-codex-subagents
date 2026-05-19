@@ -7,14 +7,14 @@
 Run OpenAI Codex agents from Claude Code through a daemonless MCP plugin.
 
 `claude-code-codex-subagents` lets Claude Code ask Codex for read-only reviews,
-parallel investigations, Spark checks, persistent multi-turn sessions, and explicit
-full-access Codex work when the user asks for it.
+parallel investigations, Spark checks, native follow-ups, live steering, and
+explicit full-access Codex work when the user asks for it.
 
 ![Terminal demo of Claude launching parallel Codex reviewers](docs/assets/demo.svg)
 
 ## Why Use It?
 
-- **Native Claude Code workflow:** Claude gets a small Task-like MCP surface: `codex_task`, `codex_task_group`, and `codex_session_*`.
+- **Native Claude Code workflow:** Claude gets a small Task-like MCP surface: `codex_task`, `codex_task_group`, and `codex_followup`.
 - **Read-only by default:** Codex starts with `--sandbox read-only` and non-interactive approvals.
 - **No daemon:** Claude launches the MCP server over stdio for the active session.
 - **Fast parallel review:** Claude can launch several independent Codex agents with bounded concurrency.
@@ -78,7 +78,7 @@ Claude should use `codex_task_group` and split the work into independent tasks.
 Use Codex Spark to do a fast focused pass on the tool descriptions.
 ```
 
-Claude can pass `model_preset: "spark"` instead of remembering the exact Spark model slug.
+Claude can pass `advanced.model: "spark"` instead of remembering the exact Spark model slug.
 
 ### Keep A Codex Session Alive
 
@@ -86,8 +86,9 @@ Claude can pass `model_preset: "spark"` instead of remembering the exact Spark m
 Start a long-running Codex session on this repo, then let me send follow-up prompts into the same context.
 ```
 
-Claude should use `codex_session_start`, `codex_session_prompt`,
-`codex_session_steer`, `codex_session_status`, and `codex_session_wait`.
+Claude should use `codex_task` for the initial prompt, preserve the returned
+`session_id`, and use `codex_followup` to continue, steer, or wait on that same
+Codex context. For long first turns, Claude should set `background: true`.
 
 ## Safety Model
 
@@ -103,7 +104,7 @@ Full local access is opt-in per call:
 
 ```json
 {
-  "dangerously_bypass_approvals_and_sandbox": true
+  "full_access": true
 }
 ```
 
@@ -127,15 +128,20 @@ use DNS/network, install packages, or behave like a normal unrestricted Codex ru
 | --- | --- |
 | One read-only Codex task | `codex_task` |
 | Several independent tasks | `codex_task_group` |
-| Persistent context | `codex_session_start`, `codex_session_prompt` |
-| Long-running sessions | `codex_session_start`, `codex_session_status`, `codex_session_wait`, `codex_session_steer` |
-| Session recovery | `codex_sessions`, `codex_session_recover`, `codex_session_cancel` |
-| Diagnostics | `codex_status`, `codex_doctor`, `codex_export_debug_bundle` |
+| Persistent context | `codex_task`, then `codex_followup` |
+| Long-running sessions | `codex_task` with `background: true`, then `codex_followup` |
+| Live steering | `codex_followup` with `mode: "steer"` |
+| Diagnostics | MCP resources `codex://status`, `codex://doctor`, `codex://usage` |
 
 Legacy tools such as `ask_codex`, `run_agent`, `run_agents`, `start_session`, and
 `send_session_prompt` are hidden by default. Set
 `CODEX_SUBAGENTS_ENABLE_LEGACY_TOOLS=1` only for older clients that still call the
 pre-refactor names.
+
+Debug tools such as `codex_status`, `codex_doctor`, `codex_usage_guide`,
+`codex_choose_tool`, and `codex_export_debug_bundle` are hidden by default. Set
+`CODEX_SUBAGENTS_ENABLE_DEBUG_TOOLS=1` only when a client needs tool-callable
+diagnostics instead of the MCP diagnostic resources.
 
 ## Development
 
@@ -170,7 +176,7 @@ See [Development](docs/DEVELOPMENT.md) for the full test matrix.
 
 ## Project Status
 
-Current release: `v0.2.0`.
+Current release: `v0.3.0`.
 
 This project is early, but it is already tested across:
 

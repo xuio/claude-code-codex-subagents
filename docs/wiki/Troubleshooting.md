@@ -2,11 +2,11 @@
 
 ## Start With Diagnostics
 
-Ask Claude to call:
+Ask Claude to read:
 
-- `codex_status`
-- `codex_doctor`
-- `codex_export_debug_bundle`
+- `codex://status`
+- `codex://doctor`
+- `codex://usage`
 
 These are the fastest way to inspect binary resolution, defaults, app-server
 capabilities, queue limits, and recent failures.
@@ -34,12 +34,11 @@ Ask Codex to review this repository read-only.
 
 ## Long Runs
 
-Use persistent or async tools instead of one blocking request:
+Use the native background/follow-up flow instead of one blocking request:
 
-- `codex_session_start`
-- `codex_session_status`
-- `codex_session_wait`
-- `codex_session_steer`
+- `codex_task` with `background: true`
+- `codex_followup` with `mode: "wait"`
+- `codex_followup` with `mode: "steer"`
 
 Persistent sessions are the right path for work that should be recoverable after
 an MCP restart.

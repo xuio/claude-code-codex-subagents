@@ -1,5 +1,16 @@
 # Release Notes
 
+## v0.3.0
+
+Native Claude-facing tool surface:
+
+- `codex_task`
+- `codex_task_group`
+- `codex_followup`
+
+Every `codex_task` returns a `session_id`, diagnostics moved to resources, and
+debug/legacy tools are hidden unless explicitly enabled.
+
 ## v0.2.0
 
 First public-ready release candidate.

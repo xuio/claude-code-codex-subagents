@@ -38,14 +38,37 @@ async function callTool(name, args) {
   );
 }
 
+async function readJsonResource(uri) {
+  const resource = await client.readResource({ uri });
+  return JSON.parse(resource.contents[0].text);
+}
+
+async function listToolsWithEnv(env) {
+  const debugClient = new Client({ name: "codex-subagents-smoke-debug", version: "0.1.0" });
+  const debugTransport = new StdioClientTransport({
+    command: path.join(root, "dist/index.js"),
+    cwd: root,
+    env,
+    stderr: "pipe",
+  });
+  debugTransport.stderr?.resume();
+  try {
+    await debugClient.connect(debugTransport);
+    return await debugClient.listTools();
+  } finally {
+    await debugTransport.close().catch(() => {});
+  }
+}
+
 try {
   await client.connect(transport);
 
   const toolList = await client.listTools();
   const toolNames = new Set(toolList.tools.map((tool) => tool.name));
+  assert(toolNames.has("codex_task"), "default tool surface should expose codex_task", toolList.tools);
+  assert(toolNames.has("codex_task_group"), "default tool surface should expose codex_task_group", toolList.tools);
+  assert(toolNames.has("codex_followup"), "default tool surface should expose codex_followup", toolList.tools);
   for (const name of [
-    "codex_task",
-    "codex_task_group",
     "codex_session_start",
     "codex_session_prompt",
     "codex_session_steer",
@@ -54,92 +77,102 @@ try {
     "codex_sessions",
     "codex_session_recover",
     "codex_session_cancel",
-  ]) {
-    assert(toolNames.has(name), `default tool surface should expose ${name}`, toolList.tools);
-  }
-  for (const name of [
+    "codex_status",
+    "codex_doctor",
+    "codex_usage_guide",
+    "codex_choose_tool",
+    "codex_export_debug_bundle",
     "ask_codex",
     "ask_codex_parallel",
     "run_agent",
     "run_agents",
-    "start_agent_run",
-    "start_codex_session",
-    "start_codex_session_async",
-    "continue_codex_session",
-    "send_codex_session_prompt",
   ]) {
-    assert(!toolNames.has(name), `legacy tool ${name} should be hidden by default`, toolList.tools);
+    assert(!toolNames.has(name), `non-native tool ${name} should be hidden by default`, toolList.tools);
   }
-
-  const status = await callTool("codex_status", {});
-  assert(status.structuredContent?.ok, "codex_status failed", status.structuredContent);
-
-  const guide = await callTool("codex_usage_guide", {});
-  assert(
-    guide.structuredContent?.guide?.includes("Prefer codex_task for one delegated Codex task."),
-    "codex_usage_guide should teach the native single-task tool",
-    guide.structuredContent,
-  );
-  assert(
-    guide.structuredContent?.preferredTools?.oneTask === "codex_task",
-    "codex_usage_guide should advertise codex_task",
-    guide.structuredContent,
-  );
-  assert(
-    guide.structuredContent?.preferredTools?.parallelTasks === "codex_task_group",
-    "codex_usage_guide should advertise codex_task_group",
-    guide.structuredContent,
-  );
-  assert(
-    guide.structuredContent?.preferredTools?.lowerLevelOneTask === undefined,
-    "codex_usage_guide should not advertise legacy front doors",
-    guide.structuredContent,
-  );
-
-  const choice = await callTool("codex_choose_tool", {
-    request: "ask Codex for a quick second opinion",
+  const debugToolList = await listToolsWithEnv({
+    PATH: process.env.PATH ?? "",
+    CODEX_SUBAGENTS_CODEX_BIN: fakeCodex,
+    CODEX_SUBAGENTS_ENABLE_DEBUG_TOOLS: "1",
+    CLAUDE_PROJECT_DIR: projectDir,
+    CODEX_SUBAGENTS_SESSION_STATE_FILE: path.join(projectDir, "debug-sessions.json"),
   });
-  assert(
-    choice.structuredContent?.recommendedTool === "codex_task",
-    "codex_choose_tool chose the wrong single-task tool",
-    choice.structuredContent,
-  );
+  const debugToolNames = new Set(debugToolList.tools.map((tool) => tool.name));
+  assert(debugToolNames.has("codex_status"), "debug tool surface should expose codex_status when enabled", debugToolList.tools);
+  assert(debugToolNames.has("codex_doctor"), "debug tool surface should expose codex_doctor when enabled", debugToolList.tools);
 
-  const parallelChoice = await callTool("codex_choose_tool", {
-    request: "ask several Codex agents to review independent areas",
-    wants_parallel: true,
-    task_count: 3,
-  });
-  assert(
-    parallelChoice.structuredContent?.recommendedTool === "codex_task_group",
-    "codex_choose_tool chose the wrong parallel tool",
-    parallelChoice.structuredContent,
-  );
+  const resources = await client.listResources();
+  const resourceUris = new Set(resources.resources.map((resource) => resource.uri));
+  assert(resourceUris.has("codex://usage"), "usage resource should be listed", resources.resources);
+  assert(resourceUris.has("codex://status"), "status resource should be listed", resources.resources);
+  assert(resourceUris.has("codex://doctor"), "doctor resource should be listed", resources.resources);
 
-  const sessionChoice = await callTool("codex_choose_tool", {
-    request: "start a long-running Codex agent that keeps context",
-    wants_session: true,
-  });
+  const status = await readJsonResource("codex://status");
+  assert(status.ok, "codex://status failed", status);
+  assert(status.defaultTools?.includes("codex_followup"), "codex://status should advertise native tools", status);
+  const doctor = await readJsonResource("codex://doctor");
+  assert(doctor.ok, "codex://doctor failed", doctor);
+  const usage = await client.readResource({ uri: "codex://usage" });
   assert(
-    sessionChoice.structuredContent?.recommendedTool === "codex_session_start",
-    "codex_choose_tool chose the wrong session tool",
-    sessionChoice.structuredContent,
+    usage.contents[0].text.includes("Use codex_followup when Claude already has a session_id"),
+    "codex://usage should teach codex_followup",
+    usage.contents[0].text,
   );
 
   const single = await callTool("codex_task", {
     description: "Single smoke",
     prompt: "single smoke RUN_COMMAND_EVENT",
     project_dir: projectDir,
-    model_preset: "spark",
+    advanced: { model: "spark" },
   });
-  const singleAgent = single.structuredContent?.agent;
   assert(single.structuredContent?.ok, "codex_task should return ok", single.structuredContent);
   assert(single.structuredContent?.result?.includes("single smoke"), "codex_task should return answer-first result", single.structuredContent);
+  assert(single.structuredContent?.session_id, "codex_task should return session_id", single.structuredContent);
   assert(
-    singleAgent?.ok && singleAgent.cwd === projectDir && singleAgent.model === "gpt-5.3-codex-spark",
-    "codex_task did not preserve project/model",
+    single.structuredContent?.diagnostics?.cwd === projectDir &&
+      single.structuredContent?.diagnostics?.model === "gpt-5.3-codex-spark" &&
+      single.structuredContent?.diagnostics?.sandbox === "read-only",
+    "codex_task did not preserve project/model/read-only defaults",
     single.structuredContent,
   );
+
+  const followup = await callTool("codex_followup", {
+    session_id: single.structuredContent.session_id,
+    prompt: "single follow-up smoke",
+  });
+  assert(followup.structuredContent?.ok, "codex_followup should complete normal follow-ups", followup.structuredContent);
+  assert(
+    followup.structuredContent?.result?.includes("single follow-up smoke") &&
+      followup.structuredContent?.session_id === single.structuredContent.session_id,
+    "codex_followup should preserve session context",
+    followup.structuredContent,
+  );
+
+  const background = await callTool("codex_task", {
+    description: "Background smoke",
+    prompt: "background smoke DELAY_MS=1000",
+    project_dir: projectDir,
+    background: true,
+  });
+  assert(background.structuredContent?.status === "running", "background codex_task should return immediately", background.structuredContent);
+  assert(background.structuredContent?.session_id, "background codex_task should return session_id", background.structuredContent);
+  const steered = await callTool("codex_followup", {
+    session_id: background.structuredContent.session_id,
+    mode: "steer",
+    prompt: "background steering smoke",
+    background: true,
+  });
+  assert(steered.structuredContent?.ok, "codex_followup mode steer should return ok", steered.structuredContent);
+  assert(
+    steered.structuredContent?.delivery === "delivered_to_active_turn",
+    "codex_followup mode steer should wait for app-server readiness and deliver live",
+    steered.structuredContent,
+  );
+  const waited = await callTool("codex_followup", {
+    session_id: background.structuredContent.session_id,
+    mode: "wait",
+    wait_timeout_ms: 5_000,
+  });
+  assert(waited.structuredContent?.completed === true, "codex_followup mode wait should collect completion", waited.structuredContent);
 
   const group = await callTool("codex_task_group", {
     tasks: [
@@ -148,123 +181,72 @@ try {
     ],
     max_parallel: 2,
   });
-  const agents = group.structuredContent?.agents;
+  const results = group.structuredContent?.results;
   assert(group.structuredContent?.ok, "codex_task_group failed", group.structuredContent);
-  assert(Array.isArray(agents) && agents.length === 2, "expected two group agent results", group.structuredContent);
+  assert(Array.isArray(results) && results.length === 2, "expected two group results", group.structuredContent);
   assert(
-    agents.every((agent) => agent.cwd === projectDir && agent.sandbox === "read-only"),
-    "codex_task_group should preserve project_dir/read-only defaults",
-    agents,
+    results.every(
+      (result) =>
+        result.session_id &&
+        result.diagnostics?.cwd === projectDir &&
+        result.diagnostics?.sandbox === "read-only",
+    ),
+    "codex_task_group should preserve project_dir/read-only defaults and return session ids",
+    results,
+  );
+
+  const mixedGroup = await callTool("codex_task_group", {
+    tasks: [
+      { name: "ok", description: "Mixed ok", prompt: "mixed ok", project_dir: projectDir },
+      {
+        name: "bad",
+        description: "Mixed bad",
+        prompt: "mixed bad",
+        project_dir: path.join(projectDir, "missing-project-dir"),
+      },
+    ],
+    max_parallel: 2,
+  });
+  assert(mixedGroup.isError, "mixed codex_task_group should mark the call as an MCP error", mixedGroup);
+  assert(
+    mixedGroup.structuredContent?.ok === false &&
+      mixedGroup.structuredContent?.results?.length === 2 &&
+      mixedGroup.structuredContent.results.some((result) => result.ok) &&
+      mixedGroup.structuredContent.results.some((result) => result.ok === false),
+    "mixed codex_task_group should return successful and failed per-task results",
+    mixedGroup.structuredContent,
   );
 
   const nested = await callTool("codex_task", {
     description: "Nested subagent smoke",
     prompt: "coordinate nested fake work",
     project_dir: projectDir,
-    model_preset: "spark",
-    codex_subagents: [
-      {
-        name: "ui_spark",
-        description: "Fast focused UI iteration.",
-        developer_instructions: "Stay scoped and concise.",
-        model_preset: "spark",
-        reasoning_effort: "medium",
-        sandbox: "read-only",
-      },
-    ],
-    subagent_tasks: [{ agent: "ui_spark", prompt: "Inspect the toolbar." }],
-    subagent_runtime: { max_threads: 4, max_depth: 2 },
+    advanced: {
+      model: "spark",
+      codex_subagents: [
+        {
+          name: "ui_spark",
+          description: "Fast focused UI iteration.",
+          developer_instructions: "Stay scoped and concise.",
+          model_preset: "spark",
+          reasoning_effort: "medium",
+          sandbox: "read-only",
+        },
+      ],
+      subagent_tasks: [{ agent: "ui_spark", prompt: "Inspect the toolbar." }],
+      subagent_runtime: { max_threads: 4, max_depth: 2 },
+    },
   });
-  const nestedAgent = nested.structuredContent?.agent;
   assert(
-    nestedAgent?.ok &&
-      nestedAgent.model === "gpt-5.3-codex-spark" &&
-      nestedAgent.codexSubagents?.customAgents?.[0] === "ui_spark",
-    "nested subagent smoke failed",
+    nested.structuredContent?.ok &&
+      nested.structuredContent?.diagnostics?.model === "gpt-5.3-codex-spark" &&
+      nested.structuredContent?.diagnostics?.event_summary?.commands !== undefined,
+    "nested native subagent smoke failed",
     nested.structuredContent,
   );
 
-  const sessionStart = await callTool("codex_session_start", {
-    description: "Session smoke first",
-    prompt: "session smoke first",
-    project_dir: projectDir,
-    wait_for_completion: true,
-  });
-  const sessionId = sessionStart.structuredContent?.session?.id;
-  assert(sessionStart.structuredContent?.ok, "codex_session_start should complete when requested", sessionStart.structuredContent);
-  assert(sessionId && sessionStart.structuredContent?.session?.projectDir === projectDir, "codex_session_start failed", sessionStart.structuredContent);
-  assert(sessionStart.structuredContent?.agent?.cwd === projectDir, "codex_session_start should run in project_dir", sessionStart.structuredContent);
-
-  const sessionNext = await callTool("codex_session_prompt", {
-    session_id: sessionId,
-    description: "Session smoke second",
-    prompt: "session smoke second",
-    wait_for_completion: true,
-  });
-  assert(sessionNext.structuredContent?.session?.turns === 2, "codex_session_prompt should add a turn", sessionNext.structuredContent);
-  assert(sessionNext.structuredContent?.agent?.cwd === projectDir, "codex_session_prompt should preserve project_dir", sessionNext.structuredContent);
-
-  const longSessionStart = await callTool("codex_session_start", {
-    description: "Async session smoke",
-    prompt: "session async smoke first DELAY_MS=120",
-    project_dir: projectDir,
-  });
-  const longSessionId = longSessionStart.structuredContent?.session?.id;
-  assert(longSessionStart.structuredContent?.ok, "codex_session_start async failed", longSessionStart.structuredContent);
-  assert(longSessionId && longSessionStart.structuredContent?.turn?.id, "codex_session_start should return session and turn ids", longSessionStart.structuredContent);
-
-  const sessionStatus = await callTool("codex_session_status", { session_id: longSessionId });
-  assert(sessionStatus.structuredContent?.ok, "codex_session_status should inspect running session", sessionStatus.structuredContent);
-
-  const queuedPrompt = await callTool("codex_session_prompt", {
-    session_id: longSessionId,
-    description: "Queued follow-up",
-    prompt: "session async smoke queued follow-up",
-  });
-  assert(queuedPrompt.structuredContent?.queued, "codex_session_prompt should queue by default", queuedPrompt.structuredContent);
-  assert(queuedPrompt.structuredContent?.turn?.kind === "prompt", "queued session turn should be a prompt", queuedPrompt.structuredContent);
-
-  const queuedSteer = await callTool("codex_session_steer", {
-    session_id: longSessionId,
-    prompt: "session async smoke steer next",
-  });
-  assert(queuedSteer.structuredContent?.queued, "codex_session_steer should return without waiting by default", queuedSteer.structuredContent);
-  assert(
-    ["delivered_to_active_turn", "queued_after_current", "started_or_queued"].includes(queuedSteer.structuredContent?.delivery),
-    "codex_session_steer should report how steering was delivered",
-    queuedSteer.structuredContent,
-  );
-
-  const longSessionWait = await callTool("codex_session_wait", {
-    session_id: longSessionId,
-    timeout_ms: 5_000,
-  });
-  assert(longSessionWait.structuredContent?.completed === true, "codex_session_wait should complete", longSessionWait.structuredContent);
-  assert(
-    longSessionWait.structuredContent?.session?.turns >= 2,
-    "codex_session_wait should drain queued turns",
-    longSessionWait.structuredContent,
-  );
-
-  const sessions = await callTool("codex_sessions", {});
-  assert(
-    sessions.structuredContent?.sessions?.some((session) => session.id === sessionId),
-    "codex_sessions should list existing sessions",
-    sessions.structuredContent,
-  );
-
-  const cancelStart = await callTool("codex_session_start", {
-    description: "Cancellation smoke",
-    prompt: "cancel smoke DELAY_MS=5000",
-    project_dir: projectDir,
-  });
-  const cancelSessionId = cancelStart.structuredContent?.session?.id;
-  assert(cancelSessionId, "codex_session_start should return a cancellable session", cancelStart.structuredContent);
-  const cancelled = await callTool("codex_session_cancel", { session_id: cancelSessionId });
-  assert(cancelled.structuredContent?.ok, "codex_session_cancel should succeed", cancelled.structuredContent);
-
   console.log("MCP smoke test passed");
 } finally {
-  await transport.close();
+  await transport.close().catch(() => {});
   await rm(projectDir, { recursive: true, force: true });
 }

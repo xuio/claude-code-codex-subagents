@@ -17,6 +17,7 @@ const transport = new StdioClientTransport({
     ...process.env,
     CODEX_SUBAGENTS_CODEX_BIN: fakeCodex,
     CODEX_SUBAGENTS_ENABLE_LEGACY_TOOLS: "1",
+    CODEX_SUBAGENTS_ENABLE_DEBUG_TOOLS: "1",
     CLAUDE_PROJECT_DIR: projectDir,
     CODEX_SUBAGENTS_SESSION_STATE_FILE: path.join(projectDir, "sessions.json"),
     FAKE_CODEX_RECORD_DIR: recordDir,
@@ -449,22 +450,25 @@ try {
   });
   assert(
     queuedWait.structuredContent?.completed === true &&
-      queuedWait.structuredContent?.session?.turns === 3 &&
+      queuedWait.structuredContent?.session?.turns === 2 &&
       queuedWait.structuredContent?.session?.recentTurns?.some(
         (turn) => turn.kind === "steer" && turn.status === "completed",
       ),
-    "wait_codex_session should wait for queued prompt and steering turns",
+    "wait_codex_session should wait for the live steer and queued prompt turns",
     queuedWait.structuredContent,
   );
   const queuedCalls = (await readCalls())
     .slice(queuedCallsBefore)
-    .filter((call) => call.method === "turn/start")
-    .map((call) => call.prompt);
+    .filter((call) => call.method === "turn/start" || call.method === "turn/steer")
+    .map((call) => ({ method: call.method, prompt: call.prompt }));
   assert(
-    queuedCalls[0]?.includes("matrix-queued-session-start") &&
-      queuedCalls[1]?.includes("matrix-queued-session-steer") &&
-      queuedCalls[2]?.includes("matrix-queued-session-follow"),
-    "steering should run before older queued follow-up prompts",
+    queuedCalls[0]?.method === "turn/start" &&
+      queuedCalls[0]?.prompt?.includes("matrix-queued-session-start") &&
+      queuedCalls[1]?.method === "turn/steer" &&
+      queuedCalls[1]?.prompt?.includes("matrix-queued-session-steer") &&
+      queuedCalls[2]?.method === "turn/start" &&
+      queuedCalls[2]?.prompt?.includes("matrix-queued-session-follow"),
+    "steering should deliver live before older queued follow-up prompts",
     queuedCalls,
   );
 

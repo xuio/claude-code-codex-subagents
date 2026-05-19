@@ -26,17 +26,21 @@ Prefer these tools in normal Claude usage:
 
 - `codex_task` - one Task-like Codex subagent with an answer-first result.
 - `codex_task_group` - several independent Task-like Codex subagents in parallel.
-- `codex_session_start` - start a persistent session and return a session id.
-- `codex_session_prompt` - send another prompt into an existing session.
-- `codex_session_steer` - steer the active app-server turn when supported.
-- `codex_session_status` and `codex_session_wait` - inspect or wait on sessions.
-- `codex_sessions`, `codex_session_recover`, and `codex_session_cancel` - manage session lifecycle.
+- `codex_followup` - continue, steer, or wait on the `session_id` returned by
+  `codex_task` or `codex_task_group`.
 
 Legacy compatibility tools are hidden by default. Set
 `CODEX_SUBAGENTS_ENABLE_LEGACY_TOOLS=1` only for older clients that still call
 pre-refactor names such as `ask_codex`, `run_agent`, or `start_session`.
 
-Diagnostics tools:
+Diagnostic resources are available without cluttering the tool picker:
+
+- `codex://usage`
+- `codex://status`
+- `codex://doctor`
+
+Tool-callable diagnostics are hidden by default. Set
+`CODEX_SUBAGENTS_ENABLE_DEBUG_TOOLS=1` only when a client needs:
 
 - `codex_usage_guide`
 - `codex_choose_tool`
@@ -52,13 +56,13 @@ Use this decision path when writing prompts or debugging Claude tool choice:
 | --- | --- |
 | One normal read-only second opinion | `codex_task` |
 | Two or more independent workstreams | `codex_task_group` |
-| Same Codex agent should keep context | `codex_session_start`, then `codex_session_prompt` |
-| Long first turn, user wants to keep working | `codex_session_start` |
-| Add a normal follow-up to a running session | `codex_session_prompt` |
-| Redirect the active app-server turn | `codex_session_steer` |
-| Recover a session after Claude/MCP restart | `codex_session_recover` |
+| Same Codex agent should keep context | `codex_task`, then `codex_followup` |
+| Long first turn, user wants to keep working | `codex_task` with `background: true` |
+| Add a normal follow-up to a running session | `codex_followup` with `mode: "queue"` |
+| Redirect the active app-server turn | `codex_followup` with `mode: "steer"` |
+| Wait for a background session | `codex_followup` with `mode: "wait"` |
 
-When in doubt, ask Claude to call `codex_choose_tool` before delegating.
+When in doubt, read `codex://usage` and then choose among the three native tools.
 
 ## Example: One Agent
 
@@ -75,7 +79,7 @@ Representative tool arguments:
   "description": "Review MCP server reliability",
   "prompt": "Review the MCP server read-only. Return the top reliability risks with file paths and line references.",
   "project_dir": "/path/to/project",
-  "reasoning_effort": "medium"
+  "reasoning": "medium"
 }
 ```
 
@@ -112,7 +116,7 @@ Representative tool arguments:
     }
   ],
   "max_parallel": 3,
-  "reasoning_effort": "medium"
+  "reasoning": "medium"
 }
 ```
 
@@ -125,15 +129,16 @@ Use a persistent session when Codex should keep context across prompts.
   "description": "Investigate session manager",
   "prompt": "Investigate the session manager read-only. Keep a compact working map of the code.",
   "project_dir": "/path/to/project",
-  "reasoning_effort": "medium"
+  "reasoning": "medium"
 }
 ```
 
-`codex_session_start` returns a session id immediately by default. Then:
+`codex_task` returns a `session_id`. Then:
 
 ```json
 {
   "session_id": "session-...",
+  "mode": "queue",
   "prompt": "Now focus on recovery after MCP restart. Cite the relevant code paths."
 }
 ```
@@ -143,6 +148,7 @@ To steer an active app-server turn:
 ```json
 {
   "session_id": "session-...",
+  "mode": "steer",
   "prompt": "Prioritize app-server recovery and ignore UI/documentation polish."
 }
 ```
@@ -152,10 +158,9 @@ protocol and steering becomes a high-priority queued turn.
 
 ## Spark And Reasoning
 
-Do not use `model_preset: "spark"` by default. Use Spark only when the user asks
+Do not use `advanced.model: "spark"` by default. Use Spark only when the user asks
 for Spark or when a quick focused sidecar check is clearly more appropriate than
-the default Codex model. Exact `model` still wins when both `model` and
-`model_preset` are provided.
+the default Codex model.
 
 Recommended reasoning:
 
@@ -166,16 +171,16 @@ Recommended reasoning:
 Avoid `minimal`. The plugin rejects it because the current Codex CLI can attach
 tools that are incompatible with minimal reasoning.
 
-Spark does not support `reasoning_summary`; with `model_preset: "spark"`, use
-`reasoning_summary: "none"` or omit it.
+Spark does not support `reasoning_summary`; with `advanced.model: "spark"`, use
+`advanced.reasoning_summary: "none"` or omit it.
 
 ## Nested Codex Subagents
 
 To let a Codex parent agent launch Codex subagents, pass:
 
-- `codex_subagents` - custom subagent definitions.
-- `subagent_tasks` - the specific subagents the parent should spawn.
-- `subagent_runtime` - limits such as `max_threads`, `max_depth`, and `job_max_runtime_seconds`.
+- `advanced.codex_subagents` - custom subagent definitions.
+- `advanced.subagent_tasks` - the specific subagents the parent should spawn.
+- `advanced.subagent_runtime` - limits such as `max_threads`, `max_depth`, and `job_max_runtime_seconds`.
 
 Custom definitions are written into a temporary Codex home for that run. The
 project directory is not modified.
@@ -187,7 +192,7 @@ capabilities, pass:
 
 ```json
 {
-  "dangerously_bypass_approvals_and_sandbox": true
+  "full_access": true
 }
 ```
 
@@ -207,14 +212,14 @@ edges. The most important ones:
 
 ## Structured Output
 
-Use `output_contract` when Claude needs machine-readable results:
+Use `advanced.output_contract` when Claude needs machine-readable results:
 
 - `review_findings`
 - `plan`
 - `risk_matrix`
 - `patch_suggestions`
 
-Use `output_schema` for a custom JSON Schema. The plugin passes the schema to
+Use `advanced.output_schema` for a custom JSON Schema. The plugin passes the schema to
 Codex, parses the final JSON message, and returns `structuredOutput`.
 
 ## MCP Config Sharing
@@ -223,11 +228,11 @@ MCP config sharing is explicit:
 
 - `inherit_codex` - use the user's normal Codex config.
 - `isolated` - use a temporary Codex home without inherited MCP servers.
-- `explicit` - use only `codex_mcp_servers`.
+- `explicit` - use only `advanced.codex_mcp_servers`.
 - `inherit_claude_project` - import `.mcp.json` or `.claude/mcp.json` from `project_dir`.
 
-Use `isolated_codex_home: true` when unrelated user-level Codex MCP servers should
-not be loaded for the run.
+Use `advanced.isolated_codex_home: true` when unrelated user-level Codex MCP
+servers should not be loaded for the run.
 
 ## Environment Variables
 
@@ -254,6 +259,8 @@ not be loaded for the run.
 | `CODEX_SUBAGENTS_LOG_FILE_MAX_BYTES` | Rotate the log file after this size |
 | `CODEX_SUBAGENTS_LOG_MAX_STRING_CHARS` | Maximum retained string payload per log field |
 | `CODEX_SUBAGENTS_PROGRESS_HEARTBEAT_MS` | Progress heartbeat interval |
+| `CODEX_SUBAGENTS_ENABLE_DEBUG_TOOLS` | Set `1` to expose tool-callable diagnostics |
+| `CODEX_SUBAGENTS_ENABLE_LEGACY_TOOLS` | Set `1` to expose pre-refactor compatibility tools |
 | `CODEX_SUBAGENTS_OUTPUT_ARTIFACTS` | Set `0` to disable output artifact files |
 | `CODEX_SUBAGENTS_ARTIFACT_DIR` | Directory for retained output artifacts |
 | `CODEX_SUBAGENTS_ARTIFACT_REDACT` | Set `0` to keep output artifacts unredacted |

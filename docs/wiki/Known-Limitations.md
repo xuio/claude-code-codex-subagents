@@ -12,7 +12,8 @@ normal work, or `CODEX_SUBAGENTS_LOG_LEVEL=silent` to disable logging.
 ## Async Jobs Are Not Durable
 
 Legacy async one-shot jobs are process-local and hidden by default. Use
-`codex_session_start` when the work should be recoverable after restart.
+`codex_task` with `background: true`, then `codex_followup`, for retained
+long-running Codex context.
 
 ## Steering Requires App-Server
 
@@ -21,5 +22,5 @@ exec protocol, steering becomes a high-priority queued turn.
 
 ## Full Access Is Dangerous
 
-Full local access requires `dangerously_bypass_approvals_and_sandbox: true`. It
+Full local access requires `full_access: true`. It
 can write files, mutate git state, use network/DNS, and install packages.

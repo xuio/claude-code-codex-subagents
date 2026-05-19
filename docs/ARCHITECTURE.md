@@ -40,7 +40,9 @@ The resolver checks candidates in this order:
 4. `CODEX_BIN`.
 5. `codex` on `PATH`.
 
-`codex_status` reports the resolved binary and source.
+The `codex://status` resource reports the resolved binary and source. The
+tool-callable `codex_status` helper is hidden unless
+`CODEX_SUBAGENTS_ENABLE_DEBUG_TOOLS=1`.
 
 ## Safety Boundary
 
@@ -51,8 +53,7 @@ argument list.
 Nested subagent MCP/skills/extra config is written into a temporary Codex home
 instead of being exposed through argv. The temp home is removed after the run.
 
-Full access is available only when the tool call sets
-`dangerously_bypass_approvals_and_sandbox: true`.
+Full access is available only when the tool call sets `full_access: true`.
 
 ## Sessions And Durability
 
@@ -62,8 +63,9 @@ metadata needed to reattach to a Codex thread; prompt text and environment value
 are not persisted.
 
 After an MCP runtime shutdown, app-server sessions with a Codex thread id are
-preserved as recoverable. `codex_session_recover` reattaches with `thread/resume`
-and treats `thread/read` as an optional capability.
+preserved as recoverable internally. The default Claude-facing flow is to keep the
+`session_id` returned by `codex_task` and use `codex_followup` while the MCP
+process is alive; hidden debug tools can inspect lower-level recovery state.
 
 Async one-shot jobs are process-local and do not survive MCP restarts. Their tool
 results advertise this limitation and recommend persistent sessions for recoverable

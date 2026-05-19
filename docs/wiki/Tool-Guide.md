@@ -6,10 +6,10 @@ Use the intuitive front-door tools first.
 | --- | --- |
 | One Codex task | `codex_task` |
 | Several independent tasks | `codex_task_group` |
-| Persistent session | `codex_session_start`, `codex_session_prompt` |
-| Long-running session | `codex_session_start`, `codex_session_status`, `codex_session_wait`, `codex_session_steer` |
-| Session lifecycle | `codex_sessions`, `codex_session_recover`, `codex_session_cancel` |
-| Diagnostics | `codex_status`, `codex_doctor`, `codex_export_debug_bundle` |
+| Persistent session | `codex_task`, then `codex_followup` |
+| Long-running session | `codex_task` with `background: true`, then `codex_followup` |
+| Live steering | `codex_followup` with `mode: "steer"` |
+| Diagnostics | Resources `codex://status`, `codex://doctor`, `codex://usage` |
 
 ## One Agent
 
@@ -29,8 +29,10 @@ Ask Claude to use Codex Spark, or pass:
 
 ```json
 {
-  "model_preset": "spark",
-  "reasoning_effort": "medium"
+  "advanced": {
+    "model": "spark"
+  },
+  "reasoning": "medium"
 }
 ```
 
@@ -40,7 +42,7 @@ Default mode is read-only. For explicit unrestricted Codex work:
 
 ```json
 {
-  "dangerously_bypass_approvals_and_sandbox": true
+  "full_access": true
 }
 ```
 

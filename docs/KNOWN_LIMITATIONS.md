@@ -28,13 +28,14 @@ Legacy async one-shot jobs are process-local. They keep Claude responsive during
 long one-shot work, but they do not survive MCP process restart. These legacy
 tools are hidden unless `CODEX_SUBAGENTS_ENABLE_LEGACY_TOOLS=1` is set.
 
-Use `codex_session_start` for long-running work that should be recoverable after
-Claude Code or the MCP server restarts.
+Use `codex_task` with `background: true` for long-running work, then keep the
+returned `session_id` and call `codex_followup` with `mode: "wait"` or
+`mode: "steer"`.
 
 ## Real Steering Requires App-Server
 
-`codex_session_steer` delivers live steering only when the session is running
-through Codex app-server and reports `supportsRealSteering: true`.
+`codex_followup` with `mode: "steer"` delivers live steering only when the
+session is running through Codex app-server.
 
 If app-server is unavailable and the session falls back to `codex exec`, steering
 degrades to a high-priority queued follow-up turn. It cannot alter an already
@@ -46,7 +47,7 @@ The default sandbox is read-only. Full local access requires this per-call flag:
 
 ```json
 {
-  "dangerously_bypass_approvals_and_sandbox": true
+  "full_access": true
 }
 ```
 
@@ -57,15 +58,16 @@ explicitly asks for that capability.
 ## Nested Subagents Can Increase Cost And Latency
 
 Nested Codex subagents are supported, including Spark. Keep nested work scoped,
-set explicit `subagent_tasks`, and keep `subagent_runtime.max_depth` at `1` unless
-recursive delegation is deliberately needed.
+set explicit `advanced.subagent_tasks`, and keep
+`advanced.subagent_runtime.max_depth` at `1` unless recursive delegation is
+deliberately needed.
 
 ## Claude Tool Choice Still Benefits From Clear Prompts
 
-The plugin has a skill, tool descriptions, and `codex_choose_tool`, but Claude can
+The plugin has a skill, tool descriptions, and `codex://usage`, but Claude can
 still make better choices when the user names the intended shape:
 
 - "ask one Codex agent"
 - "run three Codex agents in parallel"
-- "start a long-running Codex session"
+- "start Codex in the background"
 - "steer the running Codex session"

@@ -68,12 +68,11 @@ function assert(condition, message, details) {
 const prompt = `Validate the codex-subagents Claude Code plugin from inside Claude Code. Use only the codex-subagents MCP tools. Use this exact fake Codex binary for every Codex tool call: ${fakeCodex}. Use this exact project_dir for every agent tool call: ${projectDir}.
 
 Perform exactly these checks:
-1. Call codex_status with codex_bin set to the fake Codex binary. Verify ok is true and binary.source is explicit.
-2. Call codex_task with description "Claude inside single" and prompt "claude-inside-single RUN_COMMAND_EVENT", project_dir, codex_bin, model_preset "spark", reasoning_effort "low", timeout_ms 60000. Verify ok true, sandbox read-only, cwd equals project_dir, model is gpt-5.3-codex-spark, and command event parsing includes command "rg example".
-3. Call codex_task_group with two tasks named alpha and beta, prompts "claude-inside-alpha DELAY_MS=40" and "claude-inside-beta DELAY_MS=40", project_dir on each task, codex_bin at the shared level, max_parallel 2. Verify ok true and two successful agents are returned with cwd equal to project_dir.
-4. Call codex_task with description "Claude inside nested" and prompt "claude-inside-nested", project_dir, codex_bin, model_preset "spark", codex_subagents containing one custom agent named "ui_spark" with description "Fast focused UI iteration.", developer_instructions "Stay scoped and concise.", model_preset "spark", reasoning_effort "medium", sandbox "read-only"; subagent_tasks containing one task for agent "ui_spark" with name "toolbar" and prompt "Inspect the toolbar."; subagent_runtime max_threads 4 and max_depth 2. Verify ok true, model is gpt-5.3-codex-spark, codexSubagents.customAgents includes ui_spark, requestedTasks is 1, and tempCodexHomeUsed is true.
+1. Call codex_task with description "Claude inside single" and prompt "claude-inside-single RUN_COMMAND_EVENT", project_dir, advanced.codex_bin set to the fake Codex binary, advanced.model "spark", reasoning "low", and advanced.timeout_ms 60000. Verify ok true, diagnostics.sandbox read-only, diagnostics.cwd equals project_dir, diagnostics.model is gpt-5.3-codex-spark, command event parsing includes command "rg example", and a session_id is returned.
+2. Call codex_task_group with two tasks named alpha and beta, prompts "claude-inside-alpha DELAY_MS=40" and "claude-inside-beta DELAY_MS=40", project_dir on each task, advanced.codex_bin at the shared level, max_parallel 2. Verify ok true and two successful results are returned with diagnostics.cwd equal to project_dir and each result has a session_id.
+3. Call codex_task with description "Claude inside nested" and prompt "claude-inside-nested", project_dir, advanced.codex_bin, advanced.model "spark", advanced.codex_subagents containing one custom agent named "ui_spark" with description "Fast focused UI iteration.", developer_instructions "Stay scoped and concise.", model_preset "spark", reasoning_effort "medium", sandbox "read-only"; advanced.subagent_tasks containing one task for agent "ui_spark" with name "toolbar" and prompt "Inspect the toolbar."; advanced.subagent_runtime max_threads 4 and max_depth 2. Verify ok true, diagnostics.model is gpt-5.3-codex-spark, diagnostics.event_summary is present, and result includes claude-inside-nested.
 
-Return exactly one compact JSON object and no markdown. Shape: {"ok": boolean, "checks": {"status": boolean, "single": boolean, "parallel": boolean, "nested": boolean}, "details": {"statusSource": string, "singleModel": string, "parallelCount": number, "nestedTempHome": boolean}}`;
+Return exactly one compact JSON object and no markdown. Shape: {"ok": boolean, "checks": {"single": boolean, "parallel": boolean, "nested": boolean}, "details": {"singleModel": string, "parallelCount": number, "singleSession": boolean, "nestedModel": string}}`;
 
 const { version, binary } = await resolveClaudeCodeBinary();
 console.log(`Using Claude Code for orchestration ${version}: ${binary}`);
@@ -89,7 +88,6 @@ const result = spawnSync(
     "local",
     "--allowedTools",
     [
-      "mcp__plugin_codex-subagents_codex-subagents__codex_status",
       "mcp__plugin_codex-subagents_codex-subagents__codex_task",
       "mcp__plugin_codex-subagents_codex-subagents__codex_task_group",
     ].join(","),
@@ -134,18 +132,17 @@ assert(
 
 const validation = extractJsonResult(envelope.result);
 assert(validation.ok === true, "Claude should report overall success", validation);
-assert(validation.checks?.status === true, "Claude should validate codex_status", validation);
 assert(validation.checks?.single === true, "Claude should validate codex_task", validation);
 assert(validation.checks?.parallel === true, "Claude should validate codex_task_group", validation);
 assert(validation.checks?.nested === true, "Claude should validate nested Spark subagents", validation);
-assert(validation.details?.statusSource === "explicit", "codex_status should use explicit fake binary", validation);
 assert(
   validation.details?.singleModel === "gpt-5.3-codex-spark",
   "single run should use Spark preset",
   validation,
 );
 assert(validation.details?.parallelCount === 2, "parallel run should return two agents", validation);
-assert(validation.details?.nestedTempHome === true, "nested run should use temp Codex home", validation);
+assert(validation.details?.singleSession === true, "single run should return a session_id", validation);
+assert(validation.details?.nestedModel === "gpt-5.3-codex-spark", "nested run should use Spark", validation);
 
 console.log(
   `Claude orchestration passed in ${envelope.duration_ms}ms, cost $${envelope.total_cost_usd}`,

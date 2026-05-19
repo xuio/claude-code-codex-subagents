@@ -1,7 +1,7 @@
 # Troubleshooting
 
-Start with `codex_status` and `codex_doctor`. They do not invoke a model and are
-safe to run during installation or debugging.
+Start with the MCP resources `codex://status` and `codex://doctor`. They do not
+invoke a model and are safe to read during installation or debugging.
 
 ## Codex Binary Is Not Found
 
@@ -12,7 +12,7 @@ npm run build
 claude --plugin-dir .
 ```
 
-Then ask Claude to call `codex_status`.
+Then ask Claude to read `codex://status`.
 
 The resolver prefers:
 
@@ -54,19 +54,19 @@ the low-level tool names.
 
 ## A Long Run Times Out
 
-Prefer session or async tools for long work:
+Prefer the native background/follow-up flow for long work:
 
-- `codex_session_start`
-- `codex_session_status`
-- `codex_session_wait`
-- `codex_session_steer`
+- `codex_task` with `background: true`
+- `codex_followup` with `mode: "wait"`
+- `codex_followup` with `mode: "steer"`
 
 Persistent sessions are the better choice when the work must survive an MCP
 restart. Async one-shot jobs are process-local and do not survive restarts.
 
 ## Session Recovery Fails
 
-Use `codex_session_status`, then `codex_session_recover`.
+Use `codex_followup` with `mode: "wait"` first. If the server restarted, start a
+new `codex_task` unless you are deliberately using hidden debug session tools.
 
 Check:
 
@@ -118,7 +118,8 @@ export CODEX_SUBAGENTS_LOG_LEVEL=silent
 
 ## Export A Debug Bundle
 
-Ask Claude to call `codex_export_debug_bundle`, or run:
+Set `CODEX_SUBAGENTS_ENABLE_DEBUG_TOOLS=1` and ask Claude to call
+`codex_export_debug_bundle`, or run:
 
 ```sh
 npm run diagnostics

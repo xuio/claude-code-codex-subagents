@@ -45,4 +45,4 @@ npm run update:local
 - Approvals: `approval_policy="never"`.
 - Sessions: Codex app-server by default, exec fallback when allowed.
 - Logging: verbose JSONL on stderr.
-- Full access: explicit per-call opt-in with `dangerously_bypass_approvals_and_sandbox`.
+- Full access: explicit per-call opt-in with `full_access`.

@@ -5,7 +5,8 @@ Welcome to the `claude-code-codex-subagents` wiki.
 This project is a Claude Code plugin that lets Claude launch OpenAI Codex agents
 through a daemonless stdio MCP server. It is read-only by default, supports
 parallel Codex agents, supports Codex Spark, and provides persistent Codex
-sessions with live steering through Codex app-server.
+sessions through the native `codex_task`/`codex_followup` flow with live
+steering through Codex app-server.
 
 ## Start Here
 

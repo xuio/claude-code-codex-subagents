@@ -78,7 +78,7 @@ Codex should stay read-only and include the token AUTODISCOVERY_OK in its reply.
 After the Codex result comes back, return exactly one compact JSON object and no markdown. Shape: {"ok": boolean, "tokenSeen": boolean, "model": string, "cwd": string}. Set ok true when the Codex tool call completed successfully.`;
 
   const systemPrompt =
-    "You are validating the codex-subagents plugin. You may use Skill only for codex-subagents guidance, then codex_choose_tool, codex_usage_guide, or codex_task. Do not use Bash, Read, shell commands, or filesystem inspection. The MCP server already resolves the Codex binary.";
+    "You are validating the codex-subagents plugin. You may use Skill only for codex-subagents guidance, then codex_task. Do not use Bash, Read, shell commands, or filesystem inspection. The MCP server already resolves the Codex binary.";
   const resultSchema = JSON.stringify({
     type: "object",
     additionalProperties: false,
@@ -105,8 +105,6 @@ After the Codex result comes back, return exactly one compact JSON object and no
       "local",
       "--allowedTools",
       [
-        "mcp__plugin_codex-subagents_codex-subagents__codex_usage_guide",
-        "mcp__plugin_codex-subagents_codex-subagents__codex_choose_tool",
         "mcp__plugin_codex-subagents_codex-subagents__codex_task",
         "Skill",
       ].join(","),
@@ -168,18 +166,15 @@ After the Codex result comes back, return exactly one compact JSON object and no
     .trim()
     .split("\n")
     .map((line) => JSON.parse(line));
-  assert(calls.length >= 1, "Fake Codex should have been invoked", calls);
-  assert(calls[0].cwd === projectDir, "Fake Codex should run in the requested project", calls[0]);
-  assert(
-    calls[0].args.includes("--model") &&
-      calls[0].args[calls[0].args.indexOf("--model") + 1] === "gpt-5.3-codex-spark",
-    "Fake Codex should be launched with the Spark preset",
-    calls[0],
+  const turnStart = calls.find(
+    (call) => call.method === "turn/start" && typeof call.prompt === "string" && call.prompt.includes("AUTODISCOVERY_OK"),
   );
+  assert(turnStart, "Fake Codex should have received the autodiscovery prompt", calls);
+  assert(turnStart.cwd === projectDir, "Fake Codex should run in the requested project", turnStart);
   assert(
-    !calls[0].args.some((arg) => arg.includes("service_tier=")),
+    !turnStart.args.some((arg) => arg.includes("service_tier=")),
     "Fake Codex should not be launched with an explicit service tier by default",
-    calls[0],
+    turnStart,
   );
 
   console.log(

@@ -360,7 +360,7 @@ export class CodexSessionManager {
       logger.warn("session.send_missing_thread", { sessionId: id });
       return {
         session: snapshot(session),
-        error: `Session has no Codex thread id yet; codex_session_start must complete successfully before codex_session_prompt.`,
+        error: `Session has no Codex thread id yet; codex_task must complete successfully before codex_followup can continue it.`,
       };
     }
 
@@ -418,16 +418,17 @@ export class CodexSessionManager {
       return { error: `Unknown session_id: ${id}` };
     }
     const wasActive = Boolean(session.controller);
-    if (session.protocol === "app-server" && session.appServer && session.activeTurn && !options.interruptCurrent) {
+    if (session.protocol === "app-server" && session.activeTurn && !options.interruptCurrent) {
+      const appServer = await this.waitForAppServerReady(session, 5_000);
       const activeCodexTurnId = await this.waitForAppServerActiveTurn(session, 5_000);
-      if (!activeCodexTurnId) {
+      if (!appServer || !activeCodexTurnId) {
         logger.warn("session.steer_app_server_not_ready", {
           sessionId: id,
           activeTurnId: session.activeTurn.id,
         });
       } else {
         try {
-          const delivered = await session.appServer.steer(prompt);
+          const delivered = await appServer.steer(prompt);
           if (!delivered.delivered) {
             logger.warn("session.steer_app_server_rejected", {
               sessionId: id,
@@ -1051,6 +1052,34 @@ export class CodexSessionManager {
       await new Promise((resolve) => setTimeout(resolve, 10));
     }
     return session.appServer?.activeTurnId;
+  }
+
+  private async waitForAppServerReady(
+    session: CodexSessionRecord,
+    timeoutMs: number,
+  ): Promise<CodexAppServerSession | undefined> {
+    const deadline = Date.now() + timeoutMs;
+    while (session.controller && session.activeTurn && session.protocol === "app-server" && Date.now() < deadline) {
+      if (session.appServer && !session.appServer.status().closed) return session.appServer;
+      const starting = session.appServerStarting;
+      if (starting) {
+        const remainingMs = Math.max(1, deadline - Date.now());
+        try {
+          return await Promise.race([
+            starting,
+            new Promise<undefined>((resolve) => setTimeout(resolve, remainingMs)),
+          ]);
+        } catch (error) {
+          logger.warn("session.steer_app_server_start_failed", {
+            sessionId: session.id,
+            error: errorForLog(error),
+          });
+          return session.appServer;
+        }
+      }
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+    return session.appServer;
   }
 
   private notifyTurn(turn: CodexSessionTurnRecord): void {

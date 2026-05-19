@@ -17,6 +17,7 @@ const transport = new StdioClientTransport({
     ...process.env,
     CODEX_SUBAGENTS_CODEX_BIN: fakeCodex,
     CODEX_SUBAGENTS_ENABLE_LEGACY_TOOLS: "1",
+    CODEX_SUBAGENTS_ENABLE_DEBUG_TOOLS: "1",
     CLAUDE_PROJECT_DIR: projectDir,
     CODEX_SUBAGENTS_SESSION_STATE_FILE: path.join(projectDir, "sessions.json"),
     FAKE_CODEX_RECORD_DIR: recordDir,

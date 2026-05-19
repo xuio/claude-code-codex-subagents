@@ -28,8 +28,8 @@ export function recoveryForError(error: unknown, context = "tool_call"): Recover
     return {
       recoverable: false,
       reason: "unknown_session",
-      recommendedAction: "Call codex_sessions or start a new Codex session.",
-      recommendedTool: "codex_sessions",
+      recommendedAction: "Use the session_id returned by codex_task or codex_task_group, or start a new codex_task.",
+      recommendedTool: "codex_task",
     };
   }
 
@@ -37,8 +37,8 @@ export function recoveryForError(error: unknown, context = "tool_call"): Recover
     return {
       recoverable: false,
       reason: "unknown_job",
-      recommendedAction: "Start a new persistent Codex session for long-running work.",
-      recommendedTool: "codex_session_start",
+      recommendedAction: "Start a new codex_task with background true for long-running work.",
+      recommendedTool: "codex_task",
     };
   }
 
@@ -46,8 +46,7 @@ export function recoveryForError(error: unknown, context = "tool_call"): Recover
     return {
       recoverable: true,
       reason: "backpressure",
-      recommendedAction: "Reduce max_parallel or wait briefly, then retry. Inspect codex_status for queue/session limits.",
-      recommendedTool: "codex_status",
+      recommendedAction: "Reduce max_parallel or wait briefly, then retry. Inspect codex://status for queue/session limits.",
       retryAfterMs: 2_000,
     };
   }
@@ -65,8 +64,7 @@ export function recoveryForError(error: unknown, context = "tool_call"): Recover
     return {
       recoverable: true,
       reason: "app_server_unavailable",
-      recommendedAction: "Retry once. If it repeats, use codex_status or force CODEX_SUBAGENTS_SESSION_PROTOCOL=exec.",
-      recommendedTool: "codex_status",
+      recommendedAction: "Retry once. If it repeats, inspect codex://status or force CODEX_SUBAGENTS_SESSION_PROTOCOL=exec.",
       retryAfterMs: 1_000,
     };
   }
@@ -82,8 +80,7 @@ export function recoveryForError(error: unknown, context = "tool_call"): Recover
   return {
     recoverable: true,
     reason: context,
-    recommendedAction: "Retry once if the failure looks transient; otherwise call codex_doctor and inspect the verbose logs.",
-    recommendedTool: "codex_doctor",
+    recommendedAction: "Retry once if the failure looks transient; otherwise inspect codex://doctor and the verbose logs.",
     retryAfterMs: 1_000,
   };
 }
@@ -103,8 +100,8 @@ export function recoveryForAgentResult(result: Pick<AgentRunResult, "ok" | "stat
     return {
       recoverable: true,
       reason: result.timeoutReason ?? "timeout",
-      recommendedAction: "Retry with a larger timeout, start a Codex session for long-running work, or split the task into smaller independent prompts.",
-      recommendedTool: "codex_session_start",
+      recommendedAction: "Retry with a larger timeout, use codex_task with background true for long-running work, or split the task into smaller independent prompts.",
+      recommendedTool: "codex_task",
       retryAfterMs: 1_000,
     };
   }
@@ -120,8 +117,7 @@ export function recoveryForAgentResult(result: Pick<AgentRunResult, "ok" | "stat
   return {
     recoverable: true,
     reason: "codex_failed",
-    recommendedAction: "Inspect stderr/eventSummary.errors. Retry with codex_doctor context if the failure appears environmental.",
-    recommendedTool: "codex_doctor",
+    recommendedAction: "Inspect diagnostics.event_summary.errors and stderr_tail. Retry after checking codex://doctor if the failure appears environmental.",
   };
 }
 
@@ -136,19 +132,19 @@ export function recoveryForWait(
       reason: "wait_cancelled",
       recommendedAction:
         kind === "codex_session"
-          ? "The wait request was cancelled, but the session may still be running. Inspect it before deciding whether to cancel it."
-          : "The wait request was cancelled, but the job may still be running. Inspect it before deciding whether to cancel it.",
-      recommendedTool: kind === "codex_session" ? "codex_session_status" : "codex_status",
+          ? "The wait request was cancelled, but the session may still be running. Use codex_followup mode wait before deciding whether to start new work."
+          : "The wait request was cancelled, but the job may still be running. Inspect codex://status before deciding whether to start new work.",
+      recommendedTool: kind === "codex_session" ? "codex_followup" : undefined,
     };
   }
   return {
     recoverable: true,
     reason: "wait_timeout",
-    recommendedAction:
-      kind === "codex_session"
-        ? "Call codex_session_status to inspect progress or codex_session_wait again with a larger timeout."
-        : "Call codex_status to inspect queue state, then retry or switch to codex_session_start for long-running work.",
-    recommendedTool: kind === "codex_session" ? "codex_session_status" : "codex_status",
+      recommendedAction:
+        kind === "codex_session"
+        ? "Use codex_followup mode wait again with a larger timeout, or mode steer if the active work should be redirected."
+        : "Inspect codex://status for queue state, then retry or switch to codex_task with background true for long-running work.",
+    recommendedTool: kind === "codex_session" ? "codex_followup" : undefined,
     retryAfterMs: 1_000,
   };
 }

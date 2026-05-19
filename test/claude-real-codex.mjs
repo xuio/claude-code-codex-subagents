@@ -70,12 +70,11 @@ const prompt = `Validate the codex-subagents Claude Code plugin from inside Clau
 Keep every Codex prompt small and read-only.
 
 Perform exactly these checks:
-1. Call codex_status with codex_bin set to the real Codex binary. Verify ok is true, binary.source is explicit, and version contains codex-cli.
-2. Call codex_task with description "Real single validation" and prompt "Real Claude-to-Codex validation. Stay read-only. Do not modify files. Reply exactly REAL_CLAUDE_SINGLE_OK", project_dir, codex_bin, model_preset "spark", reasoning_effort "low", timeout_ms 180000. Verify ok true, sandbox read-only, cwd equals project_dir, model is gpt-5.3-codex-spark, and result or raw_output.final_message contains REAL_CLAUDE_SINGLE_OK.
-3. Call codex_task_group with two tasks named alpha and beta, prompts "Stay read-only. Reply exactly REAL_PARALLEL_ALPHA_OK" and "Stay read-only. Reply exactly REAL_PARALLEL_BETA_OK", project_dir on each task, codex_bin at the shared level, model_preset "spark", reasoning_effort "low", max_parallel 2, timeout_ms 180000. Verify ok true, two successful agents are returned with cwd equal to project_dir, and their final messages contain the requested tokens.
-4. Call codex_task with description "Real nested validation" and prompt "Real nested Codex validation. Stay read-only. Spawn the requested child subagent, wait for it, and if it returns CHILD_OK then reply exactly REAL_CLAUDE_NESTED_OK. Do not modify files.", project_dir, codex_bin, model_preset "spark", reasoning_effort "low", timeout_ms 300000, codex_subagents containing one custom agent named "ui_spark" with description "Fast focused validation agent.", developer_instructions "Stay read-only. For this validation task, reply exactly CHILD_OK and do not modify files.", model_preset "spark", reasoning_effort "low", sandbox "read-only"; subagent_tasks containing one task for agent "ui_spark" with name "child" and prompt "Reply exactly CHILD_OK. Do not modify files."; subagent_runtime max_threads 2, max_depth 1, job_max_runtime_seconds 180. Verify ok true, model is gpt-5.3-codex-spark, result or raw_output.final_message contains REAL_CLAUDE_NESTED_OK, customAgents includes ui_spark, requestedTasks is 1, and tempCodexHomeUsed is true.
+1. Call codex_task with description "Real single validation" and prompt "Real Claude-to-Codex validation. Stay read-only. Do not modify files. Reply exactly REAL_CLAUDE_SINGLE_OK", project_dir, reasoning "low", advanced.codex_bin, advanced.model "spark", and advanced.timeout_ms 180000. Verify ok true, diagnostics.sandbox read-only, diagnostics.cwd equals project_dir, diagnostics.model is gpt-5.3-codex-spark, result contains REAL_CLAUDE_SINGLE_OK, and a session_id is returned.
+2. Call codex_task_group with two tasks named alpha and beta, prompts "Stay read-only. Reply exactly REAL_PARALLEL_ALPHA_OK" and "Stay read-only. Reply exactly REAL_PARALLEL_BETA_OK", project_dir on each task, advanced.codex_bin at the shared level, advanced.model "spark", reasoning "low", max_parallel 2, and advanced.timeout_ms 180000. Verify ok true, two successful results are returned with diagnostics.cwd equal to project_dir, and their results contain the requested tokens.
+3. Call codex_task with description "Real nested validation" and prompt "Real nested Codex validation. Stay read-only. Spawn the requested child subagent, wait for it, and if it returns CHILD_OK then reply exactly REAL_CLAUDE_NESTED_OK. Do not modify files.", project_dir, reasoning "low", advanced.codex_bin, advanced.model "spark", advanced.timeout_ms 300000, advanced.codex_subagents containing one custom agent named "ui_spark" with description "Fast focused validation agent.", developer_instructions "Stay read-only. For this validation task, reply exactly CHILD_OK and do not modify files.", model_preset "spark", reasoning_effort "low", sandbox "read-only"; advanced.subagent_tasks containing one task for agent "ui_spark" with name "child" and prompt "Reply exactly CHILD_OK. Do not modify files."; advanced.subagent_runtime max_threads 2, max_depth 1, job_max_runtime_seconds 180. Verify ok true, diagnostics.model is gpt-5.3-codex-spark and result contains REAL_CLAUDE_NESTED_OK.
 
-Return exactly one compact JSON object and no markdown. Shape: {"ok": boolean, "checks": {"status": boolean, "single": boolean, "parallel": boolean, "nested": boolean}, "details": {"statusVersion": string, "singleModel": string, "parallelCount": number, "nestedTempHome": boolean}}`;
+Return exactly one compact JSON object and no markdown. Shape: {"ok": boolean, "checks": {"single": boolean, "parallel": boolean, "nested": boolean}, "details": {"singleModel": string, "parallelCount": number, "singleSession": boolean, "nestedModel": string}}`;
 
 const systemPrompt =
   "You are a deterministic Claude Code plugin validation harness. You may use Skill only to load codex-subagents guidance, then use only the explicitly named codex-subagents MCP tools. Do not use Bash, Read, files, shell commands, or any other non-MCP tool. Return only the requested JSON.";
@@ -98,9 +97,8 @@ const result = spawnSync(
     "--setting-sources",
     "local",
     "--disable-slash-commands",
-    "--allowedTools",
+      "--allowedTools",
       [
-        "mcp__plugin_codex-subagents_codex-subagents__codex_status",
         "mcp__plugin_codex-subagents_codex-subagents__codex_task",
         "mcp__plugin_codex-subagents_codex-subagents__codex_task_group",
         "Skill",
@@ -145,22 +143,17 @@ assert(
 assert(String(envelope.result ?? "").trim() !== "", "Claude real Codex orchestration returned an empty result", envelope);
 const validation = extractJsonResult(envelope.result);
 assert(validation.ok === true, "Claude should report overall success", validation);
-assert(validation.checks?.status === true, "Claude should validate codex_status", validation);
 assert(validation.checks?.single === true, "Claude should validate real codex_task", validation);
 assert(validation.checks?.parallel === true, "Claude should validate real codex_task_group", validation);
 assert(validation.checks?.nested === true, "Claude should validate real nested Spark subagents", validation);
-assert(
-  String(validation.details?.statusVersion ?? "").includes("codex-cli"),
-  "codex_status should return the real Codex CLI version",
-  validation,
-);
 assert(
   validation.details?.singleModel === "gpt-5.3-codex-spark",
   "single real run should use Spark preset",
   validation,
 );
 assert(validation.details?.parallelCount === 2, "parallel real run should return two agents", validation);
-assert(validation.details?.nestedTempHome === true, "nested real run should use temp Codex home", validation);
+assert(validation.details?.singleSession === true, "single real run should return a session_id", validation);
+assert(validation.details?.nestedModel === "gpt-5.3-codex-spark", "nested real run should use Spark", validation);
 
 console.log(
   `Claude real Codex orchestration passed in ${envelope.duration_ms}ms, Claude cost $${envelope.total_cost_usd}`,
