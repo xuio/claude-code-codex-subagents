@@ -43,7 +43,7 @@ const usageGuide = [
   "- Prefer start_codex_session_async when Claude needs a session id immediately while Codex keeps working in the background.",
   "- Use send_codex_session_prompt to add prompts to an active or idle Codex session queue without losing context.",
   "- Use steer_codex_session to send real live steering into a running app-server turn; use interrupt_current only when the active turn should be cancelled and redirected. If a session had to fall back to codex exec, steering degrades to the next high-priority queued turn.",
-  "- Use get_codex_session or wait_codex_session to inspect or wait for long-running Codex sessions.",
+  "- Use get_codex_session or wait_codex_session to inspect or wait for long-running Codex sessions. Session snapshots include appServer.supports and appServerFallbackReason for protocol diagnostics.",
   "- Use codex_choose_tool if you are unsure which Codex tool fits the request.",
   "- Use run_agent, run_agents, run_agents_aggregate, start_session, and send_session_prompt for lower-level/manual control; they are compatibility tools behind the intuitive front doors.",
   "- Use run_agents_aggregate when Claude needs a concise consensus object from several independent Codex agents.",
@@ -56,6 +56,7 @@ const usageGuide = [
   "- Keep sandbox read-only unless the user explicitly asks for a different sandbox.",
   "- If the user explicitly asks for non-sandbox/full local capabilities, set dangerously_bypass_approvals_and_sandbox true. This maps to Codex's --dangerously-bypass-approvals-and-sandbox flag and allows DNS/network plus unrestricted file and git writes.",
   "- Approvals are non-interactive; do not expect Codex to ask permission.",
+  "- If wait_codex_session returns completed false with timeoutReason \"wait_timeout\", the session is still running unless its status says otherwise.",
   "- Prefer model_preset \"spark\" for responsive focused checks, small reviews, UI iteration, and sidecar analysis.",
   "- Use reasoning_effort \"medium\" by default, \"low\" for simple checks, and \"high\" or \"xhigh\" only for difficult analysis. Do not use \"minimal\"; Codex currently auto-attaches web_search and the API rejects that tool with minimal reasoning.",
   "- Do not combine model_preset \"spark\" with reasoning_summary values other than \"none\"; Spark does not support reasoning.summary.",
@@ -1824,6 +1825,7 @@ server.registerTool(
         if (waited.error || !waited.session) return jsonResult({ error: waited.error }, true);
         return jsonResult({
           completed: waited.completed,
+          timeoutReason: waited.timeoutReason,
           session: compactSessionSnapshotForMcp(waited.session),
           turn: waited.turn,
         });
@@ -1892,6 +1894,16 @@ server.registerTool(
           fullAccessFlag: "dangerously_bypass_approvals_and_sandbox",
           defaultServiceTier: "codex-default",
           defaultSessionProtocol: process.env.CODEX_SUBAGENTS_SESSION_PROTOCOL === "exec" ? "exec" : "app-server",
+          appServerProtocol: {
+            transport: "stdio",
+            command: "codex app-server --listen stdio://",
+            default: process.env.CODEX_SUBAGENTS_SESSION_PROTOCOL === "exec" ? "exec" : "app-server",
+            requiredMethods: ["initialize", "thread/start", "turn/start"],
+            liveSteeringMethods: ["turn/steer", "turn/interrupt"],
+            passiveMethods: ["thread/read"],
+            fallbackToExec:
+              process.env.CODEX_SUBAGENTS_DISABLE_EXEC_FALLBACK === "1" ? "disabled" : "enabled",
+          },
           appServerFallback: process.env.CODEX_SUBAGENTS_DISABLE_EXEC_FALLBACK === "1" ? "disabled" : "enabled",
           modelPresets: {
             codex: "gpt-5.3-codex",

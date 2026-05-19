@@ -204,13 +204,19 @@ try {
     calls,
   );
   assert(
-    calls.some((call) => call.prompt.includes("JSON_FINAL=review_findings") && call.args.includes("--output-schema")),
+    calls.some(
+      (call) =>
+        typeof call.prompt === "string" &&
+        call.prompt.includes("JSON_FINAL=review_findings") &&
+        call.args.includes("--output-schema"),
+    ),
     "structured output contracts should pass --output-schema to Codex",
     calls,
   );
   assert(
     calls.some(
       (call) =>
+        typeof call.prompt === "string" &&
         call.prompt.includes("full access path") &&
         call.args.includes("--dangerously-bypass-approvals-and-sandbox") &&
         !call.args.includes("--sandbox"),

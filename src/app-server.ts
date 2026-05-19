@@ -29,6 +29,26 @@ type AppServerRequestMethod =
   | "turn/interrupt"
   | "thread/read";
 
+export interface AppServerCapabilities {
+  initialize: boolean;
+  threadStart: boolean;
+  turnStart: boolean;
+  turnSteer: boolean;
+  turnInterrupt: boolean;
+  threadRead: boolean;
+}
+
+export interface AppServerStatus {
+  id: string;
+  protocol: "stdio";
+  userAgent?: string;
+  codexHome?: string;
+  threadId?: string;
+  activeTurnId?: string;
+  supports: AppServerCapabilities;
+  lastError?: string;
+}
+
 export class AppServerUnavailableError extends Error {
   constructor(message: string) {
     super(message);
@@ -66,6 +86,7 @@ interface PendingRequest {
 
 interface ActiveTurnState {
   turnId: string;
+  sessionTurnId?: string;
   started: number;
   options: AgentRunOptions;
   stdout: LimitedText;
@@ -74,9 +95,11 @@ interface ActiveTurnState {
   finalMessage: string;
   completed?: boolean;
   status?: AgentRunResult["status"];
+  timeoutReason?: AgentRunResult["timeoutReason"];
   error?: string;
   resolve: (result: AgentRunResult) => void;
   publishSnapshot: (force?: boolean) => void;
+  resetIdleTimeout?: () => void;
   lastSnapshotAt: number;
 }
 
@@ -176,11 +199,26 @@ export class CodexAppServerSession {
   private readonly id = makeLogId("appserver");
   private readonly pending = new Map<string, PendingRequest>();
   private readonly notificationHandlers = new Set<(message: JsonObject) => void>();
+  private readonly closedPromise: Promise<void>;
+  private resolveClosed: (() => void) | undefined;
   private lineBuffer = "";
   private requestCounter = 0;
   private activeTurn?: ActiveTurnState;
+  private acceptingStartNotifications = false;
+  private pendingStartNotifications: JsonObject[] = [];
   private closed = false;
   private spawnError?: Error;
+  private userAgent: string | undefined;
+  private codexHome: string | undefined;
+  private lastError: string | undefined;
+  private readonly capabilities: AppServerCapabilities = {
+    initialize: false,
+    threadStart: false,
+    turnStart: false,
+    turnSteer: true,
+    turnInterrupt: true,
+    threadRead: true,
+  };
 
   private constructor(
     private readonly child: ChildProcessWithoutNullStreams,
@@ -189,23 +227,40 @@ export class CodexAppServerSession {
     public threadId: string,
     readonly preparedSubagents: PreparedSubagents,
     readonly env: NodeJS.ProcessEnv,
+    private readonly logContext: { sessionId?: string } = {},
   ) {
+    this.closedPromise = new Promise((resolve) => {
+      this.resolveClosed = resolve;
+    });
     this.child.stdout.setEncoding("utf8");
     this.child.stderr.setEncoding("utf8");
     this.child.stdout.on("data", (chunk: string) => this.handleStdout(chunk));
     this.child.stderr.on("data", (chunk: string) => this.handleStderr(chunk));
     this.child.once("error", (error) => {
       this.spawnError = error;
+      this.lastError = error.message;
       this.rejectAll(new AppServerUnavailableError(`Codex app-server failed: ${error.message}`));
     });
     this.child.once("close", (code, signal) => {
       this.closed = true;
-      logger.warn("codex.app_server.closed", { appServerId: this.id, exitCode: code, signal });
-      this.rejectAll(new AppServerUnavailableError(`Codex app-server exited with code ${code ?? "null"} signal ${signal ?? "null"}.`));
+      this.resolveClosed?.();
+      const message = `Codex app-server exited with code ${code ?? "null"} signal ${signal ?? "null"}.`;
+      this.lastError = message;
+      logger.warn("codex.app_server.closed", {
+        ...this.logContext,
+        appServerId: this.id,
+        threadId: this.threadId || undefined,
+        exitCode: code,
+        signal,
+      });
+      this.rejectAll(new AppServerUnavailableError(message));
     });
   }
 
-  static async create(options: AgentRunOptions): Promise<CodexAppServerSession> {
+  static async create(
+    options: AgentRunOptions,
+    logContext: { sessionId?: string } = {},
+  ): Promise<CodexAppServerSession> {
     const mergedEnv = { ...process.env, ...options.env };
     const cwd = await resolveWorkingDirectory(options.projectDir ?? options.cwd, mergedEnv);
     const codexBinary = resolveCodexBinary({
@@ -231,8 +286,9 @@ export class CodexAppServerSession {
       shell: false,
       detached: process.platform !== "win32",
     });
-    const session = new CodexAppServerSession(child, codexBinary, cwd, "", preparedSubagents, childEnv);
+    const session = new CodexAppServerSession(child, codexBinary, cwd, "", preparedSubagents, childEnv, logContext);
     logger.rawDebug("codex.app_server.spawn", {
+      ...session.logContext,
       appServerId: session.id,
       binary: codexBinary,
       cwd,
@@ -256,6 +312,7 @@ export class CodexAppServerSession {
       const threadId = thread.thread?.id;
       if (!threadId) throw new AppServerUnavailableError("Codex app-server did not return a thread id.");
       session.threadId = threadId;
+      session.capabilities.threadStart = true;
       return session;
     } catch (error) {
       await session.close();
@@ -264,20 +321,37 @@ export class CodexAppServerSession {
   }
 
   private async initialize(timeoutMs: number): Promise<void> {
-    await this.request("initialize", {
+    const initialized = await this.request("initialize", {
       clientInfo: { name: "claude-code-codex-subagents", version: "0.1.1" },
       capabilities: null,
-    }, timeoutMs);
+    }, timeoutMs) as JsonObject | undefined;
+    this.capabilities.initialize = true;
+    this.userAgent = typeof initialized?.userAgent === "string" ? initialized.userAgent : undefined;
+    this.codexHome = typeof initialized?.codexHome === "string" ? initialized.codexHome : undefined;
   }
 
   get activeTurnId(): string | undefined {
     return this.activeTurn?.turnId;
   }
 
+  status(): AppServerStatus {
+    return {
+      id: this.id,
+      protocol: "stdio",
+      userAgent: this.userAgent,
+      codexHome: this.codexHome,
+      threadId: this.threadId || undefined,
+      activeTurnId: this.activeTurnId,
+      supports: { ...this.capabilities },
+      lastError: this.lastError,
+    };
+  }
+
   async startTurn(
     options: AgentRunOptions,
     abortSignal?: AbortSignal,
     onSnapshot?: (snapshot: AgentRunPartial) => void,
+    turnLogContext: { sessionTurnId?: string } = {},
   ): Promise<AgentRunResult> {
     if (this.activeTurn) throw new Error(`Codex app-server already has an active turn: ${this.activeTurn.turnId}`);
     const started = Date.now();
@@ -288,26 +362,43 @@ export class CodexAppServerSession {
     const stderr = new LimitedText(Math.min(maxOutputChars, 20_000));
     let timeout: NodeJS.Timeout | undefined;
     let idleTimeout: NodeJS.Timeout | undefined;
+    let forceFinishTimeout: NodeJS.Timeout | undefined;
     let abortHandler: (() => void) | undefined;
+    let settled = false;
     let timedOut = false;
     let timeoutReason: AgentRunResult["timeoutReason"];
 
     const prompt = `${this.preparedSubagents.promptPrefix}${options.prompt}`;
-    const turnResponse = await this.request("turn/start", {
-      threadId: this.threadId,
-      input: [userText(prompt)],
-      cwd: this.cwd,
-      approvalPolicy: "never",
-      sandboxPolicy: sandboxPolicy(options),
-      model,
-      serviceTier: options.serviceTier ?? null,
-      effort: reasoningEffort,
-      summary: reasoningSummary ?? null,
-    }, options.spawnTimeoutMs ?? 30_000) as { turn?: { id?: string } };
+    this.acceptingStartNotifications = true;
+    let turnResponse: { turn?: { id?: string } };
+    try {
+      turnResponse = await this.request("turn/start", {
+        threadId: this.threadId,
+        input: [userText(prompt)],
+        cwd: this.cwd,
+        approvalPolicy: "never",
+        sandboxPolicy: sandboxPolicy(options),
+        model,
+        serviceTier: options.serviceTier ?? null,
+        effort: reasoningEffort,
+        summary: reasoningSummary ?? null,
+      }, options.spawnTimeoutMs ?? 30_000) as { turn?: { id?: string } };
+    } catch (error) {
+      this.acceptingStartNotifications = false;
+      this.pendingStartNotifications = [];
+      throw error;
+    }
     const turnId = turnResponse.turn?.id;
-    if (!turnId) throw new AppServerUnavailableError("Codex app-server did not return a turn id.");
+    if (!turnId) {
+      this.acceptingStartNotifications = false;
+      this.pendingStartNotifications = [];
+      throw new AppServerUnavailableError("Codex app-server did not return a turn id.");
+    }
+    this.capabilities.turnStart = true;
 
     logger.rawDebug("codex.app_server.turn.start", {
+      ...this.logContext,
+      ...turnLogContext,
       appServerId: this.id,
       threadId: this.threadId,
       turnId,
@@ -349,6 +440,8 @@ export class CodexAppServerSession {
         },
       };
       logger[result.ok ? "rawInfo" : "rawError"]("codex.app_server.turn.finish", {
+        ...this.logContext,
+        ...turnLogContext,
         appServerId: this.id,
         threadId: this.threadId,
         turnId,
@@ -360,6 +453,11 @@ export class CodexAppServerSession {
     };
 
     const result = await new Promise<AgentRunResult>((resolve) => {
+      const resolveOnce = (result: AgentRunResult) => {
+        if (settled) return;
+        settled = true;
+        resolve(result);
+      };
       const publishSnapshot = (force = false) => {
         if (!onSnapshot) return;
         const active = this.activeTurn;
@@ -381,39 +479,60 @@ export class CodexAppServerSession {
 
       this.activeTurn = {
         turnId,
+        sessionTurnId: turnLogContext.sessionTurnId,
         started,
         options,
         stdout,
         stderr,
         summary,
         finalMessage: "",
-        resolve,
+        resolve: resolveOnce,
         publishSnapshot,
         lastSnapshotAt: 0,
       };
       publishSnapshot(true);
 
       const interrupt = (reason: "timeout" | "idle_timeout" | "cancelled") => {
+        if (settled) return;
         if (reason === "timeout" || reason === "idle_timeout") {
           timedOut = true;
           timeoutReason = reason;
+          if (this.activeTurn) this.activeTurn.timeoutReason = timeoutReason;
         }
-        void this.interrupt(turnId).catch((error) => {
-          summary.errors.push(`Codex app-server interrupt failed: ${error.message}`);
-          resolve(finish(reason === "cancelled" ? "cancelled" : "timeout", error.message));
-        });
+        const graceMs = options.terminateGraceMs ?? 2_000;
+        void this.interrupt(turnId)
+          .then(() => {
+            forceFinishTimeout = setTimeout(() => {
+              if (settled) return;
+              if (reason !== "cancelled") timeoutReason = "app_server_no_completion";
+              if (this.activeTurn) this.activeTurn.timeoutReason = timeoutReason;
+              const message = `Codex app-server did not report turn completion within ${graceMs}ms after ${reason} interrupt.`;
+              summary.errors.push(message);
+              resolveOnce(finish(reason === "cancelled" ? "cancelled" : "timeout", message));
+            }, graceMs);
+            forceFinishTimeout.unref();
+          })
+          .catch((error) => {
+            summary.errors.push(`Codex app-server interrupt failed: ${error.message}`);
+            resolveOnce(finish(reason === "cancelled" ? "cancelled" : "timeout", error.message));
+          });
         publishSnapshot(true);
       };
       abortHandler = () => interrupt("cancelled");
-      abortSignal?.addEventListener("abort", abortHandler, { once: true });
-      if (abortSignal?.aborted) interrupt("cancelled");
-
       const resetIdleTimeout = () => {
         if (!options.idleTimeoutMs) return;
         if (idleTimeout) clearTimeout(idleTimeout);
         idleTimeout = setTimeout(() => interrupt("idle_timeout"), options.idleTimeoutMs);
         idleTimeout.unref();
       };
+
+      if (this.activeTurn) this.activeTurn.resetIdleTimeout = resetIdleTimeout;
+      this.acceptingStartNotifications = false;
+      this.drainPendingStartNotifications();
+
+      abortSignal?.addEventListener("abort", abortHandler, { once: true });
+      if (abortSignal?.aborted) interrupt("cancelled");
+
       resetIdleTimeout();
       timeout = setTimeout(() => interrupt("timeout"), options.timeoutMs ?? 600_000);
       timeout.unref();
@@ -421,6 +540,7 @@ export class CodexAppServerSession {
 
     if (timeout) clearTimeout(timeout);
     if (idleTimeout) clearTimeout(idleTimeout);
+    if (forceFinishTimeout) clearTimeout(forceFinishTimeout);
     if (abortHandler) abortSignal?.removeEventListener("abort", abortHandler);
     this.activeTurn = undefined;
     return result;
@@ -429,30 +549,65 @@ export class CodexAppServerSession {
   async steer(prompt: string): Promise<{ delivered: boolean; turnId?: string }> {
     const turnId = this.activeTurn?.turnId;
     if (!turnId) return { delivered: false };
-    const response = await this.request("turn/steer", {
-      threadId: this.threadId,
-      expectedTurnId: turnId,
-      input: [userText(prompt)],
-    }, 10_000) as { turnId?: string };
+    let response: { turnId?: string };
+    try {
+      response = await this.request("turn/steer", {
+        threadId: this.threadId,
+        expectedTurnId: turnId,
+        input: [userText(prompt)],
+      }, 10_000) as { turnId?: string };
+    } catch (error) {
+      this.capabilities.turnSteer = false;
+      this.lastError = error instanceof Error ? error.message : String(error);
+      throw error;
+    }
+    this.capabilities.turnSteer = true;
     return { delivered: true, turnId: response.turnId ?? turnId };
   }
 
   async interrupt(turnId = this.activeTurn?.turnId): Promise<void> {
     if (!turnId) return;
-    await this.request("turn/interrupt", {
-      threadId: this.threadId,
-      turnId,
-    }, 10_000);
+    try {
+      await this.request("turn/interrupt", {
+        threadId: this.threadId,
+        turnId,
+      }, 10_000);
+      this.capabilities.turnInterrupt = true;
+    } catch (error) {
+      this.capabilities.turnInterrupt = false;
+      this.lastError = error instanceof Error ? error.message : String(error);
+      throw error;
+    }
   }
 
-  async close(): Promise<void> {
+  async close(status: "failed" | "cancelled" = "failed"): Promise<void> {
     this.closed = true;
-    this.rejectAll(new AppServerUnavailableError("Codex app-server session was closed."));
+    this.rejectAll(new AppServerUnavailableError("Codex app-server session was closed."), status);
     try {
-      this.child.kill("SIGTERM");
+      if (process.platform !== "win32" && this.child.pid) process.kill(-this.child.pid, "SIGTERM");
+      else this.child.kill("SIGTERM");
     } catch {
-      // Ignore shutdown races.
+      try {
+        this.child.kill("SIGTERM");
+      } catch {
+        // Ignore shutdown races.
+      }
     }
+    const graceMs = 2_000;
+    const force = setTimeout(() => {
+      try {
+        if (process.platform !== "win32" && this.child.pid) process.kill(-this.child.pid, "SIGKILL");
+        else this.child.kill("SIGKILL");
+      } catch {
+        // Ignore shutdown races.
+      }
+    }, graceMs);
+    force.unref();
+    await Promise.race([
+      this.closedPromise,
+      new Promise((resolve) => setTimeout(resolve, graceMs + 250)),
+    ]);
+    clearTimeout(force);
     await this.preparedSubagents.cleanup().catch(() => {});
   }
 
@@ -465,13 +620,21 @@ export class CodexAppServerSession {
     const id = `${Date.now().toString(36)}-${++this.requestCounter}`;
     const payload = { id, method, params };
     logger.rawDebug("codex.app_server.request", {
+      ...this.logContext,
+      sessionTurnId: this.activeTurn?.sessionTurnId,
       appServerId: this.id,
+      threadId: this.threadId || undefined,
+      activeTurnId: this.activeTurnId,
+      requestId: id,
+      method,
       payload: summarizeRawTrafficForLog(payload),
     });
     return new Promise((resolve, reject) => {
       const timeout = setTimeout(() => {
         this.pending.delete(id);
-        reject(new AppServerUnavailableError(`Codex app-server request timed out: ${method}`));
+        const message = `Codex app-server request timed out: ${method}`;
+        this.lastError = message;
+        reject(new AppServerUnavailableError(message));
       }, timeoutMs);
       timeout.unref();
       this.pending.set(id, { method, resolve, reject, timeout });
@@ -479,14 +642,20 @@ export class CodexAppServerSession {
         if (!error) return;
         clearTimeout(timeout);
         this.pending.delete(id);
+        this.lastError = `Codex app-server stdin write failed: ${error.message}`;
         reject(new AppServerUnavailableError(`Codex app-server stdin write failed: ${error.message}`));
       });
     });
   }
 
   private handleStdout(chunk: string): void {
+    this.activeTurn?.resetIdleTimeout?.();
     logger.rawDebug("codex.app_server.stdout", {
+      ...this.logContext,
+      sessionTurnId: this.activeTurn?.sessionTurnId,
       appServerId: this.id,
+      threadId: this.threadId || undefined,
+      activeTurnId: this.activeTurnId,
       chunk: summarizeRawTrafficForLog(chunk),
     });
     this.lineBuffer += chunk;
@@ -500,8 +669,13 @@ export class CodexAppServerSession {
   }
 
   private handleStderr(chunk: string): void {
+    this.activeTurn?.resetIdleTimeout?.();
     logger.rawDebug("codex.app_server.stderr", {
+      ...this.logContext,
+      sessionTurnId: this.activeTurn?.sessionTurnId,
       appServerId: this.id,
+      threadId: this.threadId || undefined,
+      activeTurnId: this.activeTurnId,
       chunk: summarizeRawTrafficForLog(chunk),
     });
     this.activeTurn?.stderr.append(chunk);
@@ -514,7 +688,11 @@ export class CodexAppServerSession {
     try {
       message = JSON.parse(line) as JsonObject;
     } catch {
-      this.activeTurn?.summary.errors.push(`Unparseable Codex app-server line: ${line.slice(0, 500)}`);
+      const error = `Unparseable Codex app-server line: ${line.slice(0, 500)}`;
+      this.lastError = error;
+      this.activeTurn?.summary.errors.push(error);
+      this.activeTurn?.stdout.append(`${line}\n`);
+      this.activeTurn?.publishSnapshot(true);
       return;
     }
 
@@ -525,7 +703,9 @@ export class CodexAppServerSession {
       this.pending.delete(id);
       clearTimeout(pending.timeout);
       if (message.error) {
-        pending.reject(new AppServerUnavailableError(JSON.stringify(message.error)));
+        const error = new AppServerUnavailableError(JSON.stringify(message.error));
+        this.lastError = error.message;
+        pending.reject(error);
       } else {
         pending.resolve(message.result);
       }
@@ -553,15 +733,40 @@ export class CodexAppServerSession {
             : method.includes("tool/call")
               ? { contentItems: [], success: false }
               : {};
-    this.child.stdin.write(`${JSON.stringify({ id, result })}\n`);
+    const payload = { id, result };
+    logger.rawDebug("codex.app_server.response", {
+      ...this.logContext,
+      sessionTurnId: this.activeTurn?.sessionTurnId,
+      appServerId: this.id,
+      threadId: this.threadId || undefined,
+      activeTurnId: this.activeTurnId,
+      requestId: id,
+      method,
+      payload: summarizeRawTrafficForLog(payload),
+    });
+    this.child.stdin.write(`${JSON.stringify(payload)}\n`, (error) => {
+      if (!error) return;
+      this.lastError = `Codex app-server response write failed: ${error.message}`;
+      logger.error("codex.app_server.response_failed", {
+        ...this.logContext,
+        sessionTurnId: this.activeTurn?.sessionTurnId,
+        appServerId: this.id,
+        requestId: id,
+        method,
+        error: errorForLog(error),
+      });
+    });
   }
 
   private handleNotification(message: JsonObject): void {
-    for (const handler of this.notificationHandlers) handler(message);
     const method = message.method as string;
     const params = message.params as JsonObject | undefined;
     const active = this.activeTurn;
-    if (!active) return;
+    if (!active) {
+      if (this.acceptingStartNotifications) this.queuePendingStartNotification(message);
+      return;
+    }
+    for (const handler of this.notificationHandlers) handler(message);
     active.stdout.append(`${JSON.stringify(message)}\n`);
     active.summary.counts[method] = (active.summary.counts[method] ?? 0) + 1;
     if (active.summary.events) active.summary.events.push(message);
@@ -597,7 +802,9 @@ export class CodexAppServerSession {
     }
 
     if (method === "error") {
-      active.summary.errors.push(JSON.stringify(params ?? message));
+      const error = JSON.stringify(params ?? message);
+      this.lastError = error;
+      active.summary.errors.push(error);
     }
 
     if (method === "turn/completed") {
@@ -620,7 +827,7 @@ export class CodexAppServerSession {
     if (!active) throw new Error("No active app-server turn to finish.");
     const maxOutputChars = active.options.maxOutputChars ?? 60_000;
     const final = truncate(redactSensitiveText(active.summary.lastAgentMessage ?? ""), maxOutputChars);
-    return {
+    const result: AgentRunResult = {
       name: active.options.name,
       ok: status === "completed",
       status,
@@ -645,15 +852,28 @@ export class CodexAppServerSession {
       },
       eventSummary: cloneSummary(active.summary),
       commandPreview: [this.codexBinary.path, "app-server", "--listen", "stdio://", "turn/start"],
+      timeoutReason: active.timeoutReason,
       codexSubagents: {
         customAgents: this.preparedSubagents.names,
         requestedTasks: active.options.subagentTasks?.length ?? 0,
         tempCodexHomeUsed: Boolean(this.preparedSubagents.tempCodexHome),
       },
     };
+    logger[result.ok ? "rawInfo" : "rawError"]("codex.app_server.turn.finish", {
+      ...this.logContext,
+      sessionTurnId: active.sessionTurnId,
+      appServerId: this.id,
+      threadId: this.threadId,
+      turnId: active.turnId,
+      status,
+      timeoutReason: active.timeoutReason,
+      finalMessage: summarizeRawTrafficForLog(result.finalMessage),
+      eventSummary: summarizeRawTrafficForLog(active.summary),
+    });
+    return result;
   }
 
-  private rejectAll(error: Error): void {
+  private rejectAll(error: Error, status: "failed" | "cancelled" = "failed"): void {
     for (const [id, pending] of this.pending) {
       clearTimeout(pending.timeout);
       pending.reject(error);
@@ -661,8 +881,18 @@ export class CodexAppServerSession {
     }
     if (this.activeTurn) {
       this.activeTurn.summary.errors.push(error.message);
-      this.activeTurn.resolve(this.finishActiveTurn("failed"));
+      this.activeTurn.resolve(this.finishActiveTurn(status));
       this.activeTurn = undefined;
     }
+  }
+
+  private queuePendingStartNotification(message: JsonObject): void {
+    this.pendingStartNotifications.push(message);
+    if (this.pendingStartNotifications.length > 100) this.pendingStartNotifications.shift();
+  }
+
+  private drainPendingStartNotifications(): void {
+    const pending = this.pendingStartNotifications.splice(0);
+    for (const message of pending) this.handleNotification(message);
   }
 }

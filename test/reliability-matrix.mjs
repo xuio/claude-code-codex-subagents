@@ -347,7 +347,9 @@ try {
   );
 
   const calls = await readCalls();
-  const nestedCall = calls.find((call) => call.prompt.includes("matrix-nested"));
+  const nestedCall = calls.find(
+    (call) => typeof call.prompt === "string" && call.prompt.includes("matrix-nested"),
+  );
   assert(nestedCall, "fake Codex should record the nested call", calls);
   assert(
     nestedCall.prompt.includes("Spawn ui_spark as toolbar: Inspect the toolbar.") &&
@@ -510,7 +512,9 @@ try {
     "isolated Codex home should use a temporary CODEX_HOME",
     isolatedAgent,
   );
-  const isolatedCall = (await readCalls()).find((call) => call.prompt.includes("matrix-isolated-home"));
+  const isolatedCall = (await readCalls()).find(
+    (call) => typeof call.prompt === "string" && call.prompt.includes("matrix-isolated-home"),
+  );
   assert(isolatedCall?.codexConfig?.includes("isolated codex-subagents run"), "isolated run should use minimal config", isolatedCall);
 
   console.log("Reliability matrix passed");

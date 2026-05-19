@@ -132,7 +132,7 @@ export interface AgentRunResult {
   structuredOutputError?: string;
   commandPreview: string[];
   validationError?: string;
-  timeoutReason?: "timeout" | "idle_timeout" | "spawn_timeout";
+  timeoutReason?: "timeout" | "idle_timeout" | "spawn_timeout" | "app_server_no_completion";
   queue?: {
     queuedMs: number;
   };

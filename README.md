@@ -138,6 +138,8 @@ npm run test:claude-desktop
 
 `test:real-app-server-steering` is an opt-in live Codex test that calls the MCP server directly, starts a real app-server session, sends `turn/steer` during an active turn, and verifies the final answer reflects the steering prompt.
 
+`test:real-soak` repeats the live real-Claude/real-Codex session checks. Set `CODEX_SUBAGENTS_REAL_SOAK_ROUNDS=10` or higher for a longer hardening run, and set `CODEX_SUBAGENTS_REAL_SOAK_FULL=1` to run the real-Claude-to-real-Codex scenario every round.
+
 `test:claude-autodiscovery` is an opt-in live Claude Code test for automatic tool selection. It gives Claude a natural "ask Codex" request, loads the local plugin with the fake Codex binary, and verifies that Claude chooses the intuitive Codex MCP front door without being told the exact low-level tool name.
 
 Run Claude Code with the local plugin:
@@ -170,7 +172,7 @@ After startup, ask Claude to use Codex subagents, or invoke the plugin skill:
 
 `steer_codex_session` sends a steering prompt into the currently active app-server turn with Codex `turn/steer`. If a session had to fall back to `codex exec`, steering degrades to the next high-priority queued turn. `interrupt_current: true` cancels the active turn and runs the steering prompt next.
 
-`get_codex_session` and `wait_codex_session` inspect or wait for long-running Codex sessions and queued turns.
+`get_codex_session` and `wait_codex_session` inspect or wait for long-running Codex sessions and queued turns. Session snapshots include app-server capability status and fallback reasons; `wait_codex_session` returns `timeoutReason: "wait_timeout"` when the wait call times out without cancelling the session.
 
 `run_agent` launches one Codex `exec` process and waits for it. It uses the same bounded queue as async jobs and remains available for lower-level/manual control.
 
@@ -186,7 +188,7 @@ After startup, ask Claude to use Codex subagents, or invoke the plugin skill:
 
 `start_session`, `send_session_prompt`, `get_session`, `list_sessions`, and `cancel_session` manage daemonless persistent Codex sessions. They are compatibility aliases behind the intuitive session tools.
 
-`codex_status` reports the resolved Codex binary, server working directory, Claude project directory, default model, default reasoning effort, feature sets, and version probe.
+`codex_status` reports the resolved Codex binary, server working directory, Claude project directory, default model, default reasoning effort, app-server protocol methods, feature sets, and version probe.
 
 `codex_doctor` runs installation and safety diagnostics without invoking a model.
 

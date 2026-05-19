@@ -55,8 +55,52 @@ if (args[0] === "app-server") {
   let activeSteers = [];
   let activeTimer = undefined;
 
+  function modeText() {
+    return `${process.env.FAKE_CODEX_APP_SERVER_MODE ?? ""} ${activePrompt}`;
+  }
+
+  function hasMode(name) {
+    return modeText().split(/[,\s]+/).includes(name) || activePrompt.includes(name);
+  }
+
+  function numberMode(name, fallback = 0) {
+    const match = modeText().match(new RegExp(`${name}=(\\d+)`));
+    return match ? Number(match[1]) : fallback;
+  }
+
   function send(message) {
-    process.stdout.write(`${JSON.stringify(message)}\n`);
+    const line = `${JSON.stringify(message)}\n`;
+    if (hasMode("APP_PARTIAL_LINES") && line.length > 4) {
+      const splitAt = Math.max(1, Math.floor(line.length / 2));
+      process.stdout.write(line.slice(0, splitAt));
+      process.stdout.write(line.slice(splitAt));
+      return;
+    }
+    process.stdout.write(line);
+  }
+
+  process.once("SIGTERM", () => {
+    recordCall({ protocol: "app-server", method: "process/sigterm", threadId, turnId: activeTurn });
+    process.exit(143);
+  });
+
+  function sendTurnCompleted(turnId, status = "completed") {
+    send({
+      method: "turn/completed",
+      params: {
+        threadId,
+        turn: {
+          id: turnId,
+          items: [],
+          itemsView: "notLoaded",
+          status,
+          error: status === "completed" ? null : { message: `fake ${status}` },
+          startedAt: Math.floor(Date.now() / 1000),
+          completedAt: Math.floor(Date.now() / 1000),
+          durationMs: 1,
+        },
+      },
+    });
   }
 
   function finishTurn() {
@@ -65,6 +109,13 @@ if (args[0] === "app-server") {
     const finalMessage = `fake app-server result for: ${activePrompt.trim()}${
       activeSteers.length ? ` | steers: ${activeSteers.join(" | ")}` : ""
     }`;
+    const largeStreamChars = numberMode("APP_LARGE_STREAM_CHARS");
+    if (largeStreamChars > 0) {
+      send({
+        method: "item/agentMessage/delta",
+        params: { threadId, turnId, itemId: "item_large", delta: "x".repeat(largeStreamChars) },
+      });
+    }
     send({
       method: "item/agentMessage/delta",
       params: { threadId, turnId, itemId: "item_final", delta: finalMessage },
@@ -87,22 +138,9 @@ if (args[0] === "app-server") {
         },
       },
     });
-    send({
-      method: "turn/completed",
-      params: {
-        threadId,
-        turn: {
-          id: turnId,
-          items: [],
-          itemsView: "notLoaded",
-          status: "completed",
-          error: null,
-          startedAt: Math.floor(Date.now() / 1000),
-          completedAt: Math.floor(Date.now() / 1000),
-          durationMs: 1,
-        },
-      },
-    });
+    if (hasMode("APP_NO_TURN_COMPLETED")) return;
+    sendTurnCompleted(turnId);
+    if (hasMode("APP_DUPLICATE_COMPLETED")) sendTurnCompleted(turnId);
     activeTurn = undefined;
     activePrompt = "";
     activeSteers = [];
@@ -110,7 +148,15 @@ if (args[0] === "app-server") {
 
   function handleRequest(request) {
     const { id, method, params } = request;
+    if (id && !method) {
+      recordCall({ protocol: "app-server", method: "client/response", response: request, threadId, turnId: activeTurn });
+      return;
+    }
     if (method === "initialize") {
+      if (hasMode("INITIALIZE_ERROR")) {
+        send({ id, error: { code: -32000, message: "fake initialize error" } });
+        return;
+      }
       send({
         id,
         result: {
@@ -123,7 +169,15 @@ if (args[0] === "app-server") {
       return;
     }
     if (method === "thread/start") {
+      if (hasMode("THREAD_START_ERROR")) {
+        send({ id, error: { code: -32000, message: "fake thread start error" } });
+        return;
+      }
       threadId = `fake-thread-${process.pid}-${Math.random().toString(36).slice(2, 8)}`;
+      if (hasMode("THREAD_START_NO_ID")) {
+        send({ id, result: { thread: {}, cwd: params?.cwd ?? process.cwd() } });
+        return;
+      }
       send({
         id,
         result: {
@@ -166,6 +220,12 @@ if (args[0] === "app-server") {
       activeTurn = `fake-turn-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
       activePrompt = params?.input?.find?.((item) => item.type === "text")?.text ?? "";
       activeSteers = [];
+      if (hasMode("TURN_START_ERROR")) {
+        send({ id, error: { code: -32000, message: "fake turn start error" } });
+        activeTurn = undefined;
+        activePrompt = "";
+        return;
+      }
       recordCall({ protocol: "app-server", method, prompt: activePrompt, threadId, turnId: activeTurn });
       send({
         id,
@@ -198,6 +258,37 @@ if (args[0] === "app-server") {
           },
         },
       });
+      if (hasMode("APP_SERVER_REQUEST")) {
+        send({
+          id: `fake-server-request-${Date.now()}`,
+          method: "requestApproval",
+          params: { threadId, turnId: activeTurn, reason: "fake approval request" },
+        });
+      }
+      if (hasMode("APP_MALFORMED_JSON")) {
+        process.stdout.write("this is not app-server json\n");
+      }
+      if (hasMode("APP_SERVER_ERROR")) {
+        send({ method: "error", params: { message: "fake app-server error", threadId, turnId: activeTurn } });
+      }
+      const stderrChars = numberMode("APP_STDERR_CHARS");
+      if (stderrChars > 0) {
+        process.stderr.write("e".repeat(stderrChars));
+      }
+      const progressAfterMs = numberMode("APP_PROGRESS_AFTER_MS");
+      if (progressAfterMs > 0) {
+        setTimeout(() => {
+          if (!activeTurn) return;
+          send({
+            method: "item/agentMessage/delta",
+            params: { threadId, turnId: activeTurn, itemId: "item_progress", delta: "progress " },
+          });
+        }, progressAfterMs);
+      }
+      if (hasMode("APP_COMPLETE_INLINE")) {
+        finishTurn();
+        return;
+      }
       const delayMatch = activePrompt.match(/DELAY_MS=(\d+)/);
       activeTimer = setTimeout(finishTurn, delayMatch ? Number(delayMatch[1]) : 10);
       return;
@@ -208,33 +299,28 @@ if (args[0] === "app-server") {
         return;
       }
       const steering = params?.input?.find?.((item) => item.type === "text")?.text ?? "";
+      if (steering.includes("APP_TURN_STEER_ERROR") || hasMode("APP_TURN_STEER_ERROR")) {
+        send({ id, error: { code: -32000, message: "fake steer error" } });
+        return;
+      }
       activeSteers.push(steering);
       recordCall({ protocol: "app-server", method, prompt: steering, threadId, turnId: activeTurn });
       send({ id, result: { turnId: activeTurn } });
       return;
     }
     if (method === "turn/interrupt") {
+      recordCall({ protocol: "app-server", method, threadId, turnId: activeTurn });
+      if (hasMode("APP_TURN_INTERRUPT_ERROR")) {
+        send({ id, error: { code: -32000, message: "fake interrupt error" } });
+        return;
+      }
       if (activeTimer) clearTimeout(activeTimer);
       const interrupted = activeTurn;
       activeTurn = undefined;
       send({ id, result: {} });
+      if (hasMode("APP_IGNORE_INTERRUPT_COMPLETION")) return;
       if (interrupted) {
-        send({
-          method: "turn/completed",
-          params: {
-            threadId,
-            turn: {
-              id: interrupted,
-              items: [],
-              itemsView: "notLoaded",
-              status: "interrupted",
-              error: null,
-              startedAt: Math.floor(Date.now() / 1000),
-              completedAt: Math.floor(Date.now() / 1000),
-              durationMs: 1,
-            },
-          },
-        });
+        sendTurnCompleted(interrupted, "interrupted");
       }
       return;
     }

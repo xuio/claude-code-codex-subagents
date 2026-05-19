@@ -1,4 +1,4 @@
-import { AppServerUnavailableError, CodexAppServerSession } from "./app-server.js";
+import { AppServerUnavailableError, CodexAppServerSession, type AppServerStatus } from "./app-server.js";
 import { runQueuedAgent } from "./jobs.js";
 import { errorForLog, logger, summarizeRawTrafficForLog } from "./logging.js";
 import type { AgentRunOptions, AgentRunPartial, AgentRunResult } from "./runner.js";
@@ -31,6 +31,8 @@ export interface CodexSessionSnapshot {
   codexThreadId?: string;
   protocol: SessionProtocol;
   supportsRealSteering: boolean;
+  appServer?: AppServerStatus;
+  appServerFallbackReason?: string;
   turns: number;
   active: boolean;
   activeTurn?: CodexSessionTurnSnapshot;
@@ -58,6 +60,7 @@ interface CodexSessionRecord {
   codexThreadId?: string;
   protocol: SessionProtocol;
   appServer?: CodexAppServerSession;
+  appServerFallbackReason?: string;
   turns: number;
   partial?: AgentRunPartial;
   lastResult?: AgentRunResult;
@@ -103,7 +106,11 @@ function snapshot(session: CodexSessionRecord): CodexSessionSnapshot {
     cwd: session.cwd,
     codexThreadId: session.codexThreadId,
     protocol: session.protocol,
-    supportsRealSteering: session.protocol === "app-server" && Boolean(session.appServer),
+    supportsRealSteering:
+      session.protocol === "app-server" &&
+      Boolean(session.appServer?.status().supports.turnSteer),
+    appServer: session.appServer?.status(),
+    appServerFallbackReason: session.appServerFallbackReason,
     turns: session.turns,
     active: Boolean(session.controller),
     activeTurn: session.activeTurn ? turnSnapshot(session.activeTurn) : undefined,
@@ -280,7 +287,7 @@ export class CodexSessionManager {
     }
     const wasActive = Boolean(session.controller);
     if (session.protocol === "app-server" && session.appServer && session.activeTurn && !options.interruptCurrent) {
-      const activeCodexTurnId = await this.waitForAppServerActiveTurn(session, 1_000);
+      const activeCodexTurnId = await this.waitForAppServerActiveTurn(session, 5_000);
       if (!activeCodexTurnId) {
         logger.warn("session.steer_app_server_not_ready", {
           sessionId: id,
@@ -338,7 +345,13 @@ export class CodexSessionManager {
     id: string,
     timeoutMs: number,
     turnId?: string,
-  ): Promise<{ session?: CodexSessionSnapshot; turn?: CodexSessionTurnSnapshot; completed?: boolean; error?: string }> {
+  ): Promise<{
+    session?: CodexSessionSnapshot;
+    turn?: CodexSessionTurnSnapshot;
+    completed?: boolean;
+    timeoutReason?: "wait_timeout";
+    error?: string;
+  }> {
     const session = this.sessions.get(id);
     if (!session) return { error: `Unknown session_id: ${id}` };
 
@@ -370,6 +383,7 @@ export class CodexSessionManager {
       session: snapshot(session),
       turn: turn ? turnSnapshot(turn) : undefined,
       completed: false,
+      timeoutReason: "wait_timeout",
     };
   }
 
@@ -391,12 +405,12 @@ export class CodexSessionManager {
     if (session.controller) {
       session.status = "cancelled";
       session.updatedAt = new Date().toISOString();
-      void session.appServer?.close();
+      void session.appServer?.close("cancelled");
       session.controller.abort();
     } else {
       session.status = "cancelled";
       session.updatedAt = new Date().toISOString();
-      void session.appServer?.close();
+      void session.appServer?.close("cancelled");
     }
     this.notifySession(session);
     return snapshot(session);
@@ -574,8 +588,9 @@ export class CodexSessionManager {
   ): Promise<AgentRunResult> {
     try {
       if (!session.appServer) {
-        session.appServer = await CodexAppServerSession.create(options);
+        session.appServer = await CodexAppServerSession.create(options, { sessionId: session.id });
         session.codexThreadId = session.appServer.threadId;
+        session.appServerFallbackReason = undefined;
       }
       return await session.appServer.startTurn(
         options,
@@ -588,11 +603,14 @@ export class CodexSessionManager {
             partial: summarizeRawTrafficForLog(partial),
           });
         },
+        { sessionTurnId: session.activeTurn?.id },
       );
     } catch (error) {
       if (session.turns === 0 && shouldFallbackToExec(error)) {
+        session.appServerFallbackReason = error instanceof Error ? error.message : String(error);
         logger.warn("session.app_server_fallback_to_exec", {
           sessionId: session.id,
+          appServerFallbackReason: session.appServerFallbackReason,
           error: errorForLog(error),
         });
         await session.appServer?.close().catch(() => {});
@@ -640,6 +658,7 @@ export class CodexSessionManager {
       turn: summarizeRawTrafficForLog(turnSnapshot(turn)),
       result: summarizeRawTrafficForLog(result),
     });
+    if (session.cancelRequested && session.appServer) void session.appServer.close("cancelled");
     this.notifyTurn(turn);
     this.notifySession(session);
   }
