@@ -6,3 +6,7 @@ coverage/
 .vitest/
 tmp/
 .in_use/
+codex-subagents-debug-*/
+codex-subagents-artifacts/
+.codex-subagents/
+sessions.json

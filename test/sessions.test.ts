@@ -104,6 +104,28 @@ describe("CodexSessionManager", () => {
     manager.cancel(session.id);
   });
 
+  it("returns the active turn result when waiting on live steering", async () => {
+    const manager = new CodexSessionManager();
+    const projectDir = await tempDir("codex-subagents-session-project-");
+
+    const { session } = manager.startAsync({
+      prompt: "session wait steering DELAY_MS=100",
+      projectDir,
+      codexBin: fakeCodex,
+    });
+    for (let attempt = 0; attempt < 20; attempt += 1) {
+      const current = manager.get(session.id);
+      if (current?.supportsRealSteering && current.activeTurn) break;
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+
+    const steered = await manager.steer(session.id, "waited steer prompt", {}, { wait: true });
+    expect(steered.delivery).toBe("delivered_to_active_turn");
+    expect(steered.result?.ok).toBe(true);
+    expect(steered.result?.finalMessage).toContain("waited steer prompt");
+    manager.cancel(session.id);
+  });
+
   it("does not carry full-access bypass into later exec session prompts", async () => {
     process.env.CODEX_SUBAGENTS_SESSION_PROTOCOL = "exec";
     const manager = new CodexSessionManager();

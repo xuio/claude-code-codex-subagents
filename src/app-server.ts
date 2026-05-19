@@ -391,12 +391,18 @@ export class CodexAppServerSession {
   }
 
   async readThread(includeTurns = false): Promise<unknown> {
-    const response = await this.request("thread/read", {
-      threadId: this.threadId,
-      includeTurns,
-    }, 10_000);
-    this.capabilities.threadRead = true;
-    return response;
+    try {
+      const response = await this.request("thread/read", {
+        threadId: this.threadId,
+        includeTurns,
+      }, 10_000);
+      this.capabilities.threadRead = true;
+      return response;
+    } catch (error) {
+      this.capabilities.threadRead = false;
+      this.lastError = error instanceof Error ? error.message : String(error);
+      throw error;
+    }
   }
 
   async startTurn(

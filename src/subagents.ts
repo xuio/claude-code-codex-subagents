@@ -175,12 +175,9 @@ export function codexSubagentConfigOverrides(
       definition.reasoningEffort,
     );
     appendConfigOverride(overrides, `${prefix}.sandbox_mode`, definition.sandbox);
-    appendConfigOverride(overrides, `${prefix}.mcp_servers`, definition.mcpServers);
-    appendConfigOverride(overrides, `${prefix}.skills.config`, definition.skillsConfig);
-
-    for (const [key, value] of Object.entries(definition.extraConfig ?? {})) {
-      appendConfigOverride(overrides, `${prefix}.${tomlPathSegment(key)}`, value);
-    }
+    // Full custom subagent definitions are written into the temporary CODEX_HOME.
+    // Keep argv overrides to non-secret scalar routing fields so nested MCP config
+    // and extra config cannot leak through local process inspection.
   }
 
   return overrides;

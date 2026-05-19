@@ -147,11 +147,31 @@ export function compactJobSnapshotForMcp<T extends { result?: unknown; partial?:
   };
 }
 
+function compactSessionTurn(value: unknown): unknown {
+  if (!value || typeof value !== "object") return value;
+  const turn = value as Record<string, unknown>;
+  if (typeof turn.prompt !== "string") return value;
+  const prompt = truncateString(turn.prompt, 2_000);
+  return {
+    ...turn,
+    prompt: prompt.text,
+    promptOmittedChars: prompt.omittedChars || undefined,
+  };
+}
+
+function compactSessionTurns(value: unknown): unknown {
+  if (!Array.isArray(value)) return value;
+  return value.slice(0, 20).map(compactSessionTurn);
+}
+
 export function compactSessionSnapshotForMcp<T extends { lastResult?: unknown; partial?: unknown }>(session: T): T {
   return {
     ...session,
     lastResult: compactRunValue(session.lastResult),
     partial: isPartial(session.partial) ? compactPartialForMcp(session.partial) : compactUnknown(session.partial, 2_000),
+    activeTurn: compactSessionTurn((session as { activeTurn?: unknown }).activeTurn),
+    queuedTurns: compactSessionTurns((session as { queuedTurns?: unknown }).queuedTurns),
+    recentTurns: compactSessionTurns((session as { recentTurns?: unknown }).recentTurns),
   };
 }
 

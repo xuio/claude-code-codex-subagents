@@ -98,6 +98,7 @@ interface CodexSessionRecord {
   recentTurns: CodexSessionTurnRecord[];
   draining: boolean;
   cancelRequested: boolean;
+  runtimeShutdownRecoverable: boolean;
   waiters: Set<() => void>;
   persisted: boolean;
   recovered: boolean;
@@ -310,6 +311,7 @@ export class CodexSessionManager {
       recentTurns: [],
       draining: false,
       cancelRequested: false,
+      runtimeShutdownRecoverable: false,
       waiters: new Set(),
       persisted: Boolean(this.stateStore),
       recovered: false,
@@ -440,8 +442,9 @@ export class CodexSessionManager {
             turn.updatedAt = new Date().toISOString();
             this.notifyTurn(turn);
             this.notifySession(session);
-            if (options.wait && session.activeTurn) {
-              const completed = await this.waitForTurn(session, session.activeTurn, options.waitSignal);
+            const activeTurn = session.activeTurn;
+            if (options.wait && activeTurn) {
+              const completed = await this.waitForTurn(session, activeTurn, options.waitSignal);
               if (!completed) {
                 return {
                   session: snapshot(session),
@@ -454,6 +457,7 @@ export class CodexSessionManager {
             return {
               session: snapshot(session),
               turn: turnSnapshot(turn),
+              result: activeTurn?.result,
               delivery: "delivered_to_active_turn",
             };
           }
@@ -618,7 +622,21 @@ export class CodexSessionManager {
           ephemeral: false,
         });
       } else {
-        await session.appServer.readThread(false);
+        try {
+          await session.appServer.readThread(false);
+        } catch (error) {
+          logger.warn("session.recover_thread_read_unavailable", {
+            sessionId: session.id,
+            error: errorForLog(error),
+          });
+          recordDiagnosticEvent({
+            severity: "warn",
+            source: "session.recover",
+            message: error instanceof Error ? error.message : String(error),
+            sessionId: session.id,
+            detail: { protocol: session.protocol, codexThreadId: session.codexThreadId },
+          });
+        }
       }
       session.status = session.status === "failed" ? "active" : session.status;
       session.recovered = true;
@@ -647,7 +665,9 @@ export class CodexSessionManager {
     const now = new Date().toISOString();
 
     for (const session of this.sessions.values()) {
-      session.cancelRequested = true;
+      const recoverable = Boolean(session.codexThreadId) && !session.cancelRequested && session.status !== "cancelled";
+      session.runtimeShutdownRecoverable = recoverable;
+      session.cancelRequested = !recoverable;
       for (const turn of session.queuedTurns) {
         turn.status = "cancelled";
         turn.updatedAt = now;
@@ -661,7 +681,7 @@ export class CodexSessionManager {
         session.activeTurn.error = `Session was cancelled during ${reason}.`;
         this.notifyTurn(session.activeTurn);
       }
-      session.status = "cancelled";
+      session.status = recoverable ? "active" : "cancelled";
       session.updatedAt = now;
       if (session.controller) session.controller.abort();
       if (session.appServer) closePromises.push(session.appServer.close("cancelled").catch(() => {}));
@@ -670,6 +690,12 @@ export class CodexSessionManager {
     }
 
     await Promise.allSettled(closePromises);
+    for (const session of this.sessions.values()) {
+      if (!session.runtimeShutdownRecoverable || !session.codexThreadId) continue;
+      session.cancelRequested = false;
+      session.status = "active";
+      session.updatedAt = new Date().toISOString();
+    }
     this.persist();
     return snapshots;
   }
@@ -801,7 +827,12 @@ export class CodexSessionManager {
       this.completeTurn(session, turn, result);
       return result;
     } catch (error) {
-      session.status = controller.signal.aborted ? "cancelled" : "failed";
+      session.status =
+        controller.signal.aborted && session.runtimeShutdownRecoverable && session.codexThreadId
+          ? "active"
+          : controller.signal.aborted
+            ? "cancelled"
+            : "failed";
       session.error = error instanceof Error ? error.message : String(error);
       session.updatedAt = new Date().toISOString();
       turn.status = controller.signal.aborted ? "cancelled" : "failed";
@@ -952,6 +983,8 @@ export class CodexSessionManager {
     turn.updatedAt = new Date().toISOString();
     session.status = result.ok
       ? "active"
+      : result.status === "cancelled" && session.runtimeShutdownRecoverable && session.codexThreadId
+        ? "active"
       : result.status === "cancelled" && session.queuedTurns.length > 0 && !session.cancelRequested
         ? "running"
         : result.status === "cancelled"
@@ -1108,6 +1141,7 @@ export class CodexSessionManager {
       recentTurns: [],
       draining: false,
       cancelRequested: state.status === "cancelled",
+      runtimeShutdownRecoverable: false,
       waiters: new Set(),
       persisted: true,
       recovered: true,

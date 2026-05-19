@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it } from "vitest";
-import { mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { chmod, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { createDebugBundle, recordDiagnosticEvent } from "../src/diagnostics.js";
@@ -21,6 +21,7 @@ afterEach(() => {
   delete process.env.CODEX_SUBAGENTS_LOG_MAX_STRING_CHARS;
   delete process.env.CODEX_SUBAGENTS_DEBUG_BUNDLE_DIR;
   delete process.env.CODEX_SUBAGENTS_LOG_FILE;
+  delete process.env.CODEX_SUBAGENTS_LOG_FILE_MAX_BYTES;
 });
 
 describe("logging", () => {
@@ -89,6 +90,21 @@ describe("logging", () => {
     logger.info("test.log_file_mode", { ok: true });
 
     expect((await stat(logFile)).mode & 0o777).toBe(0o600);
+    await rm(dir, { recursive: true, force: true });
+  });
+
+  it("keeps rotated log files owner-only", async () => {
+    const dir = await mkdtemp(path.join(os.tmpdir(), "codex-subagents-logs-"));
+    const logFile = path.join(dir, "server.log");
+    process.env.CODEX_SUBAGENTS_LOG_FILE = logFile;
+    process.env.CODEX_SUBAGENTS_LOG_FILE_MAX_BYTES = "10";
+    await writeFile(logFile, "x".repeat(20), "utf8");
+    await chmod(logFile, 0o644);
+
+    logger.info("test.log_rotate_mode", { ok: true });
+
+    expect((await stat(logFile)).mode & 0o777).toBe(0o600);
+    expect((await stat(`${logFile}.1`)).mode & 0o777).toBe(0o600);
     await rm(dir, { recursive: true, force: true });
   });
 

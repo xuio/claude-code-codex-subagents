@@ -1,4 +1,4 @@
-import { mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import type { AgentRunOptions } from "./runner.js";
@@ -60,8 +60,9 @@ export class SessionStateStore {
       updatedAt: new Date().toISOString(),
       sessions: merged,
     };
-    writeFileSync(temp, `${JSON.stringify(payload, null, 2)}\n`, "utf8");
+    writeFileSync(temp, `${JSON.stringify(payload, null, 2)}\n`, { encoding: "utf8", mode: 0o600 });
     renameSync(temp, this.file);
+    chmodSync(this.file, 0o600);
   }
 }
 

@@ -28,6 +28,7 @@ import { jobManager, runQueuedAgent, runQueuedAgents } from "./jobs.js";
 import { cleanupRuntime, lifecycleStats, registerCleanupHandler } from "./lifecycle.js";
 import { errorForLog, logger, loggingDiagnostics, makeLogId, summarizeRawTrafficForLog } from "./logging.js";
 import { recoveryForAgentResult, recoveryForError, recoveryForWait } from "./recovery.js";
+import { redactJsonValue, redactSensitiveText } from "./redaction.js";
 import { createProgressReporter, type ProgressOptions, type ProgressReporter, type ToolExtra } from "./progress.js";
 import {
   compactAgentResultForMcp,
@@ -419,8 +420,8 @@ function jsonResult(value: Record<string, unknown>, isError = false): CallToolRe
 function errorResult(error: unknown, context = "tool_call"): CallToolResult {
   return jsonResult(
     {
-      error: error instanceof Error ? error.message : String(error),
-      recovery: recoveryForError(error, context),
+      error: redactSensitiveText(error instanceof Error ? error.message : String(error)),
+      recovery: redactJsonValue(recoveryForError(error, context)),
     },
     true,
   );
@@ -444,6 +445,15 @@ function withRequestAbort<T extends object>(options: T, extra: ToolExtra | undef
 
 function requestCancelledError(): Error {
   return new Error("MCP request was cancelled by the client.");
+}
+
+function ephemeralJobDurability(): Record<string, unknown> {
+  return {
+    durable: false,
+    survivesRestart: false,
+    recommendation:
+      "Use start_codex_session_async when Claude needs recoverable long-running Codex work across MCP restarts.",
+  };
 }
 
 function throwIfRequestAborted(extra: ToolExtra | undefined): void {
@@ -960,7 +970,7 @@ server.registerTool(
   {
     title: "Run one Codex agent",
     description:
-      "Launch one OpenAI Codex agent via codex exec. Use automatically when the user asks Claude to use Codex, ask Codex, get a Codex second opinion, run a Codex subagent, use Codex Spark, or delegate one read-only analysis task. Defaults to the Codex desktop app binary when installed, read-only sandbox, Codex's normal service tier, and non-interactive approvals. For explicit non-sandbox/full-access requests, set dangerously_bypass_approvals_and_sandbox true.",
+      "Compatibility/manual tool for launching one OpenAI Codex agent via codex exec. Prefer ask_codex for normal Claude delegation. Defaults to the Codex desktop app binary when installed, read-only sandbox, Codex's normal service tier, and non-interactive approvals. For explicit non-sandbox/full-access requests, set dangerously_bypass_approvals_and_sandbox true.",
     inputSchema: {
       prompt: z
         .string()
@@ -1020,7 +1030,7 @@ server.registerTool(
         const job = jobManager.startAgent(toRunOptions(args));
         await progress.send(`Started Codex job ${job.id}`);
         await progress.flush();
-        return jsonResult({ job });
+        return jsonResult({ job, durability: ephemeralJobDurability() });
       } catch (error) {
         await progress.flush();
         logger.error("start_agent_run.failed", { error: errorForLog(error) });
@@ -1191,7 +1201,7 @@ server.registerTool(
   {
     title: "Run parallel Codex agents",
     description:
-      "Launch multiple independent OpenAI Codex agents concurrently and return one structured result per agent. Use automatically when the user asks for parallel Codex agents, multiple Codex subagents, broad review by independent agents, or several concurrent Codex workstreams. Split work by clear ownership, pass project_dir, keep defaults read-only, and use max_parallel to bound concurrency. For explicit non-sandbox/full-access requests, set dangerously_bypass_approvals_and_sandbox true.",
+      "Compatibility/manual tool for launching multiple independent OpenAI Codex agents concurrently. Prefer ask_codex_parallel for normal Claude delegation. Split work by clear ownership, pass project_dir, keep defaults read-only, and use max_parallel to bound concurrency. For explicit non-sandbox/full-access requests, set dangerously_bypass_approvals_and_sandbox true.",
     inputSchema: {
       agents: z
         .array(parallelAgentSchema)
@@ -1350,7 +1360,7 @@ server.registerTool(
         const job = jobManager.startAgents(toParallelRunOptions(args));
         await progress.send(`Started Codex job ${job.id}`);
         await progress.flush();
-        return jsonResult({ job });
+        return jsonResult({ job, durability: ephemeralJobDurability() });
       } catch (error) {
         await progress.flush();
         logger.error("start_agents_run.failed", { error: errorForLog(error) });

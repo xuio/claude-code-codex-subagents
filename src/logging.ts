@@ -211,7 +211,12 @@ function writeDefaultLog(line: string): void {
   try {
     mkdirSync(path.dirname(logFile), { recursive: true });
     try {
-      if (statSync(logFile).size > logFileMaxBytes()) renameSync(logFile, `${logFile}.1`);
+      if (statSync(logFile).size > logFileMaxBytes()) {
+        chmodSync(logFile, 0o600);
+        const rotated = `${logFile}.1`;
+        renameSync(logFile, rotated);
+        chmodSync(rotated, 0o600);
+      }
     } catch (error) {
       // Missing files or rotation races are harmless.
       if ((error as NodeJS.ErrnoException | undefined)?.code !== "ENOENT") {

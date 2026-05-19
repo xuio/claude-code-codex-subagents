@@ -2,7 +2,7 @@ import { mkdir, mkdtemp, open, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { loggingDiagnostics } from "./logging.js";
-import { redactJsonValue } from "./redaction.js";
+import { redactJsonValue, redactSensitiveText } from "./redaction.js";
 
 export type DiagnosticSeverity = "info" | "warn" | "error";
 
@@ -41,6 +41,8 @@ export function recordDiagnosticEvent(
     id: makeId(),
     ts: new Date().toISOString(),
     ...event,
+    message: redactSensitiveText(event.message),
+    recovery: event.recovery === undefined ? undefined : redactJsonValue(event.recovery),
     detail: event.detail === undefined ? undefined : redactJsonValue(event.detail),
   };
   events.push(entry);

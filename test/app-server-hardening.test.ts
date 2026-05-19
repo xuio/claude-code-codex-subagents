@@ -1,4 +1,4 @@
-import { access, mkdtemp, readFile, realpath, rm } from "node:fs/promises";
+import { access, mkdtemp, readFile, realpath, rm, stat } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -460,6 +460,87 @@ describe("app-server hardening", () => {
     }
   });
 
+  it("persists recoverable sessions as active across MCP runtime shutdown", async () => {
+    const stateDir = await tempDir("codex-subagents-shutdown-state-");
+    const stateFile = path.join(stateDir, "sessions.json");
+    const projectDir = await tempDir("codex-subagents-shutdown-project-");
+    const firstManager = new CodexSessionManager({ persist: true, stateFile });
+
+    const { session } = firstManager.startAsync({
+      prompt: "runtime shutdown recoverable DELAY_MS=10000",
+      projectDir,
+      codexBin: fakeCodex,
+    });
+
+    const persistedThread = await waitFor(async () => {
+      const states = new SessionStateStore(stateFile).load();
+      return states.some((state) => state.id === session.id && state.codexThreadId && state.status === "active");
+    });
+    expect(persistedThread).toBe(true);
+
+    await firstManager.shutdown("stdin_close");
+    const secondManager = new CodexSessionManager({ persist: true, stateFile });
+    const loaded = secondManager.get(session.id);
+    expect(loaded?.status).toBe("active");
+    expect(loaded?.durable?.canResume).toBe(true);
+
+    const recovered = await secondManager.recover(session.id);
+    expect(recovered.recovered).toBe(true);
+    expect(recovered.session?.appServer?.supports.threadResume).toBe(true);
+    const followUp = await secondManager.send(session.id, "after runtime shutdown");
+    expect(followUp.result?.ok).toBe(true);
+    expect(followUp.result?.finalMessage).toContain("after runtime shutdown");
+
+    await secondManager.shutdown("test_cleanup");
+  });
+
+  it("keeps explicit session cancellation cancelled after reload", async () => {
+    const stateDir = await tempDir("codex-subagents-cancel-state-");
+    const stateFile = path.join(stateDir, "sessions.json");
+    const projectDir = await tempDir("codex-subagents-cancel-project-");
+    const firstManager = new CodexSessionManager({ persist: true, stateFile });
+
+    const started = await firstManager.start({
+      prompt: "explicit cancel persists",
+      projectDir,
+      codexBin: fakeCodex,
+    });
+    firstManager.cancel(started.session.id);
+
+    const secondManager = new CodexSessionManager({ persist: true, stateFile });
+    const loaded = secondManager.get(started.session.id);
+    expect(loaded?.status).toBe("cancelled");
+    const sent = await secondManager.send(started.session.id, "should not run");
+    expect(sent.error).toContain("Session is cancelled");
+    await Promise.all([firstManager.shutdown("test_cleanup"), secondManager.shutdown("test_cleanup")]);
+  });
+
+  it("treats thread/read as optional during app-server recovery", async () => {
+    const manager = new CodexSessionManager();
+    const projectDir = await tempDir("codex-subagents-read-optional-project-");
+
+    const started = await manager.start({
+      prompt: "thread read optional",
+      projectDir,
+      codexBin: fakeCodex,
+      env: {
+        FAKE_CODEX_APP_SERVER_MODE: "THREAD_READ_ERROR",
+      },
+    });
+
+    expect(started.result.ok).toBe(true);
+    expect(started.session.appServer?.supports.threadRead).toBe(false);
+
+    const recovered = await manager.recover(started.session.id);
+    expect(recovered.recovered).toBe(true);
+    expect(recovered.session?.appServer?.supports.threadRead).toBe(false);
+
+    const followUp = await manager.send(started.session.id, "thread read unavailable follow-up");
+    expect(followUp.result?.ok).toBe(true);
+    expect(followUp.result?.finalMessage).toContain("thread read unavailable follow-up");
+    await manager.shutdown("test_cleanup");
+  });
+
   it("serializes concurrent app-server recovery attempts for one session", async () => {
     const stateDir = await tempDir("codex-subagents-recover-lock-state-");
     const stateFile = path.join(stateDir, "sessions.json");
@@ -524,6 +605,27 @@ describe("app-server hardening", () => {
     expect(recovered.recovered).toBe(true);
     expect(recovered.session?.codexThreadId).toBe(loaded?.codexThreadId);
     await Promise.all([firstManager.shutdown("test_cleanup"), secondManager.shutdown("test_cleanup")]);
+  });
+
+  it("writes durable session state with owner-only permissions", async () => {
+    const stateDir = await tempDir("codex-subagents-state-mode-");
+    const stateFile = path.join(stateDir, "sessions.json");
+    const store = new SessionStateStore(stateFile);
+    const now = new Date().toISOString();
+    store.save([
+      {
+        id: "mode-test",
+        status: "active",
+        createdAt: now,
+        updatedAt: now,
+        codexThreadId: "thread-mode-test",
+        protocol: "app-server",
+        turns: 1,
+        baseOptions: { projectDir: stateDir },
+      },
+    ]);
+
+    expect((await stat(stateFile)).mode & 0o777).toBe(0o600);
   });
 
   it("returns a failed result if the app-server exits mid-turn", async () => {

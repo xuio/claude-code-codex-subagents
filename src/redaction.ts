@@ -8,6 +8,8 @@ const privateKeyPattern = new RegExp(
 );
 
 const SECRET_PATTERNS: RegExp[] = [
+  /\bAuthorization\s*:\s*Bearer\s+([A-Za-z0-9._~+/=-]{12,})\b/gi,
+  /\bBearer\s+([A-Za-z0-9._~+/=-]{12,})\b/g,
   /\bsk-[A-Za-z0-9_-]{16,}\b/g,
   /\bsk-proj-[A-Za-z0-9_-]{16,}\b/g,
   /\bghp_[A-Za-z0-9_]{20,}\b/g,
@@ -15,6 +17,7 @@ const SECRET_PATTERNS: RegExp[] = [
   /\bglpat-[A-Za-z0-9_-]{16,}\b/g,
   /\bxox[baprs]-[A-Za-z0-9-]{16,}\b/g,
   /\b[A-Za-z_][A-Za-z0-9_]*(?:API_KEY|TOKEN|SECRET|PASSWORD|PRIVATE_KEY)=([^\s"'`]+)\b/gi,
+  /\b(?:api[_-]?key|token|secret|password|private[_-]?key|authorization)\s*[:=]\s*([^\s"'`]+)\b/gi,
   privateKeyPattern,
 ];
 

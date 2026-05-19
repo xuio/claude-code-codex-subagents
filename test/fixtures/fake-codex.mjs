@@ -415,6 +415,10 @@ if (args[0] === "app-server") {
     }
     if (method === "thread/read") {
       recordCall({ protocol: "app-server", method, threadId, includeTurns: Boolean(params?.includeTurns) });
+      if (hasMode("THREAD_READ_ERROR")) {
+        send({ id, error: { code: -32000, message: "fake thread read error" } });
+        return;
+      }
       send({ id, result: { thread: { id: threadId, turns: [] } } });
       return;
     }

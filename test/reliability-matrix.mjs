@@ -286,6 +286,11 @@ try {
   });
   const asyncParallelJobId = asyncParallelStart.structuredContent?.job?.id;
   assert(asyncParallelJobId, "start_agents_run should return a job id", asyncParallelStart.structuredContent);
+  assert(
+    asyncParallelStart.structuredContent?.durability?.survivesRestart === false,
+    "start_agents_run should advertise that async jobs do not survive MCP restarts",
+    asyncParallelStart.structuredContent,
+  );
   const asyncParallelDone = await callTool("wait_agent_run", {
     job_id: asyncParallelJobId,
     timeout_ms: 5_000,
@@ -360,16 +365,18 @@ try {
   );
   assert(
     nestedCall.args.includes('agents.ui_spark.model="gpt-5.3-codex-spark"') &&
-      nestedCall.args.includes('agents.ui_spark.mcp_servers.docs.command="node"') &&
-      nestedCall.args.includes("agents.ui_spark.skills.config.playwright.enabled=true") &&
+      !nestedCall.args.some((arg) => arg.includes("mcp_servers") || arg.includes("skills.config") || arg.includes("model_verbosity")) &&
       nestedCall.args.includes("agents.max_threads=4") &&
       nestedCall.args.includes("agents.max_depth=2") &&
       nestedCall.args.includes("agents.job_max_runtime_seconds=900"),
-    "nested Codex args should include Spark, custom agent, MCP, skills, and runtime overrides",
+    "nested Codex args should include safe Spark/runtime overrides without nested MCP, skills, or extra config",
     nestedCall.args,
   );
   const agentToml = Object.values(nestedCall.agentFiles).join("\n");
   assert(agentToml.includes('model = "gpt-5.3-codex-spark"'), "nested temp agent TOML should include Spark");
+  assert(agentToml.includes("[mcp_servers.docs]"), "nested temp agent TOML should include MCP config");
+  assert(agentToml.includes("[skills.config.playwright]"), "nested temp agent TOML should include skills config");
+  assert(agentToml.includes('model_verbosity = "low"'), "nested temp agent TOML should include extra config");
   await access(nestedCall.codexHome)
     .then(() => {
       throw new Error(`temporary CODEX_HOME was not cleaned up: ${nestedCall.codexHome}`);

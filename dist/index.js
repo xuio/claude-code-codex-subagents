@@ -21330,6 +21330,8 @@ var privateKeyPattern = new RegExp(
   "g"
 );
 var SECRET_PATTERNS = [
+  /\bAuthorization\s*:\s*Bearer\s+([A-Za-z0-9._~+/=-]{12,})\b/gi,
+  /\bBearer\s+([A-Za-z0-9._~+/=-]{12,})\b/g,
   /\bsk-[A-Za-z0-9_-]{16,}\b/g,
   /\bsk-proj-[A-Za-z0-9_-]{16,}\b/g,
   /\bghp_[A-Za-z0-9_]{20,}\b/g,
@@ -21337,6 +21339,7 @@ var SECRET_PATTERNS = [
   /\bglpat-[A-Za-z0-9_-]{16,}\b/g,
   /\bxox[baprs]-[A-Za-z0-9-]{16,}\b/g,
   /\b[A-Za-z_][A-Za-z0-9_]*(?:API_KEY|TOKEN|SECRET|PASSWORD|PRIVATE_KEY)=([^\s"'`]+)\b/gi,
+  /\b(?:api[_-]?key|token|secret|password|private[_-]?key|authorization)\s*[:=]\s*([^\s"'`]+)\b/gi,
   privateKeyPattern
 ];
 var SENSITIVE_ENV_KEY = /(API[_-]?KEY|SECRET|PASSWORD|PRIVATE[_-]?KEY|COOKIE|CREDENTIAL|AUTH|BEARER|(^|[_-])TOKEN$|ACCESS[_-]?TOKEN|REFRESH[_-]?TOKEN|OAUTH[_-]?TOKEN|SESSION[_-]?(KEY|TOKEN|SECRET|COOKIE))/i;
@@ -21529,7 +21532,12 @@ function writeDefaultLog(line) {
   try {
     mkdirSync(path2.dirname(logFile), { recursive: true });
     try {
-      if (statSync2(logFile).size > logFileMaxBytes()) renameSync(logFile, `${logFile}.1`);
+      if (statSync2(logFile).size > logFileMaxBytes()) {
+        chmodSync(logFile, 384);
+        const rotated = `${logFile}.1`;
+        renameSync(logFile, rotated);
+        chmodSync(rotated, 384);
+      }
     } catch (error2) {
       if (error2?.code !== "ENOENT") {
         lastLogFileError = error2 instanceof Error ? error2.message : String(error2);
@@ -21727,11 +21735,6 @@ function codexSubagentConfigOverrides(definitions = []) {
       definition.reasoningEffort
     );
     appendConfigOverride(overrides, `${prefix}.sandbox_mode`, definition.sandbox);
-    appendConfigOverride(overrides, `${prefix}.mcp_servers`, definition.mcpServers);
-    appendConfigOverride(overrides, `${prefix}.skills.config`, definition.skillsConfig);
-    for (const [key, value] of Object.entries(definition.extraConfig ?? {})) {
-      appendConfigOverride(overrides, `${prefix}.${tomlPathSegment(key)}`, value);
-    }
   }
   return overrides;
 }
@@ -22770,6 +22773,8 @@ function recordDiagnosticEvent(event, env = process.env) {
     id: makeId(),
     ts: (/* @__PURE__ */ new Date()).toISOString(),
     ...event,
+    message: redactSensitiveText(event.message),
+    recovery: event.recovery === void 0 ? void 0 : redactJsonValue(event.recovery),
     detail: event.detail === void 0 ? void 0 : redactJsonValue(event.detail)
   };
   events.push(entry);
@@ -23584,11 +23589,29 @@ function compactJobSnapshotForMcp(job) {
     partial: isPartial(job.partial) ? compactPartialForMcp(job.partial) : compactUnknown(job.partial, 2e3)
   };
 }
+function compactSessionTurn(value) {
+  if (!value || typeof value !== "object") return value;
+  const turn = value;
+  if (typeof turn.prompt !== "string") return value;
+  const prompt = truncateString(turn.prompt, 2e3);
+  return {
+    ...turn,
+    prompt: prompt.text,
+    promptOmittedChars: prompt.omittedChars || void 0
+  };
+}
+function compactSessionTurns(value) {
+  if (!Array.isArray(value)) return value;
+  return value.slice(0, 20).map(compactSessionTurn);
+}
 function compactSessionSnapshotForMcp(session) {
   return {
     ...session,
     lastResult: compactRunValue(session.lastResult),
-    partial: isPartial(session.partial) ? compactPartialForMcp(session.partial) : compactUnknown(session.partial, 2e3)
+    partial: isPartial(session.partial) ? compactPartialForMcp(session.partial) : compactUnknown(session.partial, 2e3),
+    activeTurn: compactSessionTurn(session.activeTurn),
+    queuedTurns: compactSessionTurns(session.queuedTurns),
+    recentTurns: compactSessionTurns(session.recentTurns)
   };
 }
 function compactRunValue(value) {
@@ -23916,12 +23939,18 @@ var CodexAppServerSession = class _CodexAppServerSession {
     };
   }
   async readThread(includeTurns = false) {
-    const response = await this.request("thread/read", {
-      threadId: this.threadId,
-      includeTurns
-    }, 1e4);
-    this.capabilities.threadRead = true;
-    return response;
+    try {
+      const response = await this.request("thread/read", {
+        threadId: this.threadId,
+        includeTurns
+      }, 1e4);
+      this.capabilities.threadRead = true;
+      return response;
+    } catch (error2) {
+      this.capabilities.threadRead = false;
+      this.lastError = error2 instanceof Error ? error2.message : String(error2);
+      throw error2;
+    }
   }
   async startTurn(options, abortSignal, onSnapshot, turnLogContext = {}) {
     if (this.activeTurn) throw new Error(`Codex app-server already has an active turn: ${this.activeTurn.turnId}`);
@@ -24517,7 +24546,7 @@ var CodexAppServerSession = class _CodexAppServerSession {
 };
 
 // src/session-state.ts
-import { mkdirSync as mkdirSync3, readFileSync, renameSync as renameSync2, writeFileSync as writeFileSync2 } from "node:fs";
+import { chmodSync as chmodSync2, mkdirSync as mkdirSync3, readFileSync, renameSync as renameSync2, writeFileSync as writeFileSync2 } from "node:fs";
 import os6 from "node:os";
 import path7 from "node:path";
 function defaultSessionStateFile(env = process.env) {
@@ -24553,8 +24582,9 @@ var SessionStateStore = class {
       sessions: merged
     };
     writeFileSync2(temp, `${JSON.stringify(payload, null, 2)}
-`, "utf8");
+`, { encoding: "utf8", mode: 384 });
     renameSync2(temp, this.file);
+    chmodSync2(this.file, 384);
   }
 };
 function isDurableSessionState(value) {
@@ -24765,6 +24795,7 @@ var CodexSessionManager = class {
       recentTurns: [],
       draining: false,
       cancelRequested: false,
+      runtimeShutdownRecoverable: false,
       waiters: /* @__PURE__ */ new Set(),
       persisted: Boolean(this.stateStore),
       recovered: false,
@@ -24867,8 +24898,9 @@ var CodexSessionManager = class {
             turn.updatedAt = (/* @__PURE__ */ new Date()).toISOString();
             this.notifyTurn(turn);
             this.notifySession(session);
-            if (options.wait && session.activeTurn) {
-              const completed = await this.waitForTurn(session, session.activeTurn, options.waitSignal);
+            const activeTurn = session.activeTurn;
+            if (options.wait && activeTurn) {
+              const completed = await this.waitForTurn(session, activeTurn, options.waitSignal);
               if (!completed) {
                 return {
                   session: snapshot2(session),
@@ -24881,6 +24913,7 @@ var CodexSessionManager = class {
             return {
               session: snapshot2(session),
               turn: turnSnapshot(turn),
+              result: activeTurn?.result,
               delivery: "delivered_to_active_turn"
             };
           }
@@ -25024,7 +25057,21 @@ var CodexSessionManager = class {
           ephemeral: false
         });
       } else {
-        await session.appServer.readThread(false);
+        try {
+          await session.appServer.readThread(false);
+        } catch (error2) {
+          logger.warn("session.recover_thread_read_unavailable", {
+            sessionId: session.id,
+            error: errorForLog(error2)
+          });
+          recordDiagnosticEvent({
+            severity: "warn",
+            source: "session.recover",
+            message: error2 instanceof Error ? error2.message : String(error2),
+            sessionId: session.id,
+            detail: { protocol: session.protocol, codexThreadId: session.codexThreadId }
+          });
+        }
       }
       session.status = session.status === "failed" ? "active" : session.status;
       session.recovered = true;
@@ -25051,7 +25098,9 @@ var CodexSessionManager = class {
     const snapshots = [];
     const now = (/* @__PURE__ */ new Date()).toISOString();
     for (const session of this.sessions.values()) {
-      session.cancelRequested = true;
+      const recoverable = Boolean(session.codexThreadId) && !session.cancelRequested && session.status !== "cancelled";
+      session.runtimeShutdownRecoverable = recoverable;
+      session.cancelRequested = !recoverable;
       for (const turn of session.queuedTurns) {
         turn.status = "cancelled";
         turn.updatedAt = now;
@@ -25065,7 +25114,7 @@ var CodexSessionManager = class {
         session.activeTurn.error = `Session was cancelled during ${reason}.`;
         this.notifyTurn(session.activeTurn);
       }
-      session.status = "cancelled";
+      session.status = recoverable ? "active" : "cancelled";
       session.updatedAt = now;
       if (session.controller) session.controller.abort();
       if (session.appServer) closePromises.push(session.appServer.close("cancelled").catch(() => {
@@ -25074,6 +25123,12 @@ var CodexSessionManager = class {
       snapshots.push(snapshot2(session));
     }
     await Promise.allSettled(closePromises);
+    for (const session of this.sessions.values()) {
+      if (!session.runtimeShutdownRecoverable || !session.codexThreadId) continue;
+      session.cancelRequested = false;
+      session.status = "active";
+      session.updatedAt = (/* @__PURE__ */ new Date()).toISOString();
+    }
     this.persist();
     return snapshots;
   }
@@ -25188,7 +25243,7 @@ var CodexSessionManager = class {
       this.completeTurn(session, turn, result);
       return result;
     } catch (error2) {
-      session.status = controller.signal.aborted ? "cancelled" : "failed";
+      session.status = controller.signal.aborted && session.runtimeShutdownRecoverable && session.codexThreadId ? "active" : controller.signal.aborted ? "cancelled" : "failed";
       session.error = error2 instanceof Error ? error2.message : String(error2);
       session.updatedAt = (/* @__PURE__ */ new Date()).toISOString();
       turn.status = controller.signal.aborted ? "cancelled" : "failed";
@@ -25315,7 +25370,7 @@ var CodexSessionManager = class {
     turn.resultStatus = result.status;
     turn.status = result.ok ? "completed" : result.status === "cancelled" ? "cancelled" : "failed";
     turn.updatedAt = (/* @__PURE__ */ new Date()).toISOString();
-    session.status = result.ok ? "active" : result.status === "cancelled" && session.queuedTurns.length > 0 && !session.cancelRequested ? "running" : result.status === "cancelled" ? "cancelled" : "failed";
+    session.status = result.ok ? "active" : result.status === "cancelled" && session.runtimeShutdownRecoverable && session.codexThreadId ? "active" : result.status === "cancelled" && session.queuedTurns.length > 0 && !session.cancelRequested ? "running" : result.status === "cancelled" ? "cancelled" : "failed";
     session.updatedAt = (/* @__PURE__ */ new Date()).toISOString();
     logger.rawInfo("session.turn.finish", {
       session: summarizeRawTrafficForLog(snapshot2(session)),
@@ -25442,6 +25497,7 @@ var CodexSessionManager = class {
       recentTurns: [],
       draining: false,
       cancelRequested: state.status === "cancelled",
+      runtimeShutdownRecoverable: false,
       waiters: /* @__PURE__ */ new Set(),
       persisted: true,
       recovered: true,
@@ -25694,8 +25750,8 @@ function jsonResult(value, isError = false) {
 function errorResult(error2, context = "tool_call") {
   return jsonResult(
     {
-      error: error2 instanceof Error ? error2.message : String(error2),
-      recovery: recoveryForError(error2, context)
+      error: redactSensitiveText(error2 instanceof Error ? error2.message : String(error2)),
+      recovery: redactJsonValue(recoveryForError(error2, context))
     },
     true
   );
@@ -25716,6 +25772,13 @@ function withRequestAbort(options, extra) {
 }
 function requestCancelledError() {
   return new Error("MCP request was cancelled by the client.");
+}
+function ephemeralJobDurability() {
+  return {
+    durable: false,
+    survivesRestart: false,
+    recommendation: "Use start_codex_session_async when Claude needs recoverable long-running Codex work across MCP restarts."
+  };
 }
 function throwIfRequestAborted(extra) {
   if (extra?.signal?.aborted) throw requestCancelledError();
@@ -26090,7 +26153,7 @@ server.registerTool(
   "run_agent",
   {
     title: "Run one Codex agent",
-    description: "Launch one OpenAI Codex agent via codex exec. Use automatically when the user asks Claude to use Codex, ask Codex, get a Codex second opinion, run a Codex subagent, use Codex Spark, or delegate one read-only analysis task. Defaults to the Codex desktop app binary when installed, read-only sandbox, Codex's normal service tier, and non-interactive approvals. For explicit non-sandbox/full-access requests, set dangerously_bypass_approvals_and_sandbox true.",
+    description: "Compatibility/manual tool for launching one OpenAI Codex agent via codex exec. Prefer ask_codex for normal Claude delegation. Defaults to the Codex desktop app binary when installed, read-only sandbox, Codex's normal service tier, and non-interactive approvals. For explicit non-sandbox/full-access requests, set dangerously_bypass_approvals_and_sandbox true.",
     inputSchema: {
       prompt: external_exports.string().min(1).describe(
         "Concrete instructions for the Codex agent. Include scope, read-only expectation, desired output shape, and file/line reference requirements when reviewing code."
@@ -26144,7 +26207,7 @@ server.registerTool(
         const job = jobManager.startAgent(toRunOptions(args));
         await progress.send(`Started Codex job ${job.id}`);
         await progress.flush();
-        return jsonResult({ job });
+        return jsonResult({ job, durability: ephemeralJobDurability() });
       } catch (error2) {
         await progress.flush();
         logger.error("start_agent_run.failed", { error: errorForLog(error2) });
@@ -26286,7 +26349,7 @@ server.registerTool(
   "run_agents",
   {
     title: "Run parallel Codex agents",
-    description: "Launch multiple independent OpenAI Codex agents concurrently and return one structured result per agent. Use automatically when the user asks for parallel Codex agents, multiple Codex subagents, broad review by independent agents, or several concurrent Codex workstreams. Split work by clear ownership, pass project_dir, keep defaults read-only, and use max_parallel to bound concurrency. For explicit non-sandbox/full-access requests, set dangerously_bypass_approvals_and_sandbox true.",
+    description: "Compatibility/manual tool for launching multiple independent OpenAI Codex agents concurrently. Prefer ask_codex_parallel for normal Claude delegation. Split work by clear ownership, pass project_dir, keep defaults read-only, and use max_parallel to bound concurrency. For explicit non-sandbox/full-access requests, set dangerously_bypass_approvals_and_sandbox true.",
     inputSchema: {
       agents: external_exports.array(parallelAgentSchema).min(1).max(12).describe(
         "Independent Codex agent tasks. Use names like api, tests, security, docs, performance, or ui when helpful."
@@ -26415,7 +26478,7 @@ server.registerTool(
         const job = jobManager.startAgents(toParallelRunOptions(args));
         await progress.send(`Started Codex job ${job.id}`);
         await progress.flush();
-        return jsonResult({ job });
+        return jsonResult({ job, durability: ephemeralJobDurability() });
       } catch (error2) {
         await progress.flush();
         logger.error("start_agents_run.failed", { error: errorForLog(error2) });

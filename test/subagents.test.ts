@@ -63,7 +63,7 @@ describe("Codex subagent helpers", () => {
     expect(toml).toContain('model_verbosity = "low"');
   });
 
-  it("builds Codex -c overrides for custom subagent definitions", () => {
+  it("keeps secret-bearing nested subagent config out of Codex argv overrides", () => {
     const overrides = codexSubagentConfigOverrides([
       {
         name: "ui_spark",
@@ -77,6 +77,9 @@ describe("Codex subagent helpers", () => {
           docs: {
             command: "node",
             args: ["server.mjs"],
+            env: {
+              API_KEY: "raw-nested-secret-canary",
+            },
           },
         },
         skillsConfig: {
@@ -97,10 +100,10 @@ describe("Codex subagent helpers", () => {
     expect(overrides).toContain('agents.ui_spark.model="gpt-5.3-codex-spark"');
     expect(overrides).toContain('agents.ui_spark.model_reasoning_effort="medium"');
     expect(overrides).toContain('agents.ui_spark.sandbox_mode="read-only"');
-    expect(overrides).toContain('agents.ui_spark.mcp_servers.docs.command="node"');
-    expect(overrides).toContain('agents.ui_spark.mcp_servers.docs.args=["server.mjs"]');
-    expect(overrides).toContain("agents.ui_spark.skills.config.playwright.enabled=true");
-    expect(overrides).toContain('agents.ui_spark.model_verbosity="low"');
+    expect(overrides.join("\n")).not.toContain("mcp_servers");
+    expect(overrides.join("\n")).not.toContain("skills.config");
+    expect(overrides.join("\n")).not.toContain("model_verbosity");
+    expect(overrides.join("\n")).not.toContain("raw-nested-secret-canary");
   });
 
   it("builds prompt instructions for requested subagent tasks", () => {

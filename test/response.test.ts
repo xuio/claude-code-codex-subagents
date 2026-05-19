@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { compactAgentResultForMcp, compactAgentResultsForMcp } from "../src/response.js";
+import { compactAgentResultForMcp, compactAgentResultsForMcp, compactSessionSnapshotForMcp } from "../src/response.js";
 import type { AgentRunResult } from "../src/runner.js";
 
 function agent(overrides: Partial<AgentRunResult> = {}): AgentRunResult {
@@ -92,5 +92,44 @@ describe("MCP response compaction", () => {
       "[truncated 9920 object keys]",
     );
     expect(JSON.stringify({ agent: compact }).length).toBeLessThan(30_000);
+  });
+
+  it("redacts bearer and colon-form secrets in command previews", () => {
+    const compact = compactAgentResultForMcp(
+      agent({
+        commandPreview: [
+          "/bin/codex",
+          "exec",
+          "Authorization: Bearer secretbearertoken1234567890",
+          "password: raw-password-canary",
+        ],
+      }),
+    );
+
+    expect(compact.commandPreview.join(" ")).not.toContain("secretbearertoken1234567890");
+    expect(compact.commandPreview.join(" ")).not.toContain("raw-password-canary");
+  });
+
+  it("compacts session turn prompts in MCP snapshots", () => {
+    const prompt = "p".repeat(100_000);
+    const compact = compactSessionSnapshotForMcp({
+      id: "session-test",
+      activeTurn: { id: "turn-active", prompt },
+      queuedTurns: [{ id: "turn-queued", prompt }],
+      recentTurns: Array.from({ length: 30 }, (_, index) => ({ id: `turn-${index}`, prompt })),
+    } as {
+      id: string;
+      lastResult?: unknown;
+      partial?: unknown;
+      activeTurn?: unknown;
+      queuedTurns?: unknown[];
+      recentTurns?: unknown[];
+    });
+
+    expect((compact.activeTurn as { prompt: string }).prompt.length).toBeLessThan(3_000);
+    expect((compact.activeTurn as { promptOmittedChars: number }).promptOmittedChars).toBeGreaterThan(90_000);
+    expect((compact.queuedTurns as unknown[])).toHaveLength(1);
+    expect((compact.recentTurns as unknown[])).toHaveLength(20);
+    expect(JSON.stringify(compact).length).toBeLessThan(60_000);
   });
 });

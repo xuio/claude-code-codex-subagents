@@ -113,6 +113,11 @@ try {
   });
   const jobId = asyncStart.structuredContent?.job?.id;
   assert(jobId, "start_agent_run should return a job id", asyncStart.structuredContent);
+  assert(
+    asyncStart.structuredContent?.durability?.survivesRestart === false,
+    "start_agent_run should advertise that async jobs do not survive MCP restarts",
+    asyncStart.structuredContent,
+  );
   await new Promise((resolve) => setTimeout(resolve, 650));
   const partial = await callTool("get_agent_run", { job_id: jobId });
   assert(
