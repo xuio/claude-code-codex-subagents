@@ -8,15 +8,14 @@ const cleanupHandlers = new Set<CleanupHandler>();
 let cleanupPromise: Promise<void> | undefined;
 
 export function killChildProcess(child: ChildProcess, signal: NodeJS.Signals): void {
-  if (child.exitCode !== null || child.killed) return;
+  if (child.exitCode !== null) return;
 
   try {
     if (process.platform !== "win32" && child.pid) {
       process.kill(-child.pid, signal);
-      return;
     }
   } catch {
-    // Fall back to killing the direct child below.
+    // Direct-child signaling below is still attempted.
   }
 
   try {

@@ -21536,11 +21536,10 @@ var trackedChildren = /* @__PURE__ */ new Map();
 var cleanupHandlers = /* @__PURE__ */ new Set();
 var cleanupPromise;
 function killChildProcess(child, signal) {
-  if (child.exitCode !== null || child.killed) return;
+  if (child.exitCode !== null) return;
   try {
     if (process.platform !== "win32" && child.pid) {
       process.kill(-child.pid, signal);
-      return;
     }
   } catch {
   }
@@ -23996,13 +23995,14 @@ var CodexAppServerSession = class _CodexAppServerSession {
       message = JSON.parse(line);
     } catch {
       const error2 = `Unparseable Codex app-server line: ${line.slice(0, 500)}`;
-      this.lastError = error2;
-      this.activeTurn?.summary.errors.push(error2);
-      this.activeTurn?.stdout.append(`${line}
-`);
-      this.activeTurn?.artifactWriter.appendStdout(`${line}
-`);
-      this.activeTurn?.publishSnapshot(true);
+      if (!this.activeTurn && this.acceptingStartNotifications) {
+        this.queuePendingStartNotification({
+          method: "internal/unparseableLine",
+          params: { error: error2, line }
+        });
+        return;
+      }
+      this.recordUnparseableLine(error2, line);
       return;
     }
     const id = typeof message.id === "string" || typeof message.id === "number" ? String(message.id) : void 0;
@@ -24061,6 +24061,10 @@ var CodexAppServerSession = class _CodexAppServerSession {
     const active = this.activeTurn;
     if (!active) {
       if (this.acceptingStartNotifications) this.queuePendingStartNotification(message);
+      return;
+    }
+    if (method === "internal/unparseableLine" && typeof params?.error === "string") {
+      this.recordUnparseableLine(params.error, typeof params.line === "string" ? params.line : "");
       return;
     }
     for (const handler of this.notificationHandlers) handler(message);
@@ -24176,6 +24180,15 @@ var CodexAppServerSession = class _CodexAppServerSession {
       this.activeTurn.resolve(this.finishActiveTurn(status));
       this.activeTurn = void 0;
     }
+  }
+  recordUnparseableLine(error2, line) {
+    this.lastError = error2;
+    this.activeTurn?.summary.errors.push(error2);
+    this.activeTurn?.stdout.append(`${line}
+`);
+    this.activeTurn?.artifactWriter.appendStdout(`${line}
+`);
+    this.activeTurn?.publishSnapshot(true);
   }
   async probeThreadRead(timeoutMs) {
     try {

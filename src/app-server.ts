@@ -724,11 +724,14 @@ export class CodexAppServerSession {
       message = JSON.parse(line) as JsonObject;
     } catch {
       const error = `Unparseable Codex app-server line: ${line.slice(0, 500)}`;
-      this.lastError = error;
-      this.activeTurn?.summary.errors.push(error);
-      this.activeTurn?.stdout.append(`${line}\n`);
-      this.activeTurn?.artifactWriter.appendStdout(`${line}\n`);
-      this.activeTurn?.publishSnapshot(true);
+      if (!this.activeTurn && this.acceptingStartNotifications) {
+        this.queuePendingStartNotification({
+          method: "internal/unparseableLine",
+          params: { error, line },
+        });
+        return;
+      }
+      this.recordUnparseableLine(error, line);
       return;
     }
 
@@ -800,6 +803,10 @@ export class CodexAppServerSession {
     const active = this.activeTurn;
     if (!active) {
       if (this.acceptingStartNotifications) this.queuePendingStartNotification(message);
+      return;
+    }
+    if (method === "internal/unparseableLine" && typeof params?.error === "string") {
+      this.recordUnparseableLine(params.error, typeof params.line === "string" ? params.line : "");
       return;
     }
     for (const handler of this.notificationHandlers) handler(message);
@@ -926,6 +933,14 @@ export class CodexAppServerSession {
       this.activeTurn.resolve(this.finishActiveTurn(status));
       this.activeTurn = undefined;
     }
+  }
+
+  private recordUnparseableLine(error: string, line: string): void {
+    this.lastError = error;
+    this.activeTurn?.summary.errors.push(error);
+    this.activeTurn?.stdout.append(`${line}\n`);
+    this.activeTurn?.artifactWriter.appendStdout(`${line}\n`);
+    this.activeTurn?.publishSnapshot(true);
   }
 
   private async probeThreadRead(timeoutMs: number): Promise<void> {
