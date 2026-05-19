@@ -233,7 +233,10 @@ export class RunValidationError extends Error {
 }
 
 export function validateRunConfiguration(
-  options: Pick<AgentRunOptions, "model" | "modelPreset" | "reasoningEffort" | "reasoningSummary">,
+  options: Pick<
+    AgentRunOptions,
+    "model" | "modelPreset" | "reasoningEffort" | "reasoningSummary" | "mcpConfigPolicy" | "codexMcpServers"
+  >,
   env: NodeJS.ProcessEnv = process.env,
 ): {
   model?: string;
@@ -258,6 +261,12 @@ export function validateRunConfiguration(
         `reasoning_summary='${reasoningSummary}' is not supported with model_preset='spark' (${sparkModel}). Omit reasoning_summary or use reasoning_summary='none'.`,
       );
     }
+  }
+
+  if (options.mcpConfigPolicy === "explicit" && Object.keys(options.codexMcpServers ?? {}).length === 0) {
+    throw new RunValidationError(
+      "mcp_config_policy='explicit' requires codex_mcp_servers with at least one server. Omit mcp_config_policy to inherit Codex config, or provide codex_mcp_servers.",
+    );
   }
 
   return { model, reasoningEffort, reasoningSummary };
@@ -465,6 +474,38 @@ function baseFailureResult(options: {
       tempCodexHomeUsed: false,
     },
   };
+}
+
+export function agentFailureResultForError(
+  options: AgentRunOptions,
+  error: unknown,
+  started = Date.now(),
+): AgentRunResult {
+  const mergedEnv = { ...process.env, ...options.env };
+  let cwd = options.projectDir ?? options.cwd ?? process.env.CLAUDE_PROJECT_DIR ?? process.cwd();
+  try {
+    cwd = path.resolve(cwd);
+  } catch {
+    cwd = process.cwd();
+  }
+  let codexBinary: ResolvedCodexBinary;
+  try {
+    codexBinary = resolveCodexBinary({ explicitPath: options.codexBin, env: mergedEnv });
+  } catch {
+    codexBinary = {
+      path: options.codexBin ?? "codex",
+      source: options.codexBin ? "explicit" : "PATH",
+    };
+  }
+  return baseFailureResult({
+    started,
+    codexBinary,
+    cwd,
+    runOptions: options,
+    env: mergedEnv,
+    message: error instanceof Error ? error.message : String(error),
+    status: "failed",
+  });
 }
 
 function cloneEventSummary(summary: CodexEventSummary): CodexEventSummary {
@@ -844,7 +885,7 @@ export async function runAgent(options: AgentRunOptions): Promise<AgentRunResult
       ? "cancelled"
       : timedOut
         ? "timeout"
-        : exitCode === 0
+        : exitCode === 0 && !(wantsStructuredOutput && structured.error)
           ? "completed"
           : "failed";
     logger[status === "completed" ? "rawInfo" : "rawError"]("agent.run.finish", {
@@ -931,7 +972,7 @@ export async function runAgents(options: ParallelRunOptions): Promise<AgentRunRe
       next += 1;
       const agent = options.agents[index];
       if (!agent) continue;
-      results[index] = await runAgent({
+      const runOptions = {
         ...options,
         ...agent,
         model: agent.model ?? options.defaultModel,
@@ -939,7 +980,17 @@ export async function runAgents(options: ParallelRunOptions): Promise<AgentRunRe
         reasoningEffort: agent.reasoningEffort ?? options.defaultReasoningEffort,
         prompt: agent.prompt,
         name: agent.name ?? `agent-${index + 1}`,
-      });
+      };
+      try {
+        results[index] = await runAgent(runOptions);
+      } catch (error) {
+        logger.error("agent.parallel_agent_failed", {
+          index,
+          name: runOptions.name,
+          error: errorForLog(error),
+        });
+        results[index] = agentFailureResultForError(runOptions, error);
+      }
     }
   }
 

@@ -46,12 +46,17 @@ function compactUnknown(value: unknown, maxStringChars: number, depth = 0): unkn
     return items;
   }
 
-  return Object.fromEntries(
-    Object.entries(value as Record<string, unknown>).map(([key, child]) => [
+  const entries = Object.entries(value as Record<string, unknown>);
+  const compacted = Object.fromEntries(
+    entries.slice(0, 80).map(([key, child]) => [
       key,
       compactUnknown(child, maxStringChars, depth + 1),
     ]),
   );
+  if (entries.length > 80) {
+    compacted.__truncatedObjectKeys = `[truncated ${entries.length - 80} object keys]`;
+  }
+  return compacted;
 }
 
 function compactSummary(summary: CodexEventSummary, limits: CompactLimits): CodexEventSummary {

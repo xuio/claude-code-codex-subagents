@@ -3,6 +3,7 @@ import {
   type AgentRunPartial,
   type AgentRunResult,
   type ParallelRunOptions,
+  agentFailureResultForError,
   runAgent,
 } from "./runner.js";
 import { errorForLog, logger, summarizeRawTrafficForLog } from "./logging.js";
@@ -307,8 +308,7 @@ export async function runQueuedAgents(
       next += 1;
       const agent = options.agents[index];
       if (!agent) continue;
-      const result = await runQueuedAgent(
-        {
+      const runOptions = {
           ...options,
           ...agent,
           model: agent.model ?? options.defaultModel,
@@ -316,15 +316,27 @@ export async function runQueuedAgents(
           reasoningEffort: agent.reasoningEffort ?? options.defaultReasoningEffort,
           prompt: agent.prompt,
           name: agent.name ?? `agent-${index + 1}`,
-        },
-        {
-          ...queueOptions,
-          onStart: (queuedMs) => queueOptions.onStart?.(queuedMs, agent.name ?? `agent-${index + 1}`),
-          onComplete: undefined,
-          onSnapshot: (snapshot) =>
-            queueOptions.onSnapshot?.(snapshot, index, options.agents.length),
-        },
-      );
+        };
+      let result: AgentRunResult;
+      try {
+        result = await runQueuedAgent(
+          runOptions,
+          {
+            ...queueOptions,
+            onStart: (queuedMs) => queueOptions.onStart?.(queuedMs, agent.name ?? `agent-${index + 1}`),
+            onComplete: undefined,
+            onSnapshot: (snapshot) =>
+              queueOptions.onSnapshot?.(snapshot, index, options.agents.length),
+          },
+        );
+      } catch (error) {
+        logger.error("queue.parallel_agent_failed", {
+          index,
+          name: runOptions.name,
+          error: errorForLog(error),
+        });
+        result = agentFailureResultForError(runOptions, error);
+      }
       results[index] = result;
       await callQueueCallback(() => queueOptions.onComplete?.(result, index, options.agents.length));
     }

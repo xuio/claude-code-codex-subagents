@@ -152,6 +152,19 @@ describe("buildCodexExecArgs", () => {
       ),
     ).toThrow(/reasoning_effort='minimal'.*web_search/);
   });
+
+  it("rejects explicit MCP config policy without servers", () => {
+    expect(() =>
+      buildCodexExecArgs(
+        {
+          cwd: "/repo",
+          mcpConfigPolicy: "explicit",
+        },
+        "/tmp/out.md",
+        {},
+      ),
+    ).toThrow(/requires codex_mcp_servers/);
+  });
 });
 
 describe("defaultReasoningEffort", () => {
@@ -328,6 +341,22 @@ describe("runAgent", () => {
     await expect(readFile(path.join(recordDir, "calls.jsonl"), "utf8")).rejects.toThrow();
   });
 
+  it("treats requested structured-output parse failures as failed runs", async () => {
+    const projectDir = await tempDir("codex-subagents-repo-");
+
+    const result = await runAgent({
+      prompt: "not structured json",
+      projectDir,
+      codexBin: fakeCodex,
+      outputContract: "review_findings",
+    });
+
+    expect(result.ok).toBe(false);
+    expect(result.status).toBe("failed");
+    expect(result.exitCode).toBe(0);
+    expect(result.structuredOutputError).toBeTruthy();
+  });
+
   it("can run with an isolated temporary Codex home", async () => {
     const projectDir = await tempDir("codex-subagents-repo-");
     const recordDir = await tempDir("codex-subagents-record-");
@@ -482,5 +511,25 @@ describe("runAgents", () => {
     expect(calls).toHaveLength(2);
     expect(calls.every((call) => call.args.includes("--dangerously-bypass-approvals-and-sandbox"))).toBe(true);
     expect(calls.every((call) => !call.args.includes("--sandbox"))).toBe(true);
+  });
+
+  it("preserves partial parallel results when one agent cannot start", async () => {
+    const projectDir = await tempDir("codex-subagents-repo-");
+
+    const results = await runAgents({
+      agents: [
+        { name: "bad", prompt: "bad project", projectDir: path.join(projectDir, "missing") },
+        { name: "good", prompt: "good project", projectDir },
+      ],
+      maxParallel: 2,
+      codexBin: fakeCodex,
+    });
+
+    expect(results).toHaveLength(2);
+    expect(results[0]?.name).toBe("bad");
+    expect(results[0]?.ok).toBe(false);
+    expect(results[0]?.eventSummary.errors.join("\n")).toContain("no such file or directory");
+    expect(results[1]?.name).toBe("good");
+    expect(results[1]?.ok).toBe(true);
   });
 });

@@ -107,9 +107,24 @@ if (args[0] === "app-server") {
     if (!activeTurn) return;
     const turnId = activeTurn;
     const exitAfterTurn = hasMode("APP_EXIT_AFTER_TURN");
-    const finalMessage = `fake app-server result for: ${activePrompt.trim()}${
+    let finalMessage = `fake app-server result for: ${activePrompt.trim()}${
       activeSteers.length ? ` | steers: ${activeSteers.join(" | ")}` : ""
     }`;
+    if (activePrompt.includes("JSON_FINAL=review_findings")) {
+      finalMessage = JSON.stringify({
+        summary: "fake structured review",
+        findings: [
+          {
+            severity: "medium",
+            title: "Fake finding",
+            description: "Structured output was requested.",
+            file: "src/example.ts",
+            line: 1,
+            recommendation: "Use the structured output.",
+          },
+        ],
+      });
+    }
     const largeStreamChars = numberMode("APP_LARGE_STREAM_CHARS");
     if (largeStreamChars > 0) {
       send({

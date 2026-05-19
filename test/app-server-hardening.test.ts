@@ -96,6 +96,36 @@ describe("app-server hardening", () => {
     manager.cancel(session.id);
   });
 
+  it("parses requested structured output for app-server sessions", async () => {
+    const manager = new CodexSessionManager();
+    const projectDir = await tempDir("codex-subagents-app-structured-project-");
+
+    const valid = await manager.start({
+      prompt: "JSON_FINAL=review_findings",
+      projectDir,
+      codexBin: fakeCodex,
+      outputContract: "review_findings",
+    });
+    expect(valid.result.ok).toBe(true);
+    expect((valid.result.structuredOutput as { findings?: Array<{ title?: string }> })?.findings?.[0]?.title).toBe(
+      "Fake finding",
+    );
+
+    const invalid = await manager.start({
+      prompt: "not structured json",
+      projectDir,
+      codexBin: fakeCodex,
+      outputContract: "review_findings",
+    });
+    expect(invalid.result.ok).toBe(false);
+    expect(invalid.result.status).toBe("failed");
+    expect(invalid.result.structuredOutputError).toBeTruthy();
+    await Promise.all([
+      manager.cancel(valid.session.id),
+      manager.cancel(invalid.session.id),
+    ]);
+  });
+
   it("resets app-server idle timeouts when output is still flowing", async () => {
     const manager = new CodexSessionManager();
     const projectDir = await tempDir("codex-subagents-app-idle-project-");
@@ -541,6 +571,23 @@ describe("app-server hardening", () => {
     expect(waited.completed).toBe(false);
     expect(waited.timeoutReason).toBe("wait_timeout");
     expect(waited.session?.active).toBe(true);
+    expect(manager.stats().waiters).toBe(0);
+    manager.cancel(session.id);
+  });
+
+  it("returns an immediate error for unknown session turn ids", async () => {
+    const manager = new CodexSessionManager();
+    const projectDir = await tempDir("codex-subagents-app-wait-missing-turn-project-");
+
+    const { session } = manager.startAsync({
+      prompt: "wait missing turn DELAY_MS=200",
+      projectDir,
+      codexBin: fakeCodex,
+    });
+
+    const waited = await manager.wait(session.id, 2_000, "turn-missing");
+    expect(waited.completed).toBe(false);
+    expect(waited.error).toContain("Unknown turn_id");
     expect(manager.stats().waiters).toBe(0);
     manager.cancel(session.id);
   });

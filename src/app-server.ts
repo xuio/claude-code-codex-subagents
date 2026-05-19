@@ -1,6 +1,7 @@
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { stat } from "node:fs/promises";
 import { resolveCodexBinary, type ResolvedCodexBinary } from "./binary.js";
+import { parseStructuredOutput, schemaForOutputContract } from "./contracts.js";
 import { killChildProcess, trackChildProcess } from "./lifecycle.js";
 import {
   defaultReasoningEffort,
@@ -452,14 +453,23 @@ export class CodexAppServerSession {
 
     const finish = (status: AgentRunResult["status"], error?: string): AgentRunResult => {
       const final = truncate(redactSensitiveText(summary.lastAgentMessage ?? ""), maxOutputChars);
+      const wantsStructuredOutput = Boolean(
+        schemaForOutputContract(options.outputContract, options.outputSchema) ||
+          (options.outputContract && options.outputContract !== "freeform"),
+      );
+      const structured =
+        wantsStructuredOutput
+          ? parseStructuredOutput(summary.lastAgentMessage ?? "")
+          : { value: undefined, error: undefined };
+      const resultStatus = status === "completed" && structured.error ? "failed" : status;
       const outputArtifacts = this.activeTurn?.artifactWriter.finish({
         finalMessage: summary.lastAgentMessage ?? "",
         keep: final.truncatedChars > 0 || stdout.truncated() > 0 || stderr.truncated() > 0,
       });
       const result: AgentRunResult = {
         name: options.name,
-        ok: status === "completed",
-        status,
+        ok: resultStatus === "completed",
+        status: resultStatus,
         durationMs: Date.now() - started,
         codexBinary: this.codexBinary,
         cwd: this.cwd,
@@ -481,6 +491,8 @@ export class CodexAppServerSession {
         },
         outputArtifacts,
         eventSummary: cloneSummary(summary),
+        structuredOutput: structured.value === undefined ? undefined : redactJsonValue(structured.value),
+        structuredOutputError: structured.error,
         commandPreview: [this.codexBinary.path, "app-server", "--listen", "stdio://", "turn/start"],
         timeoutReason,
         codexSubagents: {
@@ -887,10 +899,19 @@ export class CodexAppServerSession {
       finalMessage: active.summary.lastAgentMessage ?? "",
       keep: final.truncatedChars > 0 || active.stdout.truncated() > 0 || active.stderr.truncated() > 0,
     });
+    const wantsStructuredOutput = Boolean(
+      schemaForOutputContract(active.options.outputContract, active.options.outputSchema) ||
+        (active.options.outputContract && active.options.outputContract !== "freeform"),
+    );
+    const structured =
+      wantsStructuredOutput
+        ? parseStructuredOutput(active.summary.lastAgentMessage ?? "")
+        : { value: undefined, error: undefined };
+    const resultStatus = status === "completed" && structured.error ? "failed" : status;
     const result: AgentRunResult = {
       name: active.options.name,
-      ok: status === "completed",
-      status,
+      ok: resultStatus === "completed",
+      status: resultStatus,
       durationMs: Date.now() - active.started,
       codexBinary: this.codexBinary,
       cwd: this.cwd,
@@ -912,6 +933,8 @@ export class CodexAppServerSession {
       },
       outputArtifacts,
       eventSummary: cloneSummary(active.summary),
+      structuredOutput: structured.value === undefined ? undefined : redactJsonValue(structured.value),
+      structuredOutputError: structured.error,
       commandPreview: [this.codexBinary.path, "app-server", "--listen", "stdio://", "turn/start"],
       timeoutReason: active.timeoutReason,
       codexSubagents: {

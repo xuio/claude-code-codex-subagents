@@ -77,4 +77,20 @@ describe("MCP response compaction", () => {
     expect(JSON.stringify({ agents: compact }).length).toBeLessThan(45_000);
     expect(compact.every((result) => result.mcpResponse.compacted)).toBe(true);
   });
+
+  it("caps huge shallow structured objects", () => {
+    const compact = compactAgentResultForMcp(
+      agent({
+        structuredOutput: Object.fromEntries(
+          Array.from({ length: 10_000 }, (_, index) => [`key_${index}`, `value_${index}`]),
+        ),
+      }),
+    );
+
+    expect(Object.keys(compact.structuredOutput as Record<string, unknown>).length).toBeLessThan(100);
+    expect((compact.structuredOutput as Record<string, unknown>).__truncatedObjectKeys).toBe(
+      "[truncated 9920 object keys]",
+    );
+    expect(JSON.stringify({ agent: compact }).length).toBeLessThan(30_000);
+  });
 });

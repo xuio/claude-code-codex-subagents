@@ -1,7 +1,6 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
-import type { RequestHandlerExtra } from "@modelcontextprotocol/sdk/shared/protocol.js";
-import type { CallToolResult, JSONRPCMessage, ServerNotification, ServerRequest } from "@modelcontextprotocol/sdk/types.js";
+import type { CallToolResult, JSONRPCMessage } from "@modelcontextprotocol/sdk/types.js";
 import { z } from "zod";
 import {
   defaultModel,
@@ -28,6 +27,7 @@ import { jobManager, runQueuedAgent, runQueuedAgents } from "./jobs.js";
 import { cleanupRuntime, lifecycleStats, registerCleanupHandler } from "./lifecycle.js";
 import { errorForLog, logger, loggingDiagnostics, makeLogId, summarizeRawTrafficForLog } from "./logging.js";
 import { recoveryForAgentResult, recoveryForError, recoveryForWait } from "./recovery.js";
+import { createProgressReporter, type ProgressOptions, type ProgressReporter, type ToolExtra } from "./progress.js";
 import {
   compactAgentResultForMcp,
   compactAgentResultsForMcp,
@@ -36,9 +36,6 @@ import {
 } from "./response.js";
 import { sessionManager } from "./sessions.js";
 import { modelPresets } from "./subagents.js";
-
-type ToolExtra = RequestHandlerExtra<ServerRequest, ServerNotification>;
-type ProgressReporter = ReturnType<typeof createProgressReporter>;
 
 const usageGuide = [
   "Claude Code integration guide for codex-subagents:",
@@ -390,13 +387,28 @@ function toCodexSubagents(
 }
 
 function jsonResult(value: Record<string, unknown>, isError = false): CallToolResult {
+  const fullText = JSON.stringify(value, null, 2);
+  const text =
+    fullText.length <= 4_000
+      ? fullText
+      : JSON.stringify(
+          {
+            ok: Boolean(value.ok ?? !isError),
+            isError,
+            note:
+              "MCP text content was shortened to keep Claude responsive; use structuredContent for the compacted result.",
+            keys: Object.keys(value),
+          },
+          null,
+          2,
+        );
   return {
     structuredContent: value,
     isError,
     content: [
       {
         type: "text",
-        text: JSON.stringify(value, null, 2),
+        text,
       },
     ],
   };
@@ -492,60 +504,6 @@ async function loggedToolCall(
   }
 }
 
-function createProgressReporter(extra: ToolExtra | undefined) {
-  const progressToken = extra?._meta?.progressToken;
-  let progress = 0;
-  let pending = Promise.resolve();
-
-  async function send(message: string, options: { progress?: number; total?: number } = {}) {
-    logger.rawDebug("mcp.progress", {
-      hasProgressToken: progressToken !== undefined,
-      message,
-      options,
-    });
-    if (progressToken === undefined || !extra) return;
-
-    pending = pending
-      .catch(() => {})
-      .then(async () => {
-        const requested = options.progress ?? progress + 1;
-        progress = Math.max(progress + 1, requested);
-        await extra.sendNotification({
-          method: "notifications/progress",
-          params: {
-            progressToken,
-            progress,
-            ...(options.total === undefined ? {} : { total: options.total }),
-            message,
-          },
-        });
-        logger.rawDebug("mcp.notification.sent", {
-          method: "notifications/progress",
-          params: {
-            progressToken,
-            progress,
-            ...(options.total === undefined ? {} : { total: options.total }),
-            message,
-          },
-        });
-      })
-      .catch((error) => {
-        logger.error("mcp.notification.failed", { error: errorForLog(error) });
-        // Progress is best-effort; a failed notification must not fail the tool call.
-      });
-
-    await pending;
-  }
-
-  async function flush() {
-    if (progressToken === undefined || !extra) return;
-    await pending;
-    await new Promise((resolve) => setTimeout(resolve, 0));
-  }
-
-  return { send, flush };
-}
-
 function installTransportLogging(transport: StdioServerTransport): void {
   const previousOnMessage = transport.onmessage;
   transport.onmessage = (message) => {
@@ -590,9 +548,10 @@ async function withProgressHeartbeat<T>(
   progress: ProgressReporter,
   message: string,
   operation: () => Promise<T>,
+  progressOptions?: ProgressOptions,
 ): Promise<T> {
   const interval = setInterval(() => {
-    void progress.send(message);
+    void progress.send(message, progressOptions);
   }, progressHeartbeatMs());
   interval.unref();
   try {
@@ -662,7 +621,7 @@ function toRunOptions(args: {
     skipGitRepoCheck: args.skip_git_repo_check,
     ignoreRules: args.ignore_rules,
     isolatedCodexHome: args.isolated_codex_home,
-    mcpConfigPolicy: args.mcp_config_policy,
+    mcpConfigPolicy: args.mcp_config_policy ?? (args.codex_mcp_servers ? "explicit" : undefined),
     codexMcpServers: args.codex_mcp_servers,
     forwardSensitiveEnv: args.forward_sensitive_env,
     idleTimeoutMs: args.idle_timeout_ms,
@@ -771,7 +730,10 @@ function toParallelRunOptions(args: ParallelToolInput) {
       skipGitRepoCheck: agent.skip_git_repo_check ?? args.skip_git_repo_check,
       ignoreRules: agent.ignore_rules ?? args.ignore_rules,
       isolatedCodexHome: agent.isolated_codex_home ?? args.isolated_codex_home,
-      mcpConfigPolicy: agent.mcp_config_policy ?? args.mcp_config_policy,
+      mcpConfigPolicy:
+        agent.mcp_config_policy ??
+        args.mcp_config_policy ??
+        (agent.codex_mcp_servers ?? args.codex_mcp_servers ? "explicit" : undefined),
       codexMcpServers: agent.codex_mcp_servers ?? args.codex_mcp_servers,
       forwardSensitiveEnv: agent.forward_sensitive_env ?? args.forward_sensitive_env,
       idleTimeoutMs: agent.idle_timeout_ms ?? args.idle_timeout_ms,
@@ -1198,9 +1160,10 @@ server.registerTool(
                     ? `Parallel Codex run completed (${completed}/${args.tasks.length})`
                     : `Parallel Codex run finished with errors (${completed}/${args.tasks.length})`
                   : `${result.ok ? "Completed" : "Finished"} ${result.name ?? "Codex agent"} (${completed}/${args.tasks.length})`;
-                await progress.send(message, last ? { progress: total, total } : { total });
+                await progress.send(message, last ? { progress: total, total } : { total, reserveFinal: true });
               },
             }),
+          { total, reserveFinal: true },
         );
         const ok = results.every((result) => result.ok);
         await progress.flush();
@@ -1271,9 +1234,10 @@ server.registerTool(
                     ? `Parallel Codex run completed (${completed}/${args.agents.length})`
                     : `Parallel Codex run finished with errors (${completed}/${args.agents.length})`
                   : `${result.ok ? "Completed" : "Finished"} ${result.name ?? "Codex agent"} (${completed}/${args.agents.length})`;
-                await progress.send(message, last ? { progress: total, total } : { total });
+                await progress.send(message, last ? { progress: total, total } : { total, reserveFinal: true });
               },
             }),
+          { total, reserveFinal: true },
         );
         const ok = results.every((result) => result.ok);
         await progress.flush();
@@ -1333,10 +1297,11 @@ server.registerTool(
                   last
                     ? `Aggregating ${completed}/${args.agents.length} Codex results`
                     : `Completed ${completed}/${args.agents.length} Codex agents`,
-                  last ? { progress: total, total } : { total },
+                  last ? { progress: total, total } : { total, reserveFinal: true },
                 );
               },
             }),
+          { total, reserveFinal: true },
         );
         const aggregation = aggregateAgentResults(results);
         await progress.flush();
@@ -1451,11 +1416,16 @@ server.registerTool(
       if (job.completedAt) await progress.send(`Codex job ${job.status}`);
       await progress.flush();
       const waitReason = job.completedAt ? undefined : waitCancelled ? "wait_cancelled" : "wait_timeout";
+      const completed = Boolean(job.completedAt);
       return jsonResult(
         {
+          completed,
           job: compactJobSnapshotForMcp(job),
           timeoutReason: waitReason,
           recovery: recoveryForWait("agent_job", waitReason),
+          note: completed
+            ? undefined
+            : "The Codex job is still managed by this MCP server. Use get_agent_run or wait_agent_run again.",
         },
         waitCancelled || job.status === "failed" || job.status === "cancelled",
       );
@@ -1986,7 +1956,9 @@ server.registerTool(
         await progress.send(
           waited.completed
             ? `Codex session ${args.session_id} is ready`
-            : `Timed out waiting for Codex session ${args.session_id}`,
+            : waited.timeoutReason === "wait_cancelled"
+              ? `Cancelled wait for Codex session ${args.session_id}`
+              : `Timed out waiting for Codex session ${args.session_id}`,
         );
         await progress.flush();
         if (waited.error || !waited.session) {

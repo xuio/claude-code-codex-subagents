@@ -22014,6 +22014,11 @@ function validateRunConfiguration(options, env = process.env) {
       );
     }
   }
+  if (options.mcpConfigPolicy === "explicit" && Object.keys(options.codexMcpServers ?? {}).length === 0) {
+    throw new RunValidationError(
+      "mcp_config_policy='explicit' requires codex_mcp_servers with at least one server. Omit mcp_config_policy to inherit Codex config, or provide codex_mcp_servers."
+    );
+  }
   return { model, reasoningEffort, reasoningSummary };
 }
 async function resolveWorkingDirectory(cwd, env = process.env) {
@@ -22179,6 +22184,33 @@ function baseFailureResult(options) {
       tempCodexHomeUsed: false
     }
   };
+}
+function agentFailureResultForError(options, error2, started = Date.now()) {
+  const mergedEnv = { ...process.env, ...options.env };
+  let cwd = options.projectDir ?? options.cwd ?? process.env.CLAUDE_PROJECT_DIR ?? process.cwd();
+  try {
+    cwd = path5.resolve(cwd);
+  } catch {
+    cwd = process.cwd();
+  }
+  let codexBinary;
+  try {
+    codexBinary = resolveCodexBinary({ explicitPath: options.codexBin, env: mergedEnv });
+  } catch {
+    codexBinary = {
+      path: options.codexBin ?? "codex",
+      source: options.codexBin ? "explicit" : "PATH"
+    };
+  }
+  return baseFailureResult({
+    started,
+    codexBinary,
+    cwd,
+    runOptions: options,
+    env: mergedEnv,
+    message: error2 instanceof Error ? error2.message : String(error2),
+    status: "failed"
+  });
 }
 function cloneEventSummary(summary) {
   return redactJsonValue({
@@ -22512,7 +22544,7 @@ async function runAgent(options) {
     });
     const redactedSummary = cloneEventSummary(summary);
     const redactedStructuredOutput = structured.value === void 0 ? void 0 : redactJsonValue(structured.value);
-    const status = cancelled ? "cancelled" : timedOut ? "timeout" : exitCode === 0 ? "completed" : "failed";
+    const status = cancelled ? "cancelled" : timedOut ? "timeout" : exitCode === 0 && !(wantsStructuredOutput && structured.error) ? "completed" : "failed";
     logger[status === "completed" ? "rawInfo" : "rawError"]("agent.run.finish", {
       runId,
       status,
@@ -22926,23 +22958,34 @@ async function runQueuedAgents(options, queueOptions = {}) {
       next += 1;
       const agent = options.agents[index];
       if (!agent) continue;
-      const result = await runQueuedAgent(
-        {
-          ...options,
-          ...agent,
-          model: agent.model ?? options.defaultModel,
-          modelPreset: agent.modelPreset ?? options.modelPreset,
-          reasoningEffort: agent.reasoningEffort ?? options.defaultReasoningEffort,
-          prompt: agent.prompt,
-          name: agent.name ?? `agent-${index + 1}`
-        },
-        {
-          ...queueOptions,
-          onStart: (queuedMs) => queueOptions.onStart?.(queuedMs, agent.name ?? `agent-${index + 1}`),
-          onComplete: void 0,
-          onSnapshot: (snapshot3) => queueOptions.onSnapshot?.(snapshot3, index, options.agents.length)
-        }
-      );
+      const runOptions = {
+        ...options,
+        ...agent,
+        model: agent.model ?? options.defaultModel,
+        modelPreset: agent.modelPreset ?? options.modelPreset,
+        reasoningEffort: agent.reasoningEffort ?? options.defaultReasoningEffort,
+        prompt: agent.prompt,
+        name: agent.name ?? `agent-${index + 1}`
+      };
+      let result;
+      try {
+        result = await runQueuedAgent(
+          runOptions,
+          {
+            ...queueOptions,
+            onStart: (queuedMs) => queueOptions.onStart?.(queuedMs, agent.name ?? `agent-${index + 1}`),
+            onComplete: void 0,
+            onSnapshot: (snapshot3) => queueOptions.onSnapshot?.(snapshot3, index, options.agents.length)
+          }
+        );
+      } catch (error2) {
+        logger.error("queue.parallel_agent_failed", {
+          index,
+          name: runOptions.name,
+          error: errorForLog(error2)
+        });
+        result = agentFailureResultForError(runOptions, error2);
+      }
       results[index] = result;
       await callQueueCallback(() => queueOptions.onComplete?.(result, index, options.agents.length));
     }
@@ -23250,6 +23293,84 @@ function recoveryForWait(kind, timeoutReason) {
   };
 }
 
+// src/progress.ts
+function progressSendTimeoutMs(env = process.env) {
+  const parsed = Number(env.CODEX_SUBAGENTS_PROGRESS_SEND_TIMEOUT_MS);
+  if (!Number.isFinite(parsed) || parsed <= 0) return 1e3;
+  return Math.max(25, Math.min(Math.floor(parsed), 1e4));
+}
+function timeoutPromise(ms) {
+  return new Promise((_, reject) => {
+    const timer = setTimeout(() => reject(new Error(`Progress notification timed out after ${ms}ms`)), ms);
+    timer.unref();
+  });
+}
+async function bounded(promise, timeoutMs) {
+  return Promise.race([promise, timeoutPromise(timeoutMs)]);
+}
+function createProgressReporter(extra, options = {}) {
+  const progressToken = extra?._meta?.progressToken;
+  const sendTimeoutMs = options.sendTimeoutMs ?? progressSendTimeoutMs();
+  let progress = 0;
+  let pending = Promise.resolve();
+  let disabled = false;
+  let failures = 0;
+  async function send(message, progressOptions = {}) {
+    logger.rawDebug("mcp.progress", {
+      hasProgressToken: progressToken !== void 0,
+      message,
+      options: progressOptions
+    });
+    if (progressToken === void 0 || !extra || disabled) return;
+    pending = pending.catch(() => {
+    }).then(async () => {
+      const requested = progressOptions.progress ?? progress + 1;
+      const unclamped = Math.max(progress + 1, requested);
+      const next = progressOptions.total === void 0 ? unclamped : Math.min(
+        unclamped,
+        progressOptions.reserveFinal && progressOptions.progress === void 0 ? Math.max(0, progressOptions.total - 1) : progressOptions.total
+      );
+      if (next <= progress) return;
+      progress = next;
+      await bounded(
+        extra.sendNotification({
+          method: "notifications/progress",
+          params: {
+            progressToken,
+            progress,
+            ...progressOptions.total === void 0 ? {} : { total: progressOptions.total },
+            message
+          }
+        }),
+        sendTimeoutMs
+      );
+      failures = 0;
+      logger.rawDebug("mcp.notification.sent", {
+        method: "notifications/progress",
+        params: {
+          progressToken,
+          progress,
+          ...progressOptions.total === void 0 ? {} : { total: progressOptions.total },
+          message
+        }
+      });
+    }).catch((error2) => {
+      failures += 1;
+      if (failures >= 2) disabled = true;
+      logger.error("mcp.notification.failed", { disabled, error: errorForLog(error2) });
+    });
+    await bounded(pending, sendTimeoutMs + 25).catch(() => {
+    });
+  }
+  async function flush() {
+    if (progressToken === void 0 || !extra) return;
+    await bounded(pending, sendTimeoutMs + 25).catch(() => {
+    });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+  }
+  return { send, flush };
+}
+
 // src/response.ts
 var singleAgentLimits = {
   finalMessageChars: 12e3,
@@ -23282,12 +23403,17 @@ function compactUnknown(value, maxStringChars2, depth = 0) {
     if (value.length > items.length) items.push(`[truncated ${value.length - items.length} array items]`);
     return items;
   }
-  return Object.fromEntries(
-    Object.entries(value).map(([key, child]) => [
+  const entries = Object.entries(value);
+  const compacted = Object.fromEntries(
+    entries.slice(0, 80).map(([key, child]) => [
       key,
       compactUnknown(child, maxStringChars2, depth + 1)
     ])
   );
+  if (entries.length > 80) {
+    compacted.__truncatedObjectKeys = `[truncated ${entries.length - 80} object keys]`;
+  }
+  return compacted;
 }
 function compactSummary(summary, limits) {
   return {
@@ -23738,14 +23864,19 @@ var CodexAppServerSession = class _CodexAppServerSession {
     });
     const finish = (status, error2) => {
       const final = truncate2(redactSensitiveText(summary.lastAgentMessage ?? ""), maxOutputChars);
+      const wantsStructuredOutput = Boolean(
+        schemaForOutputContract(options.outputContract, options.outputSchema) || options.outputContract && options.outputContract !== "freeform"
+      );
+      const structured = wantsStructuredOutput ? parseStructuredOutput(summary.lastAgentMessage ?? "") : { value: void 0, error: void 0 };
+      const resultStatus = status === "completed" && structured.error ? "failed" : status;
       const outputArtifacts = this.activeTurn?.artifactWriter.finish({
         finalMessage: summary.lastAgentMessage ?? "",
         keep: final.truncatedChars > 0 || stdout.truncated() > 0 || stderr.truncated() > 0
       });
       const result2 = {
         name: options.name,
-        ok: status === "completed",
-        status,
+        ok: resultStatus === "completed",
+        status: resultStatus,
         durationMs: Date.now() - started,
         codexBinary: this.codexBinary,
         cwd: this.cwd,
@@ -23767,6 +23898,8 @@ var CodexAppServerSession = class _CodexAppServerSession {
         },
         outputArtifacts,
         eventSummary: cloneSummary(summary),
+        structuredOutput: structured.value === void 0 ? void 0 : redactJsonValue(structured.value),
+        structuredOutputError: structured.error,
         commandPreview: [this.codexBinary.path, "app-server", "--listen", "stdio://", "turn/start"],
         timeoutReason,
         codexSubagents: {
@@ -24136,10 +24269,15 @@ var CodexAppServerSession = class _CodexAppServerSession {
       finalMessage: active.summary.lastAgentMessage ?? "",
       keep: final.truncatedChars > 0 || active.stdout.truncated() > 0 || active.stderr.truncated() > 0
     });
+    const wantsStructuredOutput = Boolean(
+      schemaForOutputContract(active.options.outputContract, active.options.outputSchema) || active.options.outputContract && active.options.outputContract !== "freeform"
+    );
+    const structured = wantsStructuredOutput ? parseStructuredOutput(active.summary.lastAgentMessage ?? "") : { value: void 0, error: void 0 };
+    const resultStatus = status === "completed" && structured.error ? "failed" : status;
     const result = {
       name: active.options.name,
-      ok: status === "completed",
-      status,
+      ok: resultStatus === "completed",
+      status: resultStatus,
       durationMs: Date.now() - active.started,
       codexBinary: this.codexBinary,
       cwd: this.cwd,
@@ -24161,6 +24299,8 @@ var CodexAppServerSession = class _CodexAppServerSession {
       },
       outputArtifacts,
       eventSummary: cloneSummary(active.summary),
+      structuredOutput: structured.value === void 0 ? void 0 : redactJsonValue(structured.value),
+      structuredOutputError: structured.error,
       commandPreview: [this.codexBinary.path, "app-server", "--listen", "stdio://", "turn/start"],
       timeoutReason: active.timeoutReason,
       codexSubagents: {
@@ -24616,6 +24756,9 @@ var CodexSessionManager = class {
     this.prune();
     const session = this.sessions.get(id);
     if (!session) return { error: `Unknown session_id: ${id}` };
+    if (turnId && !this.findTurn(session, turnId)) {
+      return { session: snapshot2(session), completed: false, error: `Unknown turn_id: ${turnId}` };
+    }
     if (abortSignal?.aborted) {
       const turn2 = turnId ? this.findTurn(session, turnId) : void 0;
       return {
@@ -25374,13 +25517,24 @@ function toCodexSubagents(agents) {
   }));
 }
 function jsonResult(value, isError = false) {
+  const fullText = JSON.stringify(value, null, 2);
+  const text = fullText.length <= 4e3 ? fullText : JSON.stringify(
+    {
+      ok: Boolean(value.ok ?? !isError),
+      isError,
+      note: "MCP text content was shortened to keep Claude responsive; use structuredContent for the compacted result.",
+      keys: Object.keys(value)
+    },
+    null,
+    2
+  );
   return {
     structuredContent: value,
     isError,
     content: [
       {
         type: "text",
-        text: JSON.stringify(value, null, 2)
+        text
       }
     ]
   };
@@ -25463,51 +25617,6 @@ async function loggedToolCall(tool, args, extra, run) {
     return errorResult(error2, tool);
   }
 }
-function createProgressReporter(extra) {
-  const progressToken = extra?._meta?.progressToken;
-  let progress = 0;
-  let pending = Promise.resolve();
-  async function send(message, options = {}) {
-    logger.rawDebug("mcp.progress", {
-      hasProgressToken: progressToken !== void 0,
-      message,
-      options
-    });
-    if (progressToken === void 0 || !extra) return;
-    pending = pending.catch(() => {
-    }).then(async () => {
-      const requested = options.progress ?? progress + 1;
-      progress = Math.max(progress + 1, requested);
-      await extra.sendNotification({
-        method: "notifications/progress",
-        params: {
-          progressToken,
-          progress,
-          ...options.total === void 0 ? {} : { total: options.total },
-          message
-        }
-      });
-      logger.rawDebug("mcp.notification.sent", {
-        method: "notifications/progress",
-        params: {
-          progressToken,
-          progress,
-          ...options.total === void 0 ? {} : { total: options.total },
-          message
-        }
-      });
-    }).catch((error2) => {
-      logger.error("mcp.notification.failed", { error: errorForLog(error2) });
-    });
-    await pending;
-  }
-  async function flush() {
-    if (progressToken === void 0 || !extra) return;
-    await pending;
-    await new Promise((resolve) => setTimeout(resolve, 0));
-  }
-  return { send, flush };
-}
 function installTransportLogging(transport) {
   const previousOnMessage = transport.onmessage;
   transport.onmessage = (message) => {
@@ -25543,9 +25652,9 @@ function progressHeartbeatMs() {
   if (!Number.isFinite(parsed) || parsed <= 0) return 1e4;
   return Math.max(25, Math.min(Math.floor(parsed), 6e4));
 }
-async function withProgressHeartbeat(progress, message, operation) {
+async function withProgressHeartbeat(progress, message, operation, progressOptions) {
   const interval = setInterval(() => {
-    void progress.send(message);
+    void progress.send(message, progressOptions);
   }, progressHeartbeatMs());
   interval.unref();
   try {
@@ -25577,7 +25686,7 @@ function toRunOptions(args) {
     skipGitRepoCheck: args.skip_git_repo_check,
     ignoreRules: args.ignore_rules,
     isolatedCodexHome: args.isolated_codex_home,
-    mcpConfigPolicy: args.mcp_config_policy,
+    mcpConfigPolicy: args.mcp_config_policy ?? (args.codex_mcp_servers ? "explicit" : void 0),
     codexMcpServers: args.codex_mcp_servers,
     forwardSensitiveEnv: args.forward_sensitive_env,
     idleTimeoutMs: args.idle_timeout_ms,
@@ -25628,7 +25737,7 @@ function toParallelRunOptions(args) {
       skipGitRepoCheck: agent.skip_git_repo_check ?? args.skip_git_repo_check,
       ignoreRules: agent.ignore_rules ?? args.ignore_rules,
       isolatedCodexHome: agent.isolated_codex_home ?? args.isolated_codex_home,
-      mcpConfigPolicy: agent.mcp_config_policy ?? args.mcp_config_policy,
+      mcpConfigPolicy: agent.mcp_config_policy ?? args.mcp_config_policy ?? (agent.codex_mcp_servers ?? args.codex_mcp_servers ? "explicit" : void 0),
       codexMcpServers: agent.codex_mcp_servers ?? args.codex_mcp_servers,
       forwardSensitiveEnv: agent.forward_sensitive_env ?? args.forward_sensitive_env,
       idleTimeoutMs: agent.idle_timeout_ms ?? args.idle_timeout_ms,
@@ -25998,9 +26107,10 @@ server.registerTool(
               if (!result.ok) failed += 1;
               const last = completed === args.tasks.length;
               const message = last ? failed === 0 ? `Parallel Codex run completed (${completed}/${args.tasks.length})` : `Parallel Codex run finished with errors (${completed}/${args.tasks.length})` : `${result.ok ? "Completed" : "Finished"} ${result.name ?? "Codex agent"} (${completed}/${args.tasks.length})`;
-              await progress.send(message, last ? { progress: total, total } : { total });
+              await progress.send(message, last ? { progress: total, total } : { total, reserveFinal: true });
             }
-          })
+          }),
+          { total, reserveFinal: true }
         );
         const ok = results.every((result) => result.ok);
         await progress.flush();
@@ -26054,9 +26164,10 @@ server.registerTool(
               if (!result.ok) failed += 1;
               const last = completed === args.agents.length;
               const message = last ? failed === 0 ? `Parallel Codex run completed (${completed}/${args.agents.length})` : `Parallel Codex run finished with errors (${completed}/${args.agents.length})` : `${result.ok ? "Completed" : "Finished"} ${result.name ?? "Codex agent"} (${completed}/${args.agents.length})`;
-              await progress.send(message, last ? { progress: total, total } : { total });
+              await progress.send(message, last ? { progress: total, total } : { total, reserveFinal: true });
             }
-          })
+          }),
+          { total, reserveFinal: true }
         );
         const ok = results.every((result) => result.ok);
         await progress.flush();
@@ -26107,10 +26218,11 @@ server.registerTool(
               const last = completed === args.agents.length;
               await progress.send(
                 last ? `Aggregating ${completed}/${args.agents.length} Codex results` : `Completed ${completed}/${args.agents.length} Codex agents`,
-                last ? { progress: total, total } : { total }
+                last ? { progress: total, total } : { total, reserveFinal: true }
               );
             }
-          })
+          }),
+          { total, reserveFinal: true }
         );
         const aggregation = aggregateAgentResults(results);
         await progress.flush();
@@ -26215,11 +26327,14 @@ server.registerTool(
       if (job.completedAt) await progress.send(`Codex job ${job.status}`);
       await progress.flush();
       const waitReason = job.completedAt ? void 0 : waitCancelled ? "wait_cancelled" : "wait_timeout";
+      const completed = Boolean(job.completedAt);
       return jsonResult(
         {
+          completed,
           job: compactJobSnapshotForMcp(job),
           timeoutReason: waitReason,
-          recovery: recoveryForWait("agent_job", waitReason)
+          recovery: recoveryForWait("agent_job", waitReason),
+          note: completed ? void 0 : "The Codex job is still managed by this MCP server. Use get_agent_run or wait_agent_run again."
         },
         waitCancelled || job.status === "failed" || job.status === "cancelled"
       );
@@ -26692,7 +26807,7 @@ server.registerTool(
         () => sessionManager.wait(args.session_id, args.timeout_ms, args.turn_id, extra?.signal)
       );
       await progress.send(
-        waited.completed ? `Codex session ${args.session_id} is ready` : `Timed out waiting for Codex session ${args.session_id}`
+        waited.completed ? `Codex session ${args.session_id} is ready` : waited.timeoutReason === "wait_cancelled" ? `Cancelled wait for Codex session ${args.session_id}` : `Timed out waiting for Codex session ${args.session_id}`
       );
       await progress.flush();
       if (waited.error || !waited.session) {

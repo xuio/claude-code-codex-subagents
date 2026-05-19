@@ -487,6 +487,9 @@ export class CodexSessionManager {
     this.prune();
     const session = this.sessions.get(id);
     if (!session) return { error: `Unknown session_id: ${id}` };
+    if (turnId && !this.findTurn(session, turnId)) {
+      return { session: snapshot(session), completed: false, error: `Unknown turn_id: ${turnId}` };
+    }
     if (abortSignal?.aborted) {
       const turn = turnId ? this.findTurn(session, turnId) : undefined;
       return {
