@@ -133,6 +133,38 @@ describe("app-server hardening", () => {
     manager.cancel(session.id);
   });
 
+  it("resumes queued work on a fresh app-server after no-completion timeout", async () => {
+    const manager = new CodexSessionManager();
+    const projectDir = await tempDir("codex-subagents-app-timeout-resume-project-");
+    const recordDir = await tempDir("codex-subagents-app-timeout-resume-record-");
+
+    const { session, turn } = manager.startAsync({
+      prompt: "APP_NO_TURN_COMPLETED APP_IGNORE_INTERRUPT_COMPLETION DELAY_MS=10000",
+      projectDir,
+      codexBin: fakeCodex,
+      timeoutMs: 30,
+      terminateGraceMs: 30,
+      env: {
+        FAKE_CODEX_RECORD_DIR: recordDir,
+      },
+    });
+
+    const timedOut = await manager.wait(session.id, 2_000, turn.id);
+    expect(timedOut.completed).toBe(true);
+    expect(timedOut.turn?.resultStatus).toBe("timeout");
+
+    const followUp = await manager.send(session.id, "after timeout follow-up");
+    expect(followUp.result?.ok).toBe(true);
+    expect(followUp.result?.finalMessage).toContain("after timeout follow-up");
+
+    const calls = await recordedCalls(recordDir);
+    expect(calls.some((call) => call.method === "turn/interrupt")).toBe(true);
+    expect(calls.some((call) => call.method === "process/sigterm")).toBe(true);
+    expect(calls.some((call) => call.method === "thread/resume")).toBe(true);
+    expect(calls.filter((call) => call.method === "turn/start")).toHaveLength(2);
+    manager.cancel(session.id);
+  });
+
   it("preserves timeout status when a timed-out turn completes as interrupted", async () => {
     const manager = new CodexSessionManager();
     const projectDir = await tempDir("codex-subagents-app-timeout-interrupted-project-");
@@ -257,7 +289,7 @@ describe("app-server hardening", () => {
       prompt: "TURN_START_NO_RESPONSE",
       projectDir,
       codexBin: fakeCodex,
-      spawnTimeoutMs: 50,
+      spawnTimeoutMs: 300,
       env: {
         FAKE_CODEX_RECORD_DIR: recordDir,
       },
@@ -271,7 +303,35 @@ describe("app-server hardening", () => {
     const calls = await recordedCalls(recordDir);
     expect(calls.some((call) => call.protocol === "app-server" && call.method === "turn/start")).toBe(true);
     expect(calls.some((call) => call.protocol === "exec")).toBe(false);
+    expect(calls.some((call) => call.method === "process/sigterm")).toBe(true);
     manager.cancel(session.id);
+  });
+
+  it("recreates a closed idle app-server through thread/resume before a follow-up", async () => {
+    const manager = new CodexSessionManager();
+    const projectDir = await tempDir("codex-subagents-app-closed-resume-project-");
+    const recordDir = await tempDir("codex-subagents-app-closed-resume-record-");
+
+    const started = await manager.start({
+      prompt: "APP_EXIT_AFTER_TURN closed idle app-server",
+      projectDir,
+      codexBin: fakeCodex,
+      env: {
+        FAKE_CODEX_RECORD_DIR: recordDir,
+      },
+    });
+
+    const closed = await waitFor(() => Boolean(manager.get(started.session.id)?.appServer?.closed));
+    expect(closed).toBe(true);
+
+    const followUp = await manager.send(started.session.id, "closed app-server follow-up");
+    expect(followUp.result?.ok).toBe(true);
+    expect(followUp.result?.finalMessage).toContain("closed app-server follow-up");
+
+    const calls = await recordedCalls(recordDir);
+    expect(calls.some((call) => call.method === "thread/resume" && call.threadId === started.session.codexThreadId)).toBe(true);
+    expect(calls.filter((call) => call.method === "turn/start")).toHaveLength(2);
+    manager.cancel(started.session.id);
   });
 
   it("merges durable session state instead of overwriting unknown sessions", async () => {
@@ -351,6 +411,72 @@ describe("app-server hardening", () => {
       if (previousRecordDir === undefined) delete process.env.FAKE_CODEX_RECORD_DIR;
       else process.env.FAKE_CODEX_RECORD_DIR = previousRecordDir;
     }
+  });
+
+  it("serializes concurrent app-server recovery attempts for one session", async () => {
+    const stateDir = await tempDir("codex-subagents-recover-lock-state-");
+    const stateFile = path.join(stateDir, "sessions.json");
+    const projectDir = await tempDir("codex-subagents-recover-lock-project-");
+    const recordDir = await tempDir("codex-subagents-recover-lock-record-");
+    const firstManager = new CodexSessionManager({ persist: true, stateFile });
+    const previousRecordDir = process.env.FAKE_CODEX_RECORD_DIR;
+    const previousMode = process.env.FAKE_CODEX_APP_SERVER_MODE;
+
+    try {
+      process.env.FAKE_CODEX_RECORD_DIR = recordDir;
+      const started = await firstManager.start({
+        prompt: "recover lock first",
+        projectDir,
+        codexBin: fakeCodex,
+      });
+
+      process.env.FAKE_CODEX_APP_SERVER_MODE = "THREAD_RESUME_DELAY_MS=100";
+      const secondManager = new CodexSessionManager({ persist: true, stateFile });
+      const recovered = await Promise.all([
+        secondManager.recover(started.session.id),
+        secondManager.recover(started.session.id),
+        secondManager.recover(started.session.id),
+      ]);
+
+      expect(recovered.every((result) => result.recovered)).toBe(true);
+      const calls = await recordedCalls(recordDir);
+      expect(calls.filter((call) => call.method === "thread/resume")).toHaveLength(1);
+      await Promise.all([firstManager.shutdown("test_cleanup"), secondManager.shutdown("test_cleanup")]);
+    } finally {
+      if (previousRecordDir === undefined) delete process.env.FAKE_CODEX_RECORD_DIR;
+      else process.env.FAKE_CODEX_RECORD_DIR = previousRecordDir;
+      if (previousMode === undefined) delete process.env.FAKE_CODEX_APP_SERVER_MODE;
+      else process.env.FAKE_CODEX_APP_SERVER_MODE = previousMode;
+    }
+  });
+
+  it("persists first async app-server thread before the first turn completes", async () => {
+    const stateDir = await tempDir("codex-subagents-first-turn-state-");
+    const stateFile = path.join(stateDir, "sessions.json");
+    const projectDir = await tempDir("codex-subagents-first-turn-project-");
+    const firstManager = new CodexSessionManager({ persist: true, stateFile });
+
+    const { session } = firstManager.startAsync({
+      prompt: "first async durable turn DELAY_MS=10000",
+      projectDir,
+      codexBin: fakeCodex,
+    });
+
+    const persisted = await waitFor(async () => {
+      const states = new SessionStateStore(stateFile).load();
+      return states.some((state) => state.id === session.id && state.codexThreadId && state.turns === 0);
+    });
+    expect(persisted).toBe(true);
+
+    const secondManager = new CodexSessionManager({ persist: true, stateFile });
+    const loaded = secondManager.get(session.id);
+    expect(loaded?.durable?.canResume).toBe(true);
+    expect(loaded?.turns).toBe(0);
+
+    const recovered = await secondManager.recover(session.id);
+    expect(recovered.recovered).toBe(true);
+    expect(recovered.session?.codexThreadId).toBe(loaded?.codexThreadId);
+    await Promise.all([firstManager.shutdown("test_cleanup"), secondManager.shutdown("test_cleanup")]);
   });
 
   it("returns a failed result if the app-server exits mid-turn", async () => {

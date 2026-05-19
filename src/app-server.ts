@@ -46,6 +46,7 @@ export interface AppServerCapabilities {
 export interface AppServerStatus {
   id: string;
   protocol: "stdio";
+  closed: boolean;
   userAgent?: string;
   codexHome?: string;
   threadId?: string;
@@ -370,6 +371,7 @@ export class CodexAppServerSession {
     return {
       id: this.id,
       protocol: "stdio",
+      closed: this.closed,
       userAgent: this.userAgent,
       codexHome: this.codexHome,
       threadId: this.threadId || undefined,
@@ -427,12 +429,14 @@ export class CodexAppServerSession {
     } catch (error) {
       this.acceptingStartNotifications = false;
       this.pendingStartNotifications = [];
+      await this.close().catch(() => {});
       throw error;
     }
     const turnId = turnResponse.turn?.id;
     if (!turnId) {
       this.acceptingStartNotifications = false;
       this.pendingStartNotifications = [];
+      await this.close().catch(() => {});
       throw new AppServerUnavailableError("Codex app-server did not return a turn id.");
     }
     this.capabilities.turnStart = true;
@@ -555,13 +559,19 @@ export class CodexAppServerSession {
               if (this.activeTurn) this.activeTurn.timeoutReason = timeoutReason;
               const message = `Codex app-server did not report turn completion within ${graceMs}ms after ${reason} interrupt.`;
               summary.errors.push(message);
-              resolveOnce(finish(reason === "cancelled" ? "cancelled" : "timeout", message));
+              const result = finish(reason === "cancelled" ? "cancelled" : "timeout", message);
+              this.activeTurn = undefined;
+              resolveOnce(result);
+              void this.close("cancelled").catch(() => {});
             }, graceMs);
             forceFinishTimeout.unref();
           })
           .catch((error) => {
             summary.errors.push(`Codex app-server interrupt failed: ${error.message}`);
-            resolveOnce(finish(reason === "cancelled" ? "cancelled" : "timeout", error.message));
+            const result = finish(reason === "cancelled" ? "cancelled" : "timeout", error.message);
+            this.activeTurn = undefined;
+            resolveOnce(result);
+            void this.close("cancelled").catch(() => {});
           });
         publishSnapshot(true);
       };

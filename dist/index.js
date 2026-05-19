@@ -23665,6 +23665,7 @@ var CodexAppServerSession = class _CodexAppServerSession {
     return {
       id: this.id,
       protocol: "stdio",
+      closed: this.closed,
       userAgent: this.userAgent,
       codexHome: this.codexHome,
       threadId: this.threadId || void 0,
@@ -23714,12 +23715,16 @@ var CodexAppServerSession = class _CodexAppServerSession {
     } catch (error2) {
       this.acceptingStartNotifications = false;
       this.pendingStartNotifications = [];
+      await this.close().catch(() => {
+      });
       throw error2;
     }
     const turnId = turnResponse.turn?.id;
     if (!turnId) {
       this.acceptingStartNotifications = false;
       this.pendingStartNotifications = [];
+      await this.close().catch(() => {
+      });
       throw new AppServerUnavailableError("Codex app-server did not return a turn id.");
     }
     this.capabilities.turnStart = true;
@@ -23836,12 +23841,20 @@ var CodexAppServerSession = class _CodexAppServerSession {
             if (this.activeTurn) this.activeTurn.timeoutReason = timeoutReason;
             const message = `Codex app-server did not report turn completion within ${graceMs}ms after ${reason} interrupt.`;
             summary.errors.push(message);
-            resolveOnce(finish(reason === "cancelled" ? "cancelled" : "timeout", message));
+            const result2 = finish(reason === "cancelled" ? "cancelled" : "timeout", message);
+            this.activeTurn = void 0;
+            resolveOnce(result2);
+            void this.close("cancelled").catch(() => {
+            });
           }, graceMs);
           forceFinishTimeout.unref();
         }).catch((error2) => {
           summary.errors.push(`Codex app-server interrupt failed: ${error2.message}`);
-          resolveOnce(finish(reason === "cancelled" ? "cancelled" : "timeout", error2.message));
+          const result2 = finish(reason === "cancelled" ? "cancelled" : "timeout", error2.message);
+          this.activeTurn = void 0;
+          resolveOnce(result2);
+          void this.close("cancelled").catch(() => {
+          });
         });
         publishSnapshot(true);
       };
@@ -24324,13 +24337,13 @@ function snapshot2(session) {
     cwd: session.cwd,
     codexThreadId: session.codexThreadId,
     protocol: session.protocol,
-    supportsRealSteering: session.protocol === "app-server" && Boolean(session.appServer?.status().supports.turnSteer),
+    supportsRealSteering: session.protocol === "app-server" && Boolean(session.appServer && !session.appServer.status().closed && session.appServer.status().supports.turnSteer),
     appServer: session.appServer?.status(),
     appServerFallbackReason: session.appServerFallbackReason,
     durable: session.persisted ? {
       persisted: true,
       recovered: session.recovered,
-      canResume: Boolean(session.codexThreadId && session.turns > 0),
+      canResume: Boolean(session.codexThreadId),
       stateFile: session.stateFile
     } : void 0,
     turns: session.turns,
@@ -24694,7 +24707,7 @@ var CodexSessionManager = class {
     this.prune();
     const session = this.sessions.get(id);
     if (!session) return { error: `Unknown session_id: ${id}` };
-    if (!session.codexThreadId || session.turns < 1) {
+    if (!session.codexThreadId) {
       return {
         session: snapshot2(session),
         recovered: false,
@@ -24707,19 +24720,14 @@ var CodexSessionManager = class {
       return { session: snapshot2(session), recovered: true };
     }
     try {
-      if (!session.appServer) {
-        session.appServer = await CodexAppServerSession.create(
-          {
-            ...session.baseOptions,
-            prompt: "",
-            projectDir: session.projectDir ?? session.baseOptions.projectDir,
-            cwd: session.cwd ?? session.baseOptions.cwd,
-            ephemeral: false
-          },
-          { sessionId: session.id },
-          session.codexThreadId
-        );
-        session.codexThreadId = session.appServer.threadId;
+      if (!session.appServer || session.appServer.status().closed) {
+        await this.ensureAppServer(session, {
+          ...session.baseOptions,
+          prompt: "",
+          projectDir: session.projectDir ?? session.baseOptions.projectDir,
+          cwd: session.cwd ?? session.baseOptions.cwd,
+          ephemeral: false
+        });
       } else {
         await session.appServer.readThread(false);
       }
@@ -24933,17 +24941,11 @@ var CodexSessionManager = class {
     );
   }
   async runAppServerTurn(session, options, controller) {
+    let appServerWasReady = false;
     try {
-      if (!session.appServer) {
-        session.appServer = await CodexAppServerSession.create(
-          options,
-          { sessionId: session.id },
-          session.codexThreadId && session.turns > 0 ? session.codexThreadId : void 0
-        );
-        session.codexThreadId = session.appServer.threadId;
-        session.appServerFallbackReason = void 0;
-      }
-      return await session.appServer.startTurn(
+      const appServer = await this.ensureAppServer(session, options);
+      appServerWasReady = true;
+      return await appServer.startTurn(
         options,
         controller.signal,
         (partial2) => {
@@ -24957,7 +24959,8 @@ var CodexSessionManager = class {
         { sessionTurnId: session.activeTurn?.id }
       );
     } catch (error2) {
-      if (session.turns === 0 && !session.appServer && shouldFallbackToExec(error2)) {
+      if (session.appServer?.status().closed) session.appServer = void 0;
+      if (session.turns === 0 && !appServerWasReady && !session.appServer && shouldFallbackToExec(error2)) {
         session.appServerFallbackReason = error2 instanceof Error ? error2.message : String(error2);
         logger.warn("session.app_server_fallback_to_exec", {
           sessionId: session.id,
@@ -24973,6 +24976,33 @@ var CodexSessionManager = class {
       }
       throw error2;
     }
+  }
+  async ensureAppServer(session, options) {
+    if (session.appServer?.status().closed) {
+      logger.warn("session.app_server_discard_closed", {
+        sessionId: session.id,
+        appServer: session.appServer.status()
+      });
+      session.appServer = void 0;
+    }
+    if (session.appServer) return session.appServer;
+    if (!session.appServerStarting) {
+      session.appServerStarting = CodexAppServerSession.create(
+        options,
+        { sessionId: session.id },
+        session.codexThreadId ? session.codexThreadId : void 0
+      ).then((appServer) => {
+        session.appServer = appServer;
+        session.codexThreadId = appServer.threadId;
+        session.appServerFallbackReason = void 0;
+        session.updatedAt = (/* @__PURE__ */ new Date()).toISOString();
+        this.persist();
+        return appServer;
+      }).finally(() => {
+        session.appServerStarting = void 0;
+      });
+    }
+    return session.appServerStarting;
   }
   completeTurn(session, turn, result) {
     session.turns += 1;
@@ -25090,7 +25120,7 @@ var CodexSessionManager = class {
     logger.info("session.state.loaded", { stateFile: store.file, sessions: this.sessions.size });
   }
   recordFromState(state) {
-    const hasThread = Boolean(state.codexThreadId && state.turns > 0);
+    const hasThread = Boolean(state.codexThreadId);
     if (!hasThread && state.status === "active") return void 0;
     return {
       id: state.id,
@@ -25103,6 +25133,7 @@ var CodexSessionManager = class {
       codexThreadId: state.codexThreadId,
       protocol: state.protocol,
       appServerFallbackReason: void 0,
+      appServerStarting: void 0,
       turns: state.turns,
       partial: void 0,
       error: state.error,
@@ -25125,7 +25156,7 @@ var CodexSessionManager = class {
   persist() {
     const store = this.stateStore;
     if (!store) return;
-    const states = [...this.sessions.values()].filter((session) => session.codexThreadId && session.turns > 0).map((session) => ({
+    const states = [...this.sessions.values()].filter((session) => session.codexThreadId).map((session) => ({
       id: session.id,
       name: session.name,
       status: session.status === "running" ? "active" : session.status,

@@ -106,6 +106,7 @@ if (args[0] === "app-server") {
   function finishTurn() {
     if (!activeTurn) return;
     const turnId = activeTurn;
+    const exitAfterTurn = hasMode("APP_EXIT_AFTER_TURN");
     const finalMessage = `fake app-server result for: ${activePrompt.trim()}${
       activeSteers.length ? ` | steers: ${activeSteers.join(" | ")}` : ""
     }`;
@@ -144,6 +145,7 @@ if (args[0] === "app-server") {
     activeTurn = undefined;
     activePrompt = "";
     activeSteers = [];
+    if (exitAfterTurn) setTimeout(() => process.exit(0), 1);
   }
 
   function handleRequest(request) {
@@ -223,7 +225,7 @@ if (args[0] === "app-server") {
       }
       threadId = params?.threadId ?? threadId;
       recordCall({ protocol: "app-server", method, threadId, cwd: params?.cwd ?? process.cwd() });
-      send({
+      const sendResume = () => send({
         id,
         result: {
           thread: {
@@ -258,7 +260,18 @@ if (args[0] === "app-server") {
           reasoningEffort: params?.config?.model_reasoning_effort ?? "medium",
         },
       });
-      send({ method: "thread/started", params: { thread: { id: threadId, cwd: params?.cwd ?? process.cwd(), turns: [] } } });
+      const sendStarted = () =>
+        send({ method: "thread/started", params: { thread: { id: threadId, cwd: params?.cwd ?? process.cwd(), turns: [] } } });
+      const resumeDelayMs = numberMode("THREAD_RESUME_DELAY_MS");
+      if (resumeDelayMs > 0) {
+        setTimeout(() => {
+          sendResume();
+          sendStarted();
+        }, resumeDelayMs);
+      } else {
+        sendResume();
+        sendStarted();
+      }
       return;
     }
     if (method === "turn/start") {

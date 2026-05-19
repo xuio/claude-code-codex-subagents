@@ -85,6 +85,7 @@ interface CodexSessionRecord {
   codexThreadId?: string;
   protocol: SessionProtocol;
   appServer?: CodexAppServerSession;
+  appServerStarting?: Promise<CodexAppServerSession>;
   appServerFallbackReason?: string;
   turns: number;
   partial?: AgentRunPartial;
@@ -136,14 +137,14 @@ function snapshot(session: CodexSessionRecord): CodexSessionSnapshot {
     protocol: session.protocol,
     supportsRealSteering:
       session.protocol === "app-server" &&
-      Boolean(session.appServer?.status().supports.turnSteer),
+      Boolean(session.appServer && !session.appServer.status().closed && session.appServer.status().supports.turnSteer),
     appServer: session.appServer?.status(),
     appServerFallbackReason: session.appServerFallbackReason,
     durable: session.persisted
       ? {
           persisted: true,
           recovered: session.recovered,
-          canResume: Boolean(session.codexThreadId && session.turns > 0),
+          canResume: Boolean(session.codexThreadId),
           stateFile: session.stateFile,
         }
       : undefined,
@@ -582,7 +583,7 @@ export class CodexSessionManager {
     this.prune();
     const session = this.sessions.get(id);
     if (!session) return { error: `Unknown session_id: ${id}` };
-    if (!session.codexThreadId || session.turns < 1) {
+    if (!session.codexThreadId) {
       return {
         session: snapshot(session),
         recovered: false,
@@ -595,19 +596,14 @@ export class CodexSessionManager {
       return { session: snapshot(session), recovered: true };
     }
     try {
-      if (!session.appServer) {
-        session.appServer = await CodexAppServerSession.create(
-          {
-            ...session.baseOptions,
-            prompt: "",
-            projectDir: session.projectDir ?? session.baseOptions.projectDir,
-            cwd: session.cwd ?? session.baseOptions.cwd,
-            ephemeral: false,
-          },
-          { sessionId: session.id },
-          session.codexThreadId,
-        );
-        session.codexThreadId = session.appServer.threadId;
+      if (!session.appServer || session.appServer.status().closed) {
+        await this.ensureAppServer(session, {
+          ...session.baseOptions,
+          prompt: "",
+          projectDir: session.projectDir ?? session.baseOptions.projectDir,
+          cwd: session.cwd ?? session.baseOptions.cwd,
+          ephemeral: false,
+        });
       } else {
         await session.appServer.readThread(false);
       }
@@ -850,17 +846,11 @@ export class CodexSessionManager {
     options: AgentRunOptions,
     controller: AbortController,
   ): Promise<AgentRunResult> {
+    let appServerWasReady = false;
     try {
-      if (!session.appServer) {
-        session.appServer = await CodexAppServerSession.create(
-          options,
-          { sessionId: session.id },
-          session.codexThreadId && session.turns > 0 ? session.codexThreadId : undefined,
-        );
-        session.codexThreadId = session.appServer.threadId;
-        session.appServerFallbackReason = undefined;
-      }
-      return await session.appServer.startTurn(
+      const appServer = await this.ensureAppServer(session, options);
+      appServerWasReady = true;
+      return await appServer.startTurn(
         options,
         controller.signal,
         (partial) => {
@@ -874,7 +864,8 @@ export class CodexSessionManager {
         { sessionTurnId: session.activeTurn?.id },
       );
     } catch (error) {
-      if (session.turns === 0 && !session.appServer && shouldFallbackToExec(error)) {
+      if (session.appServer?.status().closed) session.appServer = undefined;
+      if (session.turns === 0 && !appServerWasReady && !session.appServer && shouldFallbackToExec(error)) {
         session.appServerFallbackReason = error instanceof Error ? error.message : String(error);
         logger.warn("session.app_server_fallback_to_exec", {
           sessionId: session.id,
@@ -890,6 +881,40 @@ export class CodexSessionManager {
       }
       throw error;
     }
+  }
+
+  private async ensureAppServer(
+    session: CodexSessionRecord,
+    options: AgentRunOptions,
+  ): Promise<CodexAppServerSession> {
+    if (session.appServer?.status().closed) {
+      logger.warn("session.app_server_discard_closed", {
+        sessionId: session.id,
+        appServer: session.appServer.status(),
+      });
+      session.appServer = undefined;
+    }
+    if (session.appServer) return session.appServer;
+
+    if (!session.appServerStarting) {
+      session.appServerStarting = CodexAppServerSession.create(
+        options,
+        { sessionId: session.id },
+        session.codexThreadId ? session.codexThreadId : undefined,
+      )
+        .then((appServer) => {
+          session.appServer = appServer;
+          session.codexThreadId = appServer.threadId;
+          session.appServerFallbackReason = undefined;
+          session.updatedAt = new Date().toISOString();
+          this.persist();
+          return appServer;
+        })
+        .finally(() => {
+          session.appServerStarting = undefined;
+        });
+    }
+    return session.appServerStarting;
   }
 
   private completeTurn(
@@ -1043,7 +1068,7 @@ export class CodexSessionManager {
   }
 
   private recordFromState(state: DurableSessionState): CodexSessionRecord | undefined {
-    const hasThread = Boolean(state.codexThreadId && state.turns > 0);
+    const hasThread = Boolean(state.codexThreadId);
     if (!hasThread && state.status === "active") return undefined;
     return {
       id: state.id,
@@ -1056,6 +1081,7 @@ export class CodexSessionManager {
       codexThreadId: state.codexThreadId,
       protocol: state.protocol,
       appServerFallbackReason: undefined,
+      appServerStarting: undefined,
       turns: state.turns,
       partial: undefined,
       error: state.error,
@@ -1080,7 +1106,7 @@ export class CodexSessionManager {
     const store = this.stateStore;
     if (!store) return;
     const states: DurableSessionState[] = [...this.sessions.values()]
-      .filter((session) => session.codexThreadId && session.turns > 0)
+      .filter((session) => session.codexThreadId)
       .map((session) => ({
         id: session.id,
         name: session.name,
