@@ -110,6 +110,16 @@ function withoutUndefined<T extends Record<string, unknown>>(value: T): Partial<
   ) as Partial<T>;
 }
 
+function sessionBaseOptions(
+  options: Omit<AgentRunOptions, "prompt" | "abortSignal" | "onSnapshot">,
+): Omit<AgentRunOptions, "prompt" | "abortSignal" | "onSnapshot"> {
+  return {
+    ...options,
+    sandbox: options.dangerouslyBypassApprovalsAndSandbox ? "read-only" : options.sandbox,
+    dangerouslyBypassApprovalsAndSandbox: false,
+  };
+}
+
 function turnSnapshot(turn: CodexSessionTurnRecord): CodexSessionTurnSnapshot {
   return {
     id: turn.id,
@@ -293,7 +303,7 @@ export class CodexSessionManager {
       protocol: defaultSessionProtocol(),
       turns: 0,
       baseOptions: {
-        ...baseOptions,
+        ...sessionBaseOptions(baseOptions),
         ephemeral: false,
       },
       queuedTurns: [],
@@ -1088,12 +1098,12 @@ export class CodexSessionManager {
       turns: state.turns,
       partial: undefined,
       error: state.error,
-      baseOptions: {
+      baseOptions: sessionBaseOptions({
         ...(state.baseOptions as Omit<AgentRunOptions, "prompt" | "abortSignal" | "onSnapshot">),
         projectDir: state.projectDir ?? state.baseOptions.projectDir,
         cwd: state.cwd ?? state.baseOptions.cwd,
         ephemeral: false,
-      },
+      }),
       queuedTurns: [],
       recentTurns: [],
       draining: false,

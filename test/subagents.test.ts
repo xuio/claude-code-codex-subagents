@@ -145,4 +145,24 @@ describe("Codex subagent helpers", () => {
     await prepared.cleanup();
     await expect(stat(prepared.tempCodexHome!)).rejects.toThrow();
   });
+
+  it("requires parent full-access approval before preparing danger-full-access subagents", async () => {
+    const definition = {
+      name: "unsafe",
+      description: "Needs unrestricted access.",
+      developerInstructions: "Run local commands.",
+      sandbox: "danger-full-access",
+    };
+
+    await expect(prepareSubagents({ definitions: [definition] })).rejects.toThrow(
+      /without the parent full-access bypass flag/,
+    );
+
+    const prepared = await prepareSubagents({
+      definitions: [definition],
+      allowDangerFullAccess: true,
+    });
+    expect(prepared.tempCodexHome).toBeTruthy();
+    await prepared.cleanup();
+  });
 });

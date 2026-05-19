@@ -235,7 +235,15 @@ export class RunValidationError extends Error {
 export function validateRunConfiguration(
   options: Pick<
     AgentRunOptions,
-    "model" | "modelPreset" | "reasoningEffort" | "reasoningSummary" | "mcpConfigPolicy" | "codexMcpServers"
+    | "model"
+    | "modelPreset"
+    | "reasoningEffort"
+    | "reasoningSummary"
+    | "sandbox"
+    | "dangerouslyBypassApprovalsAndSandbox"
+    | "mcpConfigPolicy"
+    | "codexMcpServers"
+    | "codexSubagents"
   >,
   env: NodeJS.ProcessEnv = process.env,
 ): {
@@ -266,6 +274,19 @@ export function validateRunConfiguration(
   if (options.mcpConfigPolicy === "explicit" && Object.keys(options.codexMcpServers ?? {}).length === 0) {
     throw new RunValidationError(
       "mcp_config_policy='explicit' requires codex_mcp_servers with at least one server. Omit mcp_config_policy to inherit Codex config, or provide codex_mcp_servers.",
+    );
+  }
+
+  if (options.sandbox === "danger-full-access" && !options.dangerouslyBypassApprovalsAndSandbox) {
+    throw new RunValidationError(
+      "sandbox='danger-full-access' requires dangerously_bypass_approvals_and_sandbox=true. Use sandbox='read-only' by default, or set the explicit bypass flag for full non-sandbox access.",
+    );
+  }
+
+  const unsafeSubagent = options.codexSubagents?.find((agent) => agent.sandbox === "danger-full-access");
+  if (unsafeSubagent && !options.dangerouslyBypassApprovalsAndSandbox) {
+    throw new RunValidationError(
+      `codex_subagents entry '${unsafeSubagent.name}' uses sandbox='danger-full-access'; set dangerously_bypass_approvals_and_sandbox=true on the parent run to allow full non-sandbox subagents.`,
     );
   }
 
@@ -332,7 +353,9 @@ export function buildCodexExecArgs(
 
   if (bypassSandbox) {
     args.push("--dangerously-bypass-approvals-and-sandbox");
-  } else if (!resume) {
+  } else if (resume) {
+    args.push("-c", `sandbox_mode=${tomlString(sandbox)}`);
+  } else {
     args.push("--sandbox", sandbox);
   }
 
@@ -658,6 +681,7 @@ export async function runAgent(options: AgentRunOptions): Promise<AgentRunResult
     mcpConfigPolicy: options.mcpConfigPolicy,
     codexMcpServers: options.codexMcpServers,
     projectDir: cwd,
+    allowDangerFullAccess: Boolean(options.dangerouslyBypassApprovalsAndSandbox),
   });
   logger.debug("agent.run.subagents_prepared", {
     runId,

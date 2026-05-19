@@ -69,6 +69,35 @@ describe("buildCodexExecArgs", () => {
     expect(args).toContain("--dangerously-bypass-approvals-and-sandbox");
   });
 
+  it("pins sandbox_mode for resumed sessions unless full access is requested", () => {
+    const args = buildCodexExecArgs(
+      {
+        cwd: "/repo",
+        resumeSessionId: "session-123",
+        sandbox: "read-only",
+      },
+      "/tmp/out.md",
+      {},
+    );
+
+    expect(args).toContain("resume");
+    expect(args).not.toContain("--sandbox");
+    expect(args).toContain('sandbox_mode="read-only"');
+  });
+
+  it("rejects danger-full-access sandbox without the explicit bypass flag", () => {
+    expect(() =>
+      buildCodexExecArgs(
+        {
+          cwd: "/repo",
+          sandbox: "danger-full-access",
+        },
+        "/tmp/out.md",
+        {},
+      ),
+    ).toThrow(/requires dangerously_bypass_approvals_and_sandbox=true/);
+  });
+
   it("applies explicit model and reasoning settings", () => {
     const args = buildCodexExecArgs(
       {
@@ -355,6 +384,21 @@ describe("runAgent", () => {
     expect(result.status).toBe("failed");
     expect(result.exitCode).toBe(0);
     expect(result.structuredOutputError).toBeTruthy();
+  });
+
+  it("returns a validation failure instead of running danger-full-access without the bypass flag", async () => {
+    const projectDir = await tempDir("codex-subagents-repo-");
+
+    const result = await runAgent({
+      prompt: "unsafe without bypass",
+      projectDir,
+      codexBin: fakeCodex,
+      sandbox: "danger-full-access",
+    });
+
+    expect(result.ok).toBe(false);
+    expect(result.validationError).toContain("dangerously_bypass_approvals_and_sandbox=true");
+    expect(result.commandPreview).toEqual([]);
   });
 
   it("can run with an isolated temporary Codex home", async () => {

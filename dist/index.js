@@ -21810,6 +21810,12 @@ async function prepareSubagents(options) {
   const env = { ...options.env ?? {} };
   let tempCodexHome;
   const policy = options.isolatedCodexHome ? "isolated" : options.mcpConfigPolicy ?? "inherit_codex";
+  const unsafeDefinition = definitions.find((definition) => definition.sandbox === "danger-full-access");
+  if (unsafeDefinition && !options.allowDangerFullAccess) {
+    throw new Error(
+      `Codex subagent '${unsafeDefinition.name}' requested danger-full-access without the parent full-access bypass flag.`
+    );
+  }
   const projectMcpServers = policy === "inherit_claude_project" ? await readClaudeProjectMcpServers(options.projectDir) : void 0;
   const mcpServers = policy === "explicit" ? options.codexMcpServers : projectMcpServers;
   if (definitions.length > 0 || policy !== "inherit_codex") {
@@ -22019,6 +22025,17 @@ function validateRunConfiguration(options, env = process.env) {
       "mcp_config_policy='explicit' requires codex_mcp_servers with at least one server. Omit mcp_config_policy to inherit Codex config, or provide codex_mcp_servers."
     );
   }
+  if (options.sandbox === "danger-full-access" && !options.dangerouslyBypassApprovalsAndSandbox) {
+    throw new RunValidationError(
+      "sandbox='danger-full-access' requires dangerously_bypass_approvals_and_sandbox=true. Use sandbox='read-only' by default, or set the explicit bypass flag for full non-sandbox access."
+    );
+  }
+  const unsafeSubagent = options.codexSubagents?.find((agent) => agent.sandbox === "danger-full-access");
+  if (unsafeSubagent && !options.dangerouslyBypassApprovalsAndSandbox) {
+    throw new RunValidationError(
+      `codex_subagents entry '${unsafeSubagent.name}' uses sandbox='danger-full-access'; set dangerously_bypass_approvals_and_sandbox=true on the parent run to allow full non-sandbox subagents.`
+    );
+  }
   return { model, reasoningEffort, reasoningSummary };
 }
 async function resolveWorkingDirectory(cwd, env = process.env) {
@@ -22065,7 +22082,9 @@ function buildCodexExecArgs(options, outputPath, env = process.env) {
   ];
   if (bypassSandbox) {
     args.push("--dangerously-bypass-approvals-and-sandbox");
-  } else if (!resume) {
+  } else if (resume) {
+    args.push("-c", `sandbox_mode=${tomlString(sandbox)}`);
+  } else {
     args.push("--sandbox", sandbox);
   }
   if (model) args.push("--model", model);
@@ -22350,7 +22369,8 @@ async function runAgent(options) {
     isolatedCodexHome: options.isolatedCodexHome,
     mcpConfigPolicy: options.mcpConfigPolicy,
     codexMcpServers: options.codexMcpServers,
-    projectDir: cwd
+    projectDir: cwd,
+    allowDangerFullAccess: Boolean(options.dangerouslyBypassApprovalsAndSandbox)
   });
   logger.debug("agent.run.subagents_prepared", {
     runId,
@@ -23552,7 +23572,7 @@ function sandboxPolicy(options) {
   if (options.dangerouslyBypassApprovalsAndSandbox) return { type: "dangerFullAccess" };
   switch (options.sandbox ?? "read-only") {
     case "danger-full-access":
-      return { type: "dangerFullAccess" };
+      throw new Error("danger-full-access sandbox requires dangerouslyBypassApprovalsAndSandbox.");
     case "workspace-write":
       return {
         type: "workspaceWrite",
@@ -23567,6 +23587,9 @@ function sandboxPolicy(options) {
 }
 function sandboxMode(options) {
   if (options.dangerouslyBypassApprovalsAndSandbox) return "danger-full-access";
+  if (options.sandbox === "danger-full-access") {
+    throw new Error("danger-full-access sandbox requires dangerouslyBypassApprovalsAndSandbox.");
+  }
   return options.sandbox ?? "read-only";
 }
 function appServerConfig(options, reasoningEffort) {
@@ -23715,6 +23738,7 @@ var CodexAppServerSession = class _CodexAppServerSession {
     });
     const info = await stat2(cwd);
     if (!info.isDirectory()) throw new Error(`Codex working directory is not a directory: ${cwd}`);
+    const { model, reasoningEffort } = validateRunConfiguration(options, mergedEnv);
     const preparedSubagents = await prepareSubagents({
       definitions: options.codexSubagents,
       tasks: options.subagentTasks,
@@ -23722,7 +23746,8 @@ var CodexAppServerSession = class _CodexAppServerSession {
       isolatedCodexHome: options.isolatedCodexHome,
       mcpConfigPolicy: options.mcpConfigPolicy,
       codexMcpServers: options.codexMcpServers,
-      projectDir: cwd
+      projectDir: cwd,
+      allowDangerFullAccess: Boolean(options.dangerouslyBypassApprovalsAndSandbox)
     });
     const childEnv = sanitizeChildEnv({ ...mergedEnv, ...preparedSubagents.env }, options.forwardSensitiveEnv);
     const child = spawn2(codexBinary.path, ["app-server", "--listen", "stdio://"], {
@@ -23742,7 +23767,6 @@ var CodexAppServerSession = class _CodexAppServerSession {
     });
     try {
       await session.initialize(options.spawnTimeoutMs ?? 1e4);
-      const { model, reasoningEffort } = validateRunConfiguration(options, childEnv);
       const thread = resumeThreadId ? await session.request("thread/resume", {
         threadId: resumeThreadId,
         cwd,
@@ -24423,8 +24447,8 @@ function durableRunOptions(options) {
     model: options.model,
     modelPreset: options.modelPreset,
     reasoningEffort: options.reasoningEffort,
-    sandbox: options.sandbox,
-    dangerouslyBypassApprovalsAndSandbox: options.dangerouslyBypassApprovalsAndSandbox,
+    sandbox: options.dangerouslyBypassApprovalsAndSandbox ? "read-only" : options.sandbox,
+    dangerouslyBypassApprovalsAndSandbox: false,
     serviceTier: options.serviceTier,
     modelVerbosity: options.modelVerbosity,
     reasoningSummary: options.reasoningSummary,
@@ -24452,6 +24476,13 @@ function withoutUndefined(value) {
   return Object.fromEntries(
     Object.entries(value).filter(([, child]) => child !== void 0)
   );
+}
+function sessionBaseOptions(options) {
+  return {
+    ...options,
+    sandbox: options.dangerouslyBypassApprovalsAndSandbox ? "read-only" : options.sandbox,
+    dangerouslyBypassApprovalsAndSandbox: false
+  };
 }
 function turnSnapshot(turn) {
   return {
@@ -24606,7 +24637,7 @@ var CodexSessionManager = class {
       protocol: defaultSessionProtocol(),
       turns: 0,
       baseOptions: {
-        ...baseOptions,
+        ...sessionBaseOptions(baseOptions),
         ephemeral: false
       },
       queuedTurns: [],
@@ -25280,12 +25311,12 @@ var CodexSessionManager = class {
       turns: state.turns,
       partial: void 0,
       error: state.error,
-      baseOptions: {
+      baseOptions: sessionBaseOptions({
         ...state.baseOptions,
         projectDir: state.projectDir ?? state.baseOptions.projectDir,
         cwd: state.cwd ?? state.baseOptions.cwd,
         ephemeral: false
-      },
+      }),
       queuedTurns: [],
       recentTurns: [],
       draining: false,

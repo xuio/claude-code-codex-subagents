@@ -21,6 +21,7 @@ async function recordedCalls(recordDir: string): Promise<Array<{ args: string[];
 }
 
 afterEach(async () => {
+  delete process.env.CODEX_SUBAGENTS_SESSION_PROTOCOL;
   await Promise.all(tempDirs.splice(0).map((dir) => rm(dir, { recursive: true, force: true })));
 });
 
@@ -101,5 +102,35 @@ describe("CodexSessionManager", () => {
     const calls = await recordedCalls(recordDir);
     expect(calls.map((call) => call.method).filter((method) => method !== "thread/read")).toEqual(["turn/start", "turn/steer"]);
     manager.cancel(session.id);
+  });
+
+  it("does not carry full-access bypass into later exec session prompts", async () => {
+    process.env.CODEX_SUBAGENTS_SESSION_PROTOCOL = "exec";
+    const manager = new CodexSessionManager();
+    const projectDir = await tempDir("codex-subagents-session-project-");
+    const recordDir = await tempDir("codex-subagents-session-record-");
+
+    const started = await manager.start({
+      prompt: "session first full access",
+      projectDir,
+      codexBin: fakeCodex,
+      dangerouslyBypassApprovalsAndSandbox: true,
+      env: {
+        FAKE_CODEX_RECORD_DIR: recordDir,
+      },
+    });
+
+    expect(started.result.ok).toBe(true);
+    expect(started.session.protocol).toBe("exec");
+    expect(started.result.dangerouslyBypassApprovalsAndSandbox).toBe(true);
+
+    const followUp = await manager.send(started.session.id, "session second safe");
+    expect(followUp.result?.ok).toBe(true);
+    expect(followUp.result?.dangerouslyBypassApprovalsAndSandbox).toBe(false);
+
+    const calls = await recordedCalls(recordDir);
+    expect(calls[0]?.args).toContain("--dangerously-bypass-approvals-and-sandbox");
+    expect(calls[1]?.args).not.toContain("--dangerously-bypass-approvals-and-sandbox");
+    expect(calls[1]?.args).toContain('sandbox_mode="read-only"');
   });
 });

@@ -299,12 +299,19 @@ export async function prepareSubagents(options: {
   mcpConfigPolicy?: McpConfigPolicy;
   codexMcpServers?: Record<string, unknown>;
   projectDir?: string;
+  allowDangerFullAccess?: boolean;
 }): Promise<PreparedSubagents> {
   const definitions = options.definitions ?? [];
   const tasks = options.tasks ?? [];
   const env = { ...(options.env ?? {}) };
   let tempCodexHome: string | undefined;
   const policy = options.isolatedCodexHome ? "isolated" : (options.mcpConfigPolicy ?? "inherit_codex");
+  const unsafeDefinition = definitions.find((definition) => definition.sandbox === "danger-full-access");
+  if (unsafeDefinition && !options.allowDangerFullAccess) {
+    throw new Error(
+      `Codex subagent '${unsafeDefinition.name}' requested danger-full-access without the parent full-access bypass flag.`,
+    );
+  }
   const projectMcpServers =
     policy === "inherit_claude_project" ? await readClaudeProjectMcpServers(options.projectDir) : undefined;
   const mcpServers = policy === "explicit" ? options.codexMcpServers : projectMcpServers;

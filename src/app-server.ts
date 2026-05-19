@@ -119,7 +119,7 @@ function sandboxPolicy(options: AgentRunOptions): JsonObject {
   if (options.dangerouslyBypassApprovalsAndSandbox) return { type: "dangerFullAccess" };
   switch (options.sandbox ?? "read-only") {
     case "danger-full-access":
-      return { type: "dangerFullAccess" };
+      throw new Error("danger-full-access sandbox requires dangerouslyBypassApprovalsAndSandbox.");
     case "workspace-write":
       return {
         type: "workspaceWrite",
@@ -135,6 +135,9 @@ function sandboxPolicy(options: AgentRunOptions): JsonObject {
 
 function sandboxMode(options: AgentRunOptions): SandboxMode {
   if (options.dangerouslyBypassApprovalsAndSandbox) return "danger-full-access";
+  if (options.sandbox === "danger-full-access") {
+    throw new Error("danger-full-access sandbox requires dangerouslyBypassApprovalsAndSandbox.");
+  }
   return options.sandbox ?? "read-only";
 }
 
@@ -290,6 +293,7 @@ export class CodexAppServerSession {
     });
     const info = await stat(cwd);
     if (!info.isDirectory()) throw new Error(`Codex working directory is not a directory: ${cwd}`);
+    const { model, reasoningEffort } = validateRunConfiguration(options, mergedEnv);
     const preparedSubagents = await prepareSubagents({
       definitions: options.codexSubagents,
       tasks: options.subagentTasks,
@@ -298,6 +302,7 @@ export class CodexAppServerSession {
       mcpConfigPolicy: options.mcpConfigPolicy,
       codexMcpServers: options.codexMcpServers,
       projectDir: cwd,
+      allowDangerFullAccess: Boolean(options.dangerouslyBypassApprovalsAndSandbox),
     });
     const childEnv = sanitizeChildEnv({ ...mergedEnv, ...preparedSubagents.env }, options.forwardSensitiveEnv);
     const child = spawn(codexBinary.path, ["app-server", "--listen", "stdio://"], {
@@ -318,7 +323,6 @@ export class CodexAppServerSession {
 
     try {
       await session.initialize(options.spawnTimeoutMs ?? 10_000);
-      const { model, reasoningEffort } = validateRunConfiguration(options, childEnv);
       const thread = resumeThreadId
         ? await session.request("thread/resume", {
             threadId: resumeThreadId,
