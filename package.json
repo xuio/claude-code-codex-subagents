@@ -32,6 +32,7 @@
     "test:codex-runtime": "node test/codex-runtime-probe.mjs",
     "test:claude-orchestration": "node test/claude-orchestration.mjs",
     "test:claude-autodiscovery": "node test/claude-autodiscovery.mjs",
+    "test:claude-session-steering": "node test/claude-session-steering.mjs",
     "test:claude-large-output": "node test/claude-large-output.mjs",
     "test:claude-real-codex": "node test/claude-real-codex.mjs",
     "test:claude-real-session": "node test/claude-real-session.mjs",

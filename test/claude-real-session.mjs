@@ -89,8 +89,11 @@ Perform exactly these checks:
 3. Call continue_codex_session for that session id with task "Follow-up persistent session validation. Stay read-only. Reply exactly REAL_SESSION_FOLLOW_OK", codex_bin "${codexBin}", model_preset "spark", reasoning_effort "low", timeout_ms 180000. Important: intentionally omit project_dir and cwd from this follow-up call.
 4. Verify the continue_codex_session result has agent.ok true, agent.cwd equal to "${root}", session.projectDir equal to "${root}", and finalMessage containing REAL_SESSION_FOLLOW_OK.
 5. Call get_session for the same session id and verify session.projectDir is still "${root}" and turns is at least 2.
+6. Call start_codex_session_async with task "Real async persistent session validation. Stay read-only. Reply exactly REAL_SESSION_ASYNC_START_OK", project_dir "${root}", codex_bin "${codexBin}", model_preset "spark", reasoning_effort "low", timeout_ms 180000. Verify it returns a second session.id and a turn.id immediately.
+7. Call steer_codex_session for that second session id with steering_prompt "Steering validation. Stay read-only. Reply exactly REAL_SESSION_STEER_OK", codex_bin "${codexBin}", model_preset "spark", reasoning_effort "low", timeout_ms 180000, wait_for_completion false. Verify it returns a steer turn.
+8. Call wait_codex_session for the second session id with timeout_ms 300000. Verify completed true, session.turns at least 2, recentTurns contains a completed steer turn, and lastResult.finalMessage contains REAL_SESSION_STEER_OK.
 
-Return exactly one compact JSON object and no markdown. Shape: {"ok": boolean, "checks": {"start": boolean, "follow": boolean, "get": boolean}, "details": {"sessionId": string, "startCwd": string, "followCwd": string, "projectDir": string, "turns": number}}`;
+Return exactly one compact JSON object and no markdown. Shape: {"ok": boolean, "checks": {"start": boolean, "follow": boolean, "get": boolean, "asyncStart": boolean, "steer": boolean, "asyncWait": boolean}, "details": {"sessionId": string, "startCwd": string, "followCwd": string, "projectDir": string, "turns": number, "asyncTurns": number}}`;
 
 const systemPrompt =
   "You are a deterministic Claude Code plugin validation harness. You may use Skill only to load codex-subagents guidance, then use only the explicitly named codex-subagents MCP tools. Do not use Bash, Read, files, shell commands, or any other non-MCP tool. Return only the requested JSON.";
@@ -119,6 +122,9 @@ const result = spawnSync(
       "mcp__plugin_codex-subagents_codex-subagents__send_session_prompt",
       "mcp__plugin_codex-subagents_codex-subagents__start_codex_session",
       "mcp__plugin_codex-subagents_codex-subagents__continue_codex_session",
+      "mcp__plugin_codex-subagents_codex-subagents__start_codex_session_async",
+      "mcp__plugin_codex-subagents_codex-subagents__steer_codex_session",
+      "mcp__plugin_codex-subagents_codex-subagents__wait_codex_session",
       "mcp__plugin_codex-subagents_codex-subagents__get_session",
       "Skill",
     ].join(","),
@@ -165,10 +171,14 @@ assert(validation.ok === true, "Claude should report overall session success", v
 assert(validation.checks?.start === true, "Claude should validate start_codex_session", validation);
 assert(validation.checks?.follow === true, "Claude should validate continue_codex_session", validation);
 assert(validation.checks?.get === true, "Claude should validate get_session", validation);
+assert(validation.checks?.asyncStart === true, "Claude should validate start_codex_session_async", validation);
+assert(validation.checks?.steer === true, "Claude should validate steer_codex_session", validation);
+assert(validation.checks?.asyncWait === true, "Claude should validate wait_codex_session", validation);
 assert(validation.details?.startCwd === root, "start_session should run in project root", validation);
 assert(validation.details?.followCwd === root, "send_session_prompt should preserve project root", validation);
 assert(validation.details?.projectDir === root, "session projectDir should remain project root", validation);
 assert(validation.details?.turns >= 2, "session should have at least two turns", validation);
+assert(validation.details?.asyncTurns >= 2, "async session should have at least two turns", validation);
 
 console.log(
   `Claude real Codex session validation passed in ${envelope.duration_ms}ms, Claude cost $${envelope.total_cost_usd}`,

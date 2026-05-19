@@ -146,8 +146,9 @@ assert(
   envelope.permission_denials,
 );
 
-assert(String(envelope.result ?? "").trim() !== "", "Claude large-output validation returned an empty result", envelope);
-const validation = extractJsonResult(envelope.result);
+const validation = envelope.structured_output ??
+  (String(envelope.result ?? "").trim() ? extractJsonResult(envelope.result) : undefined);
+assert(validation, "Claude large-output validation returned no structured result", envelope);
 assert(validation.ok === true, "Claude should report the Codex run succeeded", validation);
 assert(validation.compacted === true, "Claude should observe MCP response compaction", validation);
 

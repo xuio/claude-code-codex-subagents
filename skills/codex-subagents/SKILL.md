@@ -17,6 +17,7 @@ Default behavior:
 - Supports `model_preset: "spark"` for Codex Spark (`gpt-5.3-codex-spark`) without requiring Claude to remember the exact model string.
 - Supports nested Codex subagents by passing `codex_subagents`, `subagent_tasks`, and `subagent_runtime`; custom agents are sent as Codex `agents.<name>...` config overrides for the child run.
 - Supports persistent Codex sessions with `start_codex_session` and `continue_codex_session`; use these when the same Codex subagent should keep context across multiple prompts.
+- Supports long-running persistent sessions with `start_codex_session_async`, `send_codex_session_prompt`, `steer_codex_session`, `get_codex_session`, and `wait_codex_session`; use these when Claude needs a session id immediately, wants to queue prompts while Codex is still running, or needs to steer an active session.
 - Supports structured results with `output_contract` or `output_schema`; use these when Claude must merge, compare, or aggregate Codex outputs.
 - Redacts secret-looking output by default and does not forward secret-looking environment variables unless `forward_sensitive_env` is explicitly true.
 - Writes very verbose JSONL logs to stderr by default, including raw MCP JSON-RPC frames, tool arguments/results, prompt outputs, progress notifications, queue/job/session lifecycle, and Codex stdin/stdout/stderr traffic.
@@ -27,6 +28,8 @@ Prefer the intuitive front-door tools for normal use:
 - For one delegated task, call `ask_codex`. Make `task` self-contained: include the scope, expected read-only behavior, and output shape Claude needs. For code review and exploration, ask for concise findings with file paths and line references.
 - For independent tasks that can run concurrently, call `ask_codex_parallel` with one task object per workstream. Split by ownership such as API flow, tests, security, performance, UI, docs, or migration risk. Keep tasks concrete and bounded, and set `max_parallel` to the smaller of the useful agent count and `4` unless the user asks for more.
 - For multi-turn Codex work, call `start_codex_session` for the initial task and `continue_codex_session` for follow-ups. Session tools use Codex's recorded thread id and remain daemonless; the MCP server keeps only metadata and the last result.
+- For long-running multi-turn Codex work, call `start_codex_session_async` so Claude gets a `session.id` immediately. Then use `send_codex_session_prompt` to queue normal follow-ups, `steer_codex_session` to insert a high-priority steering turn, `get_codex_session` to inspect partial progress, and `wait_codex_session` to wait until a turn or the whole queue completes.
+- `steer_codex_session` is intentionally safe by default: Codex `exec` reads stdin before the turn starts, so steering is delivered as the next persistent turn. Set `interrupt_current: true` only when the active turn should be cancelled and redirected.
 - If unsure which path fits, call `codex_choose_tool` before delegating.
 
 Use the lower-level compatibility tools only when they fit better: `run_agent`, `run_agents`, `start_session`, and `send_session_prompt` expose the same execution paths with more literal naming. When Claude needs a concise consensus object from several agents, call `run_agents_aggregate`. Prefer `output_contract: "review_findings"` for review-style aggregation.
@@ -52,6 +55,26 @@ Set `isolated_codex_home: true` when unrelated Codex MCP servers from the user's
 Use `mcp_config_policy: "explicit"` with `codex_mcp_servers` when the user intentionally wants to share MCP servers with Codex. Use `mcp_config_policy: "inherit_claude_project"` only when `project_dir` has a Claude project MCP config that should be imported.
 
 Use `codex_doctor` or `codex_status` only when diagnosing installation, binary resolution, defaults, or after a failed Codex tool call. Normal delegation should start with `ask_codex`, `ask_codex_parallel`, `run_agents_aggregate`, or a session tool.
+
+Example `start_codex_session_async` arguments:
+
+```json
+{
+  "task": "Investigate the migration read-only. Keep notes concise and cite files.",
+  "project_dir": "/path/to/project",
+  "model_preset": "spark",
+  "reasoning_effort": "medium"
+}
+```
+
+Then queue or steer with the returned `session.id`:
+
+```json
+{
+  "session_id": "session-...",
+  "steering_prompt": "Prioritize the database migration path and ignore UI polish for now."
+}
+```
 
 Example single-agent call:
 

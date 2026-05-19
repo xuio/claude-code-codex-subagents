@@ -40,6 +40,10 @@ const usageGuide = [
   "- Prefer ask_codex for one delegated Codex task. This is the clearest front door for normal \"ask Codex\" or \"Codex second opinion\" requests.",
   "- Prefer ask_codex_parallel when the work can be split into independent concurrent tasks, for example separate reviewers for API flow, tests, security, performance, UI, docs, or migration risk.",
   "- Prefer start_codex_session and continue_codex_session when the user wants a Codex agent to keep context across multiple prompts.",
+  "- Prefer start_codex_session_async when Claude needs a session id immediately while Codex keeps working in the background.",
+  "- Use send_codex_session_prompt to add prompts to an active or idle Codex session queue without losing context.",
+  "- Use steer_codex_session to insert a high-priority steering prompt for a running Codex session; use interrupt_current only when the active turn should be cancelled and redirected.",
+  "- Use get_codex_session or wait_codex_session to inspect or wait for long-running Codex sessions.",
   "- Use codex_choose_tool if you are unsure which Codex tool fits the request.",
   "- Use run_agent, run_agents, run_agents_aggregate, start_session, and send_session_prompt for lower-level/manual control; they are compatibility tools behind the intuitive front doors.",
   "- Use run_agents_aggregate when Claude needs a concise consensus object from several independent Codex agents.",
@@ -764,6 +768,11 @@ server.registerTool(
           parallelTasks: "ask_codex_parallel",
           persistentSessionStart: "start_codex_session",
           persistentSessionFollowUp: "continue_codex_session",
+          longRunningSessionStart: "start_codex_session_async",
+          queuedSessionPrompt: "send_codex_session_prompt",
+          steerRunningSession: "steer_codex_session",
+          inspectSession: "get_codex_session",
+          waitForSession: "wait_codex_session",
           longRunningOneTask: "start_agent_run",
           longRunningParallelTasks: "start_agents_run",
           lowerLevelSingle: "run_agent",
@@ -817,6 +826,8 @@ server.registerTool(
       wants_parallel: z.boolean().optional().describe("Whether the user asked for parallel or multiple Codex agents."),
       wants_session: z.boolean().optional().describe("Whether the user asked for Codex to keep context across prompts."),
       continuing_session: z.boolean().optional().describe("Whether Claude already has a Codex session id to continue."),
+      wants_async_session: z.boolean().optional().describe("Whether Claude needs a Codex session id immediately while work continues."),
+      wants_steering: z.boolean().optional().describe("Whether the user wants to steer or redirect an already-running Codex session."),
       long_running: z.boolean().optional().describe("Whether the work is likely to exceed a normal MCP request timeout."),
       wants_aggregation: z.boolean().optional().describe("Whether Claude needs a deterministic consensus object."),
     },
@@ -825,7 +836,10 @@ server.registerTool(
     loggedToolCall("codex_choose_tool", args, extra, async () => {
       const taskCount = args.task_count ?? (args.wants_parallel ? 2 : 1);
       let recommendedTool = "ask_codex";
-      if (args.continuing_session) recommendedTool = "continue_codex_session";
+      if (args.wants_steering) recommendedTool = "steer_codex_session";
+      else if (args.continuing_session && args.long_running) recommendedTool = "send_codex_session_prompt";
+      else if (args.continuing_session) recommendedTool = "continue_codex_session";
+      else if (args.wants_session && (args.wants_async_session || args.long_running)) recommendedTool = "start_codex_session_async";
       else if (args.wants_session) recommendedTool = "start_codex_session";
       else if (args.wants_aggregation) recommendedTool = "run_agents_aggregate";
       else if (args.long_running && taskCount > 1) recommendedTool = "start_agents_run";
@@ -839,6 +853,9 @@ server.registerTool(
           "Use ask_codex for one normal Codex task.",
           "Use ask_codex_parallel for multiple independent Codex tasks.",
           "Use start_codex_session for a new multi-turn Codex worker and continue_codex_session for follow-ups.",
+          "Use start_codex_session_async when Claude needs the session id immediately and will poll or wait later.",
+          "Use send_codex_session_prompt to queue additional prompts onto an active or idle Codex session.",
+          "Use steer_codex_session to insert high-priority steering into a running session; interrupt_current cancels the active turn before running the steering turn.",
           "Use start_agent_run/start_agents_run for slow jobs that should not hold a blocking MCP request open.",
           "Use run_agents_aggregate only when Claude needs a deterministic consensus object.",
           "Pass project_dir whenever Claude knows the active project directory.",
@@ -849,6 +866,9 @@ server.registerTool(
           ask_codex_parallel: ["run_agents"],
           start_codex_session: ["start_session"],
           continue_codex_session: ["send_session_prompt"],
+          start_codex_session_async: ["start_session + return immediately"],
+          send_codex_session_prompt: ["queued continue_codex_session"],
+          steer_codex_session: ["high-priority queued session prompt"],
         },
       });
     }),
@@ -1427,6 +1447,47 @@ server.registerTool(
 );
 
 server.registerTool(
+  "start_codex_session_async",
+  {
+    title: "Start long-running Codex session",
+    description:
+      "Start a persistent Codex session and return immediately with a session id while the first Codex turn continues in the background. Use this for long-running Codex work that Claude may need to inspect, queue more prompts onto, or steer while it is running.",
+    inputSchema: {
+      task: z.string().min(1).describe("Initial task for the long-running persistent Codex session."),
+      session_name: z.string().trim().min(1).optional().describe("Optional human label for this session."),
+      name: z.string().trim().min(1).optional().describe("Optional label for the initial Codex run."),
+      ...frontDoorInputSchema,
+    },
+  },
+  async (args, extra) => {
+    return loggedToolCall("start_codex_session_async", args, extra, async () => {
+      const progress = createProgressReporter(extra);
+      try {
+        await progress.send("Starting long-running Codex session");
+        const { session, turn } = sessionManager.startAsync(
+          {
+            ...toFrontDoorRunOptions(args),
+            ephemeral: false,
+          },
+          { sessionName: args.session_name },
+        );
+        await progress.flush();
+        return jsonResult({
+          session: compactSessionSnapshotForMcp(session),
+          turn,
+          note:
+            "Session is running in the background. Use get_codex_session, wait_codex_session, send_codex_session_prompt, or steer_codex_session with this session_id.",
+        });
+      } catch (error) {
+        await progress.flush();
+        logger.error("start_codex_session_async.failed", { error: errorForLog(error) });
+        return jsonResult({ error: error instanceof Error ? error.message : String(error) }, true);
+      }
+    });
+  },
+);
+
+server.registerTool(
   "continue_codex_session",
   {
     title: "Continue Codex session",
@@ -1464,6 +1525,138 @@ server.registerTool(
       } catch (error) {
         await progress.flush();
         logger.error("continue_codex_session.failed", { error: errorForLog(error) });
+        return jsonResult({ error: error instanceof Error ? error.message : String(error) }, true);
+      }
+    });
+  },
+);
+
+server.registerTool(
+  "send_codex_session_prompt",
+  {
+    title: "Queue Codex session prompt",
+    description:
+      "Send an additional prompt to a Codex session. If the session is already running, this queues the prompt and preserves Codex context; if idle, it starts the next turn. Defaults to returning immediately so Claude can keep working or poll later.",
+    inputSchema: {
+      session_id: sessionIdSchema,
+      task: z.string().min(1).describe("Additional prompt for this Codex session."),
+      wait_for_completion: z
+        .boolean()
+        .default(false)
+        .describe("When true, wait for this queued turn to finish before returning. Leave false for long-running sessions."),
+      ...frontDoorInputSchema,
+    },
+  },
+  async (args, extra) => {
+    return loggedToolCall("send_codex_session_prompt", args, extra, async () => {
+      const progress = createProgressReporter(extra);
+      try {
+        await progress.send(`Queueing prompt for Codex session ${args.session_id}`);
+        const run = () =>
+          sessionManager.send(args.session_id, args.task, toFrontDoorRunOptions(args), {
+            wait: args.wait_for_completion,
+          });
+        const { session, turn, result, error } = args.wait_for_completion
+          ? await withProgressHeartbeat(
+              progress,
+              `Still waiting for Codex session prompt ${args.session_id}`,
+              run,
+            )
+          : await run();
+        if (error || !session) {
+          await progress.flush();
+          return jsonResult(
+            { error, session: session ? compactSessionSnapshotForMcp(session) : session, turn },
+            true,
+          );
+        }
+        if (result) await reportAgentResult(progress, result);
+        await progress.flush();
+        return jsonResult(
+          {
+            session: compactSessionSnapshotForMcp(session),
+            turn,
+            queued: !args.wait_for_completion,
+            agent: result ? compactAgentResultForMcp(result) : undefined,
+          },
+          result ? !result.ok : false,
+        );
+      } catch (error) {
+        await progress.flush();
+        logger.error("send_codex_session_prompt.failed", { error: errorForLog(error) });
+        return jsonResult({ error: error instanceof Error ? error.message : String(error) }, true);
+      }
+    });
+  },
+);
+
+server.registerTool(
+  "steer_codex_session",
+  {
+    title: "Steer Codex session",
+    description:
+      "Add a high-priority steering prompt to an active Codex session. Because daemonless Codex exec reads stdin before the turn starts, steering is delivered as the next persistent turn; set interrupt_current true to cancel the active turn and run the steering turn next.",
+    inputSchema: {
+      session_id: sessionIdSchema,
+      steering_prompt: z
+        .string()
+        .min(1)
+        .describe("Steering instruction to apply to the Codex session, for example a changed priority or constraint."),
+      interrupt_current: z
+        .boolean()
+        .default(false)
+        .describe("Cancel the currently running turn and run this steering prompt next. Leave false to avoid losing in-flight work."),
+      wait_for_completion: z
+        .boolean()
+        .default(false)
+        .describe("When true, wait until the steering turn completes. Leave false for active long-running sessions."),
+      ...frontDoorInputSchema,
+    },
+  },
+  async (args, extra) => {
+    return loggedToolCall("steer_codex_session", args, extra, async () => {
+      const progress = createProgressReporter(extra);
+      try {
+        await progress.send(`Steering Codex session ${args.session_id}`);
+        const run = () =>
+          sessionManager.steer(
+            args.session_id,
+            args.steering_prompt,
+            toFrontDoorRunOptions({ ...args, task: args.steering_prompt }),
+            {
+              wait: args.wait_for_completion,
+              interruptCurrent: args.interrupt_current,
+            },
+          );
+        const { session, turn, result, delivery, error } = args.wait_for_completion
+          ? await withProgressHeartbeat(
+              progress,
+              `Still waiting for Codex session steering ${args.session_id}`,
+              run,
+            )
+          : await run();
+        if (error || !session) {
+          await progress.flush();
+          return jsonResult(
+            { error, session: session ? compactSessionSnapshotForMcp(session) : session, turn, delivery },
+            true,
+          );
+        }
+        if (result) await reportAgentResult(progress, result);
+        await progress.flush();
+        return jsonResult(
+          {
+            session: compactSessionSnapshotForMcp(session),
+            turn,
+            delivery,
+            queued: !args.wait_for_completion,
+            agent: result ? compactAgentResultForMcp(result) : undefined,
+          },
+          result ? !result.ok : false,
+        );
+      } catch (error) {
+        await progress.flush();
+        logger.error("steer_codex_session.failed", { error: errorForLog(error) });
         return jsonResult({ error: error instanceof Error ? error.message : String(error) }, true);
       }
     });
@@ -1573,6 +1766,72 @@ server.registerTool(
       const session = sessionManager.get(args.session_id);
       if (!session) return jsonResult({ error: `Unknown session_id: ${args.session_id}` }, true);
       return jsonResult({ session: compactSessionSnapshotForMcp(session) });
+    }),
+);
+
+server.registerTool(
+  "get_codex_session",
+  {
+    title: "Get Codex session",
+    description:
+      "Return metadata, queued turns, active turn progress, and last result for a persistent Codex session. Prefer this intuitive alias when Claude is tracking a long-running Codex session.",
+    inputSchema: {
+      session_id: sessionIdSchema,
+    },
+  },
+  async (args, extra) =>
+    loggedToolCall("get_codex_session", args, extra, async () => {
+      const session = sessionManager.get(args.session_id);
+      if (!session) return jsonResult({ error: `Unknown session_id: ${args.session_id}` }, true);
+      return jsonResult({ session: compactSessionSnapshotForMcp(session) });
+    }),
+);
+
+server.registerTool(
+  "wait_codex_session",
+  {
+    title: "Wait for Codex session",
+    description:
+      "Wait until a Codex session becomes idle, or until a specific queued/running turn completes. Use after start_codex_session_async, send_codex_session_prompt, or steer_codex_session.",
+    inputSchema: {
+      session_id: sessionIdSchema,
+      turn_id: z.string().trim().min(1).optional().describe("Optional turn id to wait for. Omit to wait until the whole session queue is idle."),
+      timeout_ms: z
+        .number()
+        .int()
+        .positive()
+        .max(86_400_000)
+        .default(600_000)
+        .describe("Maximum time to wait in milliseconds."),
+    },
+  },
+  async (args, extra) =>
+    loggedToolCall("wait_codex_session", args, extra, async () => {
+      const progress = createProgressReporter(extra);
+      try {
+        await progress.send(`Waiting for Codex session ${args.session_id}`);
+        const waited = await withProgressHeartbeat(
+          progress,
+          `Still waiting for Codex session ${args.session_id}`,
+          () => sessionManager.wait(args.session_id, args.timeout_ms, args.turn_id),
+        );
+        await progress.send(
+          waited.completed
+            ? `Codex session ${args.session_id} is ready`
+            : `Timed out waiting for Codex session ${args.session_id}`,
+        );
+        await progress.flush();
+        if (waited.error || !waited.session) return jsonResult({ error: waited.error }, true);
+        return jsonResult({
+          completed: waited.completed,
+          session: compactSessionSnapshotForMcp(waited.session),
+          turn: waited.turn,
+        });
+      } catch (error) {
+        await progress.flush();
+        logger.error("wait_codex_session.failed", { error: errorForLog(error) });
+        return jsonResult({ error: error instanceof Error ? error.message : String(error) }, true);
+      }
     }),
 );
 

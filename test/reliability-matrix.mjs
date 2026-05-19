@@ -52,6 +52,10 @@ async function callTool(name, args) {
   );
 }
 
+async function sleep(ms) {
+  await new Promise((resolve) => setTimeout(resolve, ms));
+}
+
 try {
   await writeFile(path.join(projectDir, "not-a-directory.txt"), "file");
   await client.connect(transport);
@@ -397,6 +401,101 @@ try {
       frontSessionNext.structuredContent?.agent?.cwd === projectDir,
     "continue_codex_session should preserve the session project_dir",
     frontSessionNext.structuredContent,
+  );
+
+  const queuedCallsBefore = (await readCalls()).length;
+  const queuedSessionStart = await callTool("start_codex_session_async", {
+    task: "matrix-queued-session-start DELAY_MS=120",
+    project_dir: projectDir,
+  });
+  const queuedSessionId = queuedSessionStart.structuredContent?.session?.id;
+  assert(queuedSessionId, "start_codex_session_async should return a session id", queuedSessionStart.structuredContent);
+  const queuedTurnId = queuedSessionStart.structuredContent?.turn?.id;
+  assert(queuedTurnId, "start_codex_session_async should return the initial turn id", queuedSessionStart.structuredContent);
+  const queuedFollow = await callTool("send_codex_session_prompt", {
+    session_id: queuedSessionId,
+    task: "matrix-queued-session-follow",
+  });
+  assert(
+    queuedFollow.structuredContent?.queued === true &&
+      queuedFollow.structuredContent?.turn?.kind === "prompt",
+    "send_codex_session_prompt should queue without blocking by default",
+    queuedFollow.structuredContent,
+  );
+  const queuedSteer = await callTool("steer_codex_session", {
+    session_id: queuedSessionId,
+    steering_prompt: "matrix-queued-session-steer",
+  });
+  assert(
+    queuedSteer.structuredContent?.queued === true &&
+      queuedSteer.structuredContent?.turn?.kind === "steer",
+    "steer_codex_session should queue a steer turn by default",
+    queuedSteer.structuredContent,
+  );
+  const queuedWait = await callTool("wait_codex_session", {
+    session_id: queuedSessionId,
+    timeout_ms: 5_000,
+  });
+  assert(
+    queuedWait.structuredContent?.completed === true &&
+      queuedWait.structuredContent?.session?.turns === 3 &&
+      queuedWait.structuredContent?.session?.recentTurns?.some(
+        (turn) => turn.kind === "steer" && turn.status === "completed",
+      ),
+    "wait_codex_session should wait for queued prompt and steering turns",
+    queuedWait.structuredContent,
+  );
+  const queuedCalls = (await readCalls()).slice(queuedCallsBefore).map((call) => call.prompt);
+  assert(
+    queuedCalls[0]?.includes("matrix-queued-session-start") &&
+      queuedCalls[1]?.includes("matrix-queued-session-steer") &&
+      queuedCalls[2]?.includes("matrix-queued-session-follow"),
+    "steering should run before older queued follow-up prompts",
+    queuedCalls,
+  );
+
+  const interruptStart = await callTool("start_codex_session", {
+    task: "matrix-interrupt-session-start",
+    project_dir: projectDir,
+  });
+  const interruptSessionId = interruptStart.structuredContent?.session?.id;
+  assert(interruptSessionId, "interrupt session should start", interruptStart.structuredContent);
+  const interruptRunning = await callTool("send_codex_session_prompt", {
+    session_id: interruptSessionId,
+    task: "matrix-interrupt-active DELAY_MS=500",
+  });
+  assert(interruptRunning.structuredContent?.turn?.id, "interrupt active prompt should queue", interruptRunning.structuredContent);
+  for (let attempt = 0; attempt < 20; attempt += 1) {
+    const current = await callTool("get_codex_session", { session_id: interruptSessionId });
+    if (current.structuredContent?.session?.activeTurn?.prompt?.includes("matrix-interrupt-active")) break;
+    await sleep(25);
+  }
+  const interruptSteer = await callTool("steer_codex_session", {
+    session_id: interruptSessionId,
+    steering_prompt: "matrix-interrupt-steer",
+    interrupt_current: true,
+  });
+  assert(
+    interruptSteer.structuredContent?.delivery === "interrupt_requested" &&
+      interruptSteer.structuredContent?.turn?.kind === "steer",
+    "interrupt steering should report interrupt delivery",
+    interruptSteer.structuredContent,
+  );
+  const interruptWait = await callTool("wait_codex_session", {
+    session_id: interruptSessionId,
+    timeout_ms: 5_000,
+  });
+  const interruptTurns = interruptWait.structuredContent?.session?.recentTurns ?? [];
+  assert(
+    interruptWait.structuredContent?.completed === true &&
+      interruptTurns.some(
+        (turn) => turn.prompt.includes("matrix-interrupt-active") && turn.status === "cancelled",
+      ) &&
+      interruptTurns.some(
+        (turn) => turn.prompt.includes("matrix-interrupt-steer") && turn.status === "completed",
+      ),
+    "interrupt steering should cancel the active turn and run the steer turn next",
+    interruptWait.structuredContent,
   );
 
   const isolated = await callTool("run_agent", {

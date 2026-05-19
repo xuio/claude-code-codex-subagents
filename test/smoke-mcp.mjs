@@ -168,6 +168,70 @@ try {
     throw new Error(`continue_codex_session failed: ${JSON.stringify(sessionNext.structuredContent)}`);
   }
 
+  const longSessionStart = await client.callTool(
+    {
+      name: "start_codex_session_async",
+      arguments: {
+        task: "session async smoke first DELAY_MS=120",
+        project_dir: projectDir,
+      },
+    },
+    CallToolResultSchema,
+  );
+  const longSessionId = longSessionStart.structuredContent?.session?.id;
+  if (!longSessionId || !longSessionStart.structuredContent?.turn?.id) {
+    throw new Error(`start_codex_session_async failed: ${JSON.stringify(longSessionStart.structuredContent)}`);
+  }
+  const queuedPrompt = await client.callTool(
+    {
+      name: "send_codex_session_prompt",
+      arguments: {
+        session_id: longSessionId,
+        task: "session async smoke queued follow-up",
+      },
+    },
+    CallToolResultSchema,
+  );
+  if (!queuedPrompt.structuredContent?.queued || queuedPrompt.structuredContent?.turn?.kind !== "prompt") {
+    throw new Error(`send_codex_session_prompt did not queue: ${JSON.stringify(queuedPrompt.structuredContent)}`);
+  }
+  const queuedSteer = await client.callTool(
+    {
+      name: "steer_codex_session",
+      arguments: {
+        session_id: longSessionId,
+        steering_prompt: "session async smoke steer next",
+      },
+    },
+    CallToolResultSchema,
+  );
+  if (
+    !queuedSteer.structuredContent?.queued ||
+    queuedSteer.structuredContent?.turn?.kind !== "steer" ||
+    !["queued_after_current", "started_or_queued"].includes(queuedSteer.structuredContent?.delivery)
+  ) {
+    throw new Error(`steer_codex_session did not queue steering: ${JSON.stringify(queuedSteer.structuredContent)}`);
+  }
+  const longSessionWait = await client.callTool(
+    {
+      name: "wait_codex_session",
+      arguments: {
+        session_id: longSessionId,
+        timeout_ms: 5_000,
+      },
+    },
+    CallToolResultSchema,
+  );
+  if (
+    longSessionWait.structuredContent?.completed !== true ||
+    longSessionWait.structuredContent?.session?.turns !== 3 ||
+    !longSessionWait.structuredContent?.session?.recentTurns?.some(
+      (turn) => turn.kind === "steer" && turn.status === "completed",
+    )
+  ) {
+    throw new Error(`wait_codex_session did not drain queued turns: ${JSON.stringify(longSessionWait.structuredContent)}`);
+  }
+
   const asyncStart = await client.callTool(
     {
       name: "start_agent_run",

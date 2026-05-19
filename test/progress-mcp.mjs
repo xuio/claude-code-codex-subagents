@@ -258,6 +258,58 @@ try {
     frontSessionSendProgress,
   );
 
+  const asyncSessionProgress = [];
+  const asyncSession = await callTool(
+    "start_codex_session_async",
+    {
+      task: "progress async session start DELAY_MS=180",
+      project_dir: projectDir,
+    },
+    asyncSessionProgress,
+  );
+  const asyncSessionId = asyncSession.structuredContent?.session?.id;
+  assert(asyncSessionId, "start_codex_session_async should return a session id", asyncSession.structuredContent);
+  assert(
+    asyncSessionProgress.some((event) => event.message?.includes("Starting long-running Codex session")),
+    "start_codex_session_async should emit startup progress",
+    asyncSessionProgress,
+  );
+
+  const steerProgress = [];
+  const steer = await callTool(
+    "steer_codex_session",
+    {
+      session_id: asyncSessionId,
+      steering_prompt: "progress async session steer",
+    },
+    steerProgress,
+  );
+  assert(steer.structuredContent?.turn?.kind === "steer", "steer_codex_session should queue a steer turn", steer.structuredContent);
+  assert(
+    steerProgress.some((event) => event.message?.includes("Steering Codex session")),
+    "steer_codex_session should emit steering progress",
+    steerProgress,
+  );
+
+  const waitSessionProgress = [];
+  const waitSession = await callTool(
+    "wait_codex_session",
+    {
+      session_id: asyncSessionId,
+      timeout_ms: 5_000,
+    },
+    waitSessionProgress,
+  );
+  assert(waitSession.structuredContent?.completed === true, "wait_codex_session should complete", waitSession);
+  assertIncreasing(waitSessionProgress, "wait_codex_session");
+  assert(
+    waitSessionProgress.some((event) => event.message?.includes("Waiting for Codex session")) &&
+      waitSessionProgress.some((event) => event.message?.includes("Still waiting for Codex session")) &&
+      waitSessionProgress.some((event) => event.message?.includes("is ready")),
+    "wait_codex_session should emit wait, heartbeat, and completion progress",
+    waitSessionProgress,
+  );
+
   console.log("MCP progress test passed");
 } finally {
   await transport.close().catch(() => {});

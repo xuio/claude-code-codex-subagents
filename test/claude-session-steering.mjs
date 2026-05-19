@@ -6,7 +6,7 @@ import path from "node:path";
 const root = process.cwd();
 const fakeCodex = path.join(root, "test/fixtures/fake-codex.mjs");
 const projectDir = root;
-const recordDir = path.join(os.tmpdir(), `codex-subagents-autodiscovery-${process.pid}`);
+const recordDir = path.join(os.tmpdir(), `codex-subagents-session-steering-${process.pid}`);
 const claudeCodeRoot = path.join(
   os.homedir(),
   "Library",
@@ -74,30 +74,28 @@ function assert(condition, message, details) {
 await mkdir(recordDir, { recursive: true });
 
 try {
-  const prompt = `I want a quick read-only Codex Spark second opinion on this repository. Ask Codex to inspect whether the plugin metadata clearly tells Claude when to use Codex subagents.
+  const prompt = `Validate the codex-subagents plugin's long-running session flow from inside Claude Code. Use only the codex-subagents MCP tools. Use this exact fake Codex binary: ${fakeCodex}. Use this exact project_dir: ${projectDir}.
 
-Work in this exact project directory: ${projectDir}
+Start a Codex Spark session in the background with task "CLAUDE_STEERING_START DELAY_MS=2000". While it is running, add a normal follow-up prompt "CLAUDE_STEERING_FOLLOW" without waiting for that prompt to complete. Also steer the session with steering prompt "CLAUDE_STEERING_STEER" without waiting for steering to complete, so that steering runs before the normal follow-up. Then wait until the session is idle.
 
-Codex should stay read-only and include the token AUTODISCOVERY_OK in its reply. Use Codex Spark, but do not set an explicit service_tier.
-
-After the Codex result comes back, return exactly one compact JSON object and no markdown. Shape: {"ok": boolean, "tokenSeen": boolean, "model": string, "cwd": string}. Set ok true when the Codex tool call completed successfully.`;
+Return exactly one compact JSON object and no markdown. Shape: {"ok": boolean, "turns": number, "steerCompleted": boolean, "completed": boolean}.`;
 
   const systemPrompt =
-    "You are validating the codex-subagents plugin. You may use Skill only for codex-subagents guidance, then codex_choose_tool, codex_usage_guide, or ask_codex. Do not use Bash, Read, shell commands, or filesystem inspection. The MCP server already resolves the Codex binary.";
+    "You are validating the codex-subagents plugin. You may use Skill for guidance, then use only the allowed codex-subagents MCP tools. Do not use Bash, Read, shell commands, or filesystem inspection. Return only the requested JSON.";
   const resultSchema = JSON.stringify({
     type: "object",
     additionalProperties: false,
     properties: {
       ok: { type: "boolean" },
-      tokenSeen: { type: "boolean" },
-      model: { type: "string" },
-      cwd: { type: "string" },
+      turns: { type: "number" },
+      steerCompleted: { type: "boolean" },
+      completed: { type: "boolean" },
     },
-    required: ["ok", "tokenSeen", "model", "cwd"],
+    required: ["ok", "turns", "steerCompleted", "completed"],
   });
 
   const { version, binary } = await resolveClaudeCodeBinary();
-  console.log(`Using Claude Code for autodiscovery ${version}: ${binary}`);
+  console.log(`Using Claude Code for session steering ${version}: ${binary}`);
 
   const result = spawnSync(
     binary,
@@ -110,9 +108,11 @@ After the Codex result comes back, return exactly one compact JSON object and no
       "local",
       "--allowedTools",
       [
-        "mcp__plugin_codex-subagents_codex-subagents__codex_usage_guide",
-        "mcp__plugin_codex-subagents_codex-subagents__codex_choose_tool",
-        "mcp__plugin_codex-subagents_codex-subagents__ask_codex",
+        "mcp__plugin_codex-subagents_codex-subagents__start_codex_session_async",
+        "mcp__plugin_codex-subagents_codex-subagents__send_codex_session_prompt",
+        "mcp__plugin_codex-subagents_codex-subagents__steer_codex_session",
+        "mcp__plugin_codex-subagents_codex-subagents__wait_codex_session",
+        "mcp__plugin_codex-subagents_codex-subagents__get_codex_session",
         "Skill",
       ].join(","),
       "--append-system-prompt",
@@ -122,7 +122,7 @@ After the Codex result comes back, return exactly one compact JSON object and no
       "--effort",
       process.env.CLAUDE_ORCHESTRATION_EFFORT ?? "low",
       "--max-budget-usd",
-      process.env.CLAUDE_ORCHESTRATION_MAX_BUDGET_USD ?? "0.50",
+      process.env.CLAUDE_ORCHESTRATION_MAX_BUDGET_USD ?? "0.75",
       "--json-schema",
       resultSchema,
       "--no-session-persistence",
@@ -146,48 +146,37 @@ After the Codex result comes back, return exactly one compact JSON object and no
 
   const output = [result.stdout, result.stderr].filter(Boolean).join("");
   if (result.status !== 0) {
-    throw new Error(`Claude autodiscovery command failed (${result.status}):\n${output}`);
+    throw new Error(`Claude session steering command failed (${result.status}):\n${output}`);
   }
 
   const envelope = JSON.parse(result.stdout);
-  assert(envelope.subtype === "success", "Claude autodiscovery should complete successfully", envelope);
-  assert(envelope.is_error === false, "Claude autodiscovery should not report an error", envelope);
+  assert(envelope.subtype === "success", "Claude session steering should complete successfully", envelope);
+  assert(envelope.is_error === false, "Claude session steering should not report an error", envelope);
   assert(
     Array.isArray(envelope.permission_denials) && envelope.permission_denials.length === 0,
-    "Claude autodiscovery should not hit permission denials",
+    "Claude session steering should not hit permission denials",
     envelope.permission_denials,
   );
 
   const validation = envelope.structured_output ??
     (String(envelope.result ?? "").trim() ? extractJsonResult(envelope.result) : undefined);
-  assert(validation, "Claude autodiscovery returned no structured result", envelope);
-  assert(
-    validation.model === "gpt-5.3-codex-spark",
-    "Claude should choose Codex Spark from the natural-language request",
-    validation,
-  );
-  assert(validation.cwd === projectDir, "Claude should pass the requested project_dir", validation);
+  assert(validation, "Claude session steering returned no structured result", envelope);
+  assert(validation.ok === true, "Claude should report session steering success", validation);
+  assert(validation.turns >= 3, "Claude should observe three session turns", validation);
+  assert(validation.steerCompleted === true, "Claude should observe completed steering", validation);
+  assert(validation.completed === true, "Claude should wait until the session is idle", validation);
 
   const calls = (await readFile(path.join(recordDir, "calls.jsonl"), "utf8"))
     .trim()
     .split("\n")
     .map((line) => JSON.parse(line));
-  assert(calls.length >= 1, "Fake Codex should have been invoked", calls);
-  assert(calls[0].cwd === projectDir, "Fake Codex should run in the requested project", calls[0]);
-  assert(
-    calls[0].args.includes("--model") &&
-      calls[0].args[calls[0].args.indexOf("--model") + 1] === "gpt-5.3-codex-spark",
-    "Fake Codex should be launched with the Spark preset",
-    calls[0],
-  );
-  assert(
-    !calls[0].args.some((arg) => arg.includes("service_tier=")),
-    "Fake Codex should not be launched with an explicit service tier by default",
-    calls[0],
-  );
+  const prompts = calls.map((call) => call.prompt);
+  assert(prompts[0]?.includes("CLAUDE_STEERING_START"), "Fake Codex should receive the async start first", prompts);
+  assert(prompts[1]?.includes("CLAUDE_STEERING_STEER"), "Steering should run before queued follow-up", prompts);
+  assert(prompts[2]?.includes("CLAUDE_STEERING_FOLLOW"), "Queued follow-up should run after steering", prompts);
 
   console.log(
-    `Claude autodiscovery passed in ${envelope.duration_ms}ms, cost $${envelope.total_cost_usd}`,
+    `Claude session steering passed in ${envelope.duration_ms}ms, cost $${envelope.total_cost_usd}`,
   );
 } finally {
   await rm(recordDir, { recursive: true, force: true });

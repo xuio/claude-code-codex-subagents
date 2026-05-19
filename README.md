@@ -159,6 +159,14 @@ After startup, ask Claude to use Codex subagents, or invoke the plugin skill:
 
 `start_codex_session` and `continue_codex_session` are the preferred front doors for daemonless persistent Codex sessions.
 
+`start_codex_session_async` starts a persistent Codex session and returns a `session.id` immediately while Codex keeps working.
+
+`send_codex_session_prompt` queues an additional prompt onto an active or idle Codex session. It returns immediately by default and can also wait for completion.
+
+`steer_codex_session` inserts a high-priority steering prompt into a persistent Codex session. By default it runs after the active turn; `interrupt_current: true` cancels the active turn and runs the steering turn next.
+
+`get_codex_session` and `wait_codex_session` inspect or wait for long-running Codex sessions and queued turns.
+
 `run_agent` launches one Codex `exec` process and waits for it. It uses the same bounded queue as async jobs and remains available for lower-level/manual control.
 
 `run_agents` launches multiple Codex `exec` processes concurrently with a bounded `max_parallel` setting and the global queue.
@@ -171,7 +179,7 @@ After startup, ask Claude to use Codex subagents, or invoke the plugin skill:
 
 `get_agent_run`, `wait_agent_run`, and `cancel_agent_run` inspect, wait for, or cancel async jobs.
 
-`start_session`, `send_session_prompt`, `get_session`, `list_sessions`, and `cancel_session` manage daemonless persistent Codex sessions using Codex's own resumable thread ids. They are compatibility aliases behind `start_codex_session` and `continue_codex_session`.
+`start_session`, `send_session_prompt`, `get_session`, `list_sessions`, and `cancel_session` manage daemonless persistent Codex sessions using Codex's own resumable thread ids. They are compatibility aliases behind the intuitive session tools.
 
 `codex_status` reports the resolved Codex binary, server working directory, Claude project directory, default model, default reasoning effort, feature sets, and version probe.
 
@@ -183,7 +191,7 @@ Prefer `start_agent_run` or `start_agents_run` for work that may run longer than
 
 Async job snapshots expose partial stdout/stderr and parsed event summaries through `get_agent_run` while work is still running.
 
-When a client supports MCP progress tokens, `ask_codex`, `ask_codex_parallel`, `start_codex_session`, `continue_codex_session`, `run_agent`, `run_agents`, `run_agents_aggregate`, `start_session`, `send_session_prompt`, `start_agent_run`, `start_agents_run`, `get_agent_run`, `wait_agent_run`, and `cancel_agent_run` send progress notifications. SDK clients should pass an `onprogress` handler and enable timeout reset on progress for long waits.
+When a client supports MCP progress tokens, `ask_codex`, `ask_codex_parallel`, `start_codex_session`, `continue_codex_session`, `start_codex_session_async`, `send_codex_session_prompt`, `steer_codex_session`, `wait_codex_session`, `run_agent`, `run_agents`, `run_agents_aggregate`, `start_session`, `send_session_prompt`, `start_agent_run`, `start_agents_run`, `get_agent_run`, `wait_agent_run`, and `cancel_agent_run` send progress notifications. SDK clients should pass an `onprogress` handler and enable timeout reset on progress for long waits.
 
 ## License
 
