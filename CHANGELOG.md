@@ -1,10 +1,13 @@
 # Changelog
 
-## Unreleased
+## 0.2.0
 
 - Refreshed the README into a shorter onboarding page.
 - Added usage, architecture, development, and troubleshooting docs.
 - Added GitHub issue templates and a pull request template.
+- Added a local install/update script and wiki publishing script.
+- Documented known limitations and release notes.
+- Tightened Claude tool-selection guidance for sessions, steering, aggregation, and async jobs.
 
 ## 0.1.1
 

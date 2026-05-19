@@ -10,6 +10,16 @@ npm run build
 The Claude plugin manifest points at `dist/index.js`, so rebuild after changing
 TypeScript source.
 
+For the normal local install/update path:
+
+```sh
+npm run install:local
+npm run update:local
+```
+
+`install:local` builds, validates plugin wiring, and symlinks Claude's local
+plugin cache to this working tree. `update:local` first runs `git pull --ff-only`.
+
 ## Local Claude Plugin Link
 
 For active development, link Claude's installed plugin cache back to this working
@@ -88,8 +98,23 @@ scenario in every round.
 3. Run `npm run test:ci`.
 4. Run relevant real-runtime or live tests for the touched area.
 5. Run `npm run check:dist`.
-6. Check for local artifacts and secrets before committing.
-7. Push and verify GitHub Actions on Node 20 and Node 22.
+6. For release candidates, run `npm run test:real-soak`.
+7. Check for local artifacts and secrets before committing.
+8. Push and verify GitHub Actions on Node 20 and Node 22.
+9. Create the GitHub release from `docs/RELEASE.md`.
+
+## Wiki Publishing
+
+Tracked wiki source lives in `docs/wiki/`.
+
+```sh
+npm run wiki:publish
+```
+
+If GitHub returns `Repository not found` for the `.wiki.git` remote, create the
+first wiki page once in the GitHub web UI, then rerun `npm run wiki:publish`.
+GitHub does not expose an initialized wiki git remote until that first page
+exists.
 
 ## Useful Scripts
 
@@ -97,7 +122,10 @@ scenario in every round.
 | --- | --- |
 | `npm run build` | Type-check and bundle `dist/index.js` |
 | `npm run check:dist` | Rebuild and verify committed dist has no diff |
+| `npm run install:local` | Build, validate, and symlink the local Claude plugin install |
+| `npm run update:local` | Pull latest main, then run the local install flow |
 | `npm run dev:link` | Symlink Claude's plugin cache to this repo |
 | `npm run dev:watch` | Rebuild dist on TypeScript changes |
+| `npm run wiki:publish` | Publish `docs/wiki/*.md` to the GitHub wiki repo |
 | `npm run diagnostics` | Write a sanitized local diagnostics bundle |
 | `npm run validate:plugin` | Run Claude's plugin manifest validator |

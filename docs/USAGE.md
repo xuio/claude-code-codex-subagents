@@ -57,6 +57,24 @@ Diagnostics tools:
 - `codex_doctor`
 - `codex_export_debug_bundle`
 
+## Choosing The Right Tool
+
+Use this decision path when writing prompts or debugging Claude tool choice:
+
+| User intent | Best tool |
+| --- | --- |
+| One normal read-only second opinion | `ask_codex` |
+| Two or more independent workstreams | `ask_codex_parallel` |
+| Several agents plus a merged summary | `run_agents_aggregate` |
+| Same Codex agent should keep context | `start_codex_session`, then `continue_codex_session` |
+| Long first turn, user wants to keep working | `start_codex_session_async` |
+| Add a normal follow-up to a running session | `send_codex_session_prompt` |
+| Redirect the active app-server turn | `steer_codex_session` |
+| Recover a session after Claude/MCP restart | `recover_codex_session` |
+| Slow one-shot job that need not be durable | `start_agent_run` |
+
+When in doubt, ask Claude to call `codex_choose_tool` before delegating.
+
 ## Example: One Agent
 
 Ask Claude:
@@ -187,6 +205,16 @@ capabilities, pass:
 This maps to Codex's `--dangerously-bypass-approvals-and-sandbox` flag and allows
 DNS/network access, file writes, package installs, and git writes. Keep it scoped
 to the specific tool call that needs it.
+
+## Sharp Edges
+
+See [Known limitations](KNOWN_LIMITATIONS.md) for the current operational sharp
+edges. The most important ones:
+
+- raw debug logs are sensitive
+- async one-shot jobs are not durable across MCP restarts
+- real steering requires app-server support
+- full-access mode is intentionally dangerous
 
 ## Structured Output
 

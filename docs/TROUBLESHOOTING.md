@@ -39,7 +39,7 @@ claude --plugin-dir .
 For installed-plugin development, run:
 
 ```sh
-npm run dev:link
+npm run install:local
 npm run dev:watch
 ```
 
@@ -149,3 +149,21 @@ npm run test:claude-real-session
 ```
 
 These spend live Claude and/or Codex tokens.
+
+## Release Or Update Looks Stale
+
+Run the local update flow:
+
+```sh
+npm run update:local
+```
+
+Then restart Claude Code. If Claude still loads an old version, run:
+
+```sh
+npm run dev:link
+npm run validate:plugin
+```
+
+`dev:link` prints the marketplace and installed cache symlinks that Claude Code
+and Claude Desktop share.

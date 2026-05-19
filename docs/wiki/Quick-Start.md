@@ -11,8 +11,7 @@ Install and run locally:
 ```sh
 git clone https://github.com/xuio/claude-code-codex-subagents.git
 cd claude-code-codex-subagents
-npm install
-npm run build
+npm run install:local
 claude --plugin-dir .
 ```
 
@@ -32,6 +31,12 @@ npm run dev:watch
 `dev:link` symlinks Claude's plugin install back to the repository, so Claude Code
 CLI and the Claude Desktop bundled Claude Code binary load the same working tree
 after `dist/index.js` is rebuilt.
+
+To update an existing local install:
+
+```sh
+npm run update:local
+```
 
 ## Defaults
 

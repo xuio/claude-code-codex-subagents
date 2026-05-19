@@ -10,6 +10,8 @@ Run OpenAI Codex agents from Claude Code through a daemonless MCP plugin.
 parallel investigations, Spark checks, persistent multi-turn sessions, and explicit
 full-access Codex work when the user asks for it.
 
+![Terminal demo of Claude launching parallel Codex reviewers](docs/assets/demo.svg)
+
 ## Why Use It?
 
 - **Native Claude Code workflow:** Claude gets MCP tools and a plugin skill, so it can decide when to ask Codex without shell glue.
@@ -31,8 +33,7 @@ Requirements:
 ```sh
 git clone https://github.com/xuio/claude-code-codex-subagents.git
 cd claude-code-codex-subagents
-npm install
-npm run build
+npm run install:local
 claude --plugin-dir .
 ```
 
@@ -115,6 +116,8 @@ use DNS/network, install packages, or behave like a normal unrestricted Codex ru
 - [Architecture](docs/ARCHITECTURE.md) - process model, app-server sessions, durability, logging.
 - [Development](docs/DEVELOPMENT.md) - setup, local Claude linking, test tiers, release checklist.
 - [Troubleshooting](docs/TROUBLESHOOTING.md) - diagnostics, logs, common failure modes.
+- [Known limitations](docs/KNOWN_LIMITATIONS.md) - sharp edges and operational constraints.
+- [Release notes](docs/RELEASE.md) - current release highlights and validation.
 - [Security policy](SECURITY.md) - default sandboxing, logs, reporting.
 - [Contributing](CONTRIBUTING.md) - contribution expectations and local checks.
 
@@ -142,6 +145,13 @@ npm run test:ci
 npm run validate:plugin
 ```
 
+For local install/update:
+
+```sh
+npm run install:local
+npm run update:local
+```
+
 `test:ci` is portable and uses the fake Codex binary. It does not require live
 Claude or Codex credentials.
 
@@ -158,6 +168,8 @@ npm run test:claude-real-session
 See [Development](docs/DEVELOPMENT.md) for the full test matrix.
 
 ## Project Status
+
+Current release: `v0.2.0`.
 
 This project is early, but it is already tested across:
 

@@ -1,0 +1,22 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="960" height="430" viewBox="0 0 960 430" role="img" aria-labelledby="title desc">
+  <title id="title">Claude Code Codex Subagents terminal demo</title>
+  <desc id="desc">A terminal-style mock showing Claude launching three read-only Codex subagents and receiving findings.</desc>
+  <rect width="960" height="430" rx="12" fill="#111827"/>
+  <rect x="0" y="0" width="960" height="44" rx="12" fill="#1f2937"/>
+  <circle cx="24" cy="22" r="6" fill="#ef4444"/>
+  <circle cx="44" cy="22" r="6" fill="#f59e0b"/>
+  <circle cx="64" cy="22" r="6" fill="#22c55e"/>
+  <text x="86" y="28" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="14" fill="#d1d5db">Claude Code with codex-subagents</text>
+  <text x="32" y="78" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="16" fill="#93c5fd">$ claude --plugin-dir .</text>
+  <text x="32" y="118" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="16" fill="#f9fafb">User: Ask Codex to run three read-only reviewers: API, tests, security.</text>
+  <text x="32" y="160" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="15" fill="#a7f3d0">Claude -> ask_codex_parallel</text>
+  <text x="64" y="195" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="15" fill="#d1d5db">api      gpt-5.3-codex-spark  read-only  completed</text>
+  <text x="64" y="225" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="15" fill="#d1d5db">tests    gpt-5.3-codex-spark  read-only  completed</text>
+  <text x="64" y="255" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="15" fill="#d1d5db">security gpt-5.3-codex-spark  read-only  completed</text>
+  <rect x="32" y="286" width="896" height="92" rx="8" fill="#0f172a" stroke="#374151"/>
+  <text x="54" y="322" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="15" fill="#fbbf24">Findings</text>
+  <text x="54" y="350" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="14" fill="#e5e7eb">1. Session recovery: thread/read optionality covered by tests.</text>
+  <text x="54" y="374" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="14" fill="#e5e7eb">2. Logging: raw MCP traffic is useful but sensitive; use production profile for normal work.</text>
+  <text x="32" y="408" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="13" fill="#9ca3af">Default behavior: Codex desktop binary, read-only sandbox, no daemon.</text>
+</svg>
+

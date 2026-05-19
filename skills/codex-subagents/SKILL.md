@@ -29,12 +29,15 @@ Prefer the intuitive front-door tools for normal use:
 - For independent tasks that can run concurrently, call `ask_codex_parallel` with one task object per workstream. Split by ownership such as API flow, tests, security, performance, UI, docs, or migration risk. Keep tasks concrete and bounded, and set `max_parallel` to the smaller of the useful agent count and `4` unless the user asks for more.
 - For multi-turn Codex work, call `start_codex_session` for the initial task and `continue_codex_session` for follow-ups. Session tools use Codex app-server by default, preserve context across turns, and remain daemonless because the app-server child exits with this MCP server.
 - For long-running multi-turn Codex work, call `start_codex_session_async` so Claude gets a `session.id` immediately. Then use `send_codex_session_prompt` to queue normal follow-ups, `steer_codex_session` to steer the active app-server turn, `get_codex_session` to inspect partial progress, and `wait_codex_session` to wait until a turn or the whole queue completes.
+- Use `send_codex_session_prompt` for ordinary follow-ups. Use `steer_codex_session` only when the user wants to redirect active work now.
 - `steer_codex_session` delivers real live steering with Codex `turn/steer` when `session.supportsRealSteering` is true. If a session reports `protocol: "exec"`, app-server was unavailable and steering degrades to the next high-priority queued turn. Set `interrupt_current: true` only when the active turn should be cancelled and redirected.
 - If unsure which path fits, call `codex_choose_tool` before delegating.
 
 Use the lower-level compatibility tools only when they fit better: `run_agent`, `run_agents`, `start_session`, and `send_session_prompt` expose the same execution paths with more literal naming. When Claude needs a concise consensus object from several agents, call `run_agents_aggregate`. Prefer `output_contract: "review_findings"` for review-style aggregation.
 
 For slow, broad, or potentially flaky Codex work, prefer `start_agent_run` or `start_agents_run` instead of the blocking tools. Poll with `get_agent_run`, wait with `wait_agent_run`, and cancel with `cancel_agent_run` when the work is no longer needed. The async tools keep the MCP request responsive and use the same global Codex process queue.
+
+Async one-shot jobs are not durable across MCP restarts. For long work that should be recoverable, use `start_codex_session_async` instead.
 
 When Claude wants Codex to work in the same repository or folder as the active Claude Code session, pass that folder as `project_dir`. Use `cwd` only as a compatibility alias.
 
@@ -49,6 +52,8 @@ Use `model_preset: "spark"` for responsive, focused work such as UI iteration, n
 Do not set `reasoning_summary` with `model_preset: "spark"` except for `reasoning_summary: "none"`. Spark does not support `reasoning.summary`, and the plugin rejects unsupported combinations before starting Codex.
 
 Do not set `service_tier` by default. Let Codex use its normal account/default service tier unless the user explicitly asks for a service tier.
+
+Verbose debug logs may contain raw MCP traffic and prompt text. Treat diagnostics bundles and logs as sensitive local data.
 
 Set `isolated_codex_home: true` when unrelated Codex MCP servers from the user's `~/.codex/config.toml` should not be loaded for the run.
 

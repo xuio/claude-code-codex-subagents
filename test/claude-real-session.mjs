@@ -1,10 +1,11 @@
 import { spawnSync } from "node:child_process";
-import { readdir, stat } from "node:fs/promises";
+import { readFile, readdir, stat } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { extractJsonResult } from "./json-result.mjs";
 
 const root = process.cwd();
+const packageJson = JSON.parse(await readFile(path.join(root, "package.json"), "utf8"));
 const codexBin =
   process.env.CLAUDE_REAL_CODEX_BIN ?? "/Applications/Codex.app/Contents/Resources/codex";
 const installedPluginDir =
@@ -16,7 +17,7 @@ const installedPluginDir =
     "cache",
     "codex-subagents-local",
     "codex-subagents",
-    "0.1.1",
+    packageJson.version,
   );
 const claudeCodeRoot = path.join(
   os.homedir(),

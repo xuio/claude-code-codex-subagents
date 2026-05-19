@@ -1,6 +1,6 @@
 {
   "name": "codex-subagents",
-  "version": "0.1.1",
+  "version": "0.2.0",
   "description": "Launch OpenAI Codex agents, Spark agents, and parallel Codex subagents from Claude Code through a daemonless MCP server with read-only defaults and explicit full-access mode.",
   "author": {
     "name": "xuio"
