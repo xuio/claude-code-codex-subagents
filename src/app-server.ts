@@ -25,6 +25,8 @@ import { OutputArtifactWriter } from "./artifacts.js";
 import { recordDiagnosticEvent } from "./diagnostics.js";
 
 type JsonObject = Record<string, unknown>;
+
+const maxPendingJsonLineChars = 1_000_000;
 type AppServerRequestMethod =
   | "initialize"
   | "thread/start"
@@ -213,6 +215,7 @@ export class CodexAppServerSession {
   private readonly closedPromise: Promise<void>;
   private resolveClosed: (() => void) | undefined;
   private lineBuffer = "";
+  private lineBufferOverflowReported = false;
   private requestCounter = 0;
   private activeTurn?: ActiveTurnState;
   private acceptingStartNotifications = false;
@@ -719,11 +722,29 @@ export class CodexAppServerSession {
       chunk: summarizeRawTrafficForLog(chunk),
     });
     this.lineBuffer += chunk;
+    if (this.lineBuffer.length > maxPendingJsonLineChars) {
+      const dropped = this.lineBuffer.length - maxPendingJsonLineChars;
+      this.lineBuffer = this.lineBuffer.slice(-maxPendingJsonLineChars);
+      if (!this.lineBufferOverflowReported) {
+        this.lineBufferOverflowReported = true;
+        const error = `Codex app-server stdout JSON line exceeded ${maxPendingJsonLineChars} chars; dropped leading data from an unterminated line.`;
+        logger.warn("codex.app_server.stdout_line_oversized", {
+          ...this.logContext,
+          appServerId: this.id,
+          threadId: this.threadId || undefined,
+          activeTurnId: this.activeTurnId,
+          droppedChars: dropped,
+          maxPendingJsonLineChars,
+        });
+        this.recordBufferedLineError(error);
+      }
+    }
     let newlineIndex = this.lineBuffer.indexOf("\n");
     while (newlineIndex >= 0) {
       const line = this.lineBuffer.slice(0, newlineIndex);
       this.lineBuffer = this.lineBuffer.slice(newlineIndex + 1);
       this.handleLine(line);
+      this.lineBufferOverflowReported = false;
       newlineIndex = this.lineBuffer.indexOf("\n");
     }
   }
@@ -980,6 +1001,19 @@ export class CodexAppServerSession {
     this.activeTurn?.stdout.append(`${line}\n`);
     this.activeTurn?.artifactWriter.appendStdout(`${line}\n`);
     this.activeTurn?.publishSnapshot(true);
+  }
+
+  private recordBufferedLineError(error: string): void {
+    this.lastError = error;
+    if (this.activeTurn) {
+      this.activeTurn.summary.errors.push(error);
+      this.activeTurn.publishSnapshot(true);
+    } else if (this.acceptingStartNotifications) {
+      this.queuePendingStartNotification({
+        method: "internal/unparseableLine",
+        params: { error, line: "" },
+      });
+    }
   }
 
   private async probeThreadRead(timeoutMs: number): Promise<void> {

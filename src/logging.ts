@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
-import { appendFileSync, mkdirSync, renameSync, statSync } from "node:fs";
+import { appendFileSync, chmodSync, mkdirSync, renameSync, statSync } from "node:fs";
 import path from "node:path";
 import { redactJsonValue, redactSensitiveText } from "./redaction.js";
 
@@ -20,6 +20,7 @@ const sensitiveKeyRe = /(api[_-]?key|token|secret|password|private[_-]?key|cooki
 let logWriter: (line: string) => void = (line) => {
   writeDefaultLog(line);
 };
+let lastLogFileError: string | undefined;
 
 export function configuredLogProfile(env: NodeJS.ProcessEnv = process.env): LogProfile {
   const raw = env.CODEX_SUBAGENTS_LOG_PROFILE?.trim().toLowerCase();
@@ -184,6 +185,7 @@ export function setLogWriterForTest(writer: (line: string) => void): void {
 }
 
 export function resetLogWriterForTest(): void {
+  lastLogFileError = undefined;
   logWriter = (line) => {
     writeDefaultLog(line);
   };
@@ -198,6 +200,7 @@ export function loggingDiagnostics(env: NodeJS.ProcessEnv = process.env): Record
     maxStringChars: maxStringChars(env),
     logFile: logFile || undefined,
     logFileMaxBytes: logFile ? logFileMaxBytes(env) : undefined,
+    logFileLastError: lastLogFileError,
   };
 }
 
@@ -209,11 +212,17 @@ function writeDefaultLog(line: string): void {
     mkdirSync(path.dirname(logFile), { recursive: true });
     try {
       if (statSync(logFile).size > logFileMaxBytes()) renameSync(logFile, `${logFile}.1`);
-    } catch {
+    } catch (error) {
       // Missing files or rotation races are harmless.
+      if ((error as NodeJS.ErrnoException | undefined)?.code !== "ENOENT") {
+        lastLogFileError = error instanceof Error ? error.message : String(error);
+      }
     }
-    appendFileSync(logFile, `${line}\n`, "utf8");
-  } catch {
+    appendFileSync(logFile, `${line}\n`, { encoding: "utf8", mode: 0o600 });
+    chmodSync(logFile, 0o600);
+    lastLogFileError = undefined;
+  } catch (error) {
+    lastLogFileError = error instanceof Error ? error.message : String(error);
     // Logging must never break MCP traffic or Codex execution.
   }
 }

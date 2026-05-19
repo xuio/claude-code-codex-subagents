@@ -126,6 +126,23 @@ describe("app-server hardening", () => {
     ]);
   });
 
+  it("bounds unterminated app-server stdout lines", async () => {
+    const manager = new CodexSessionManager();
+    const projectDir = await tempDir("codex-subagents-app-oversized-line-project-");
+
+    const started = await manager.start({
+      prompt: "APP_UNTERMINATED_STDOUT_CHARS=1200000",
+      projectDir,
+      codexBin: fakeCodex,
+      maxOutputChars: 1_000,
+      timeoutMs: 5_000,
+    });
+
+    expect(started.result.ok).toBe(true);
+    expect(started.result.eventSummary.errors.join("\n")).toContain("app-server stdout JSON line exceeded");
+    manager.cancel(started.session.id);
+  });
+
   it("resets app-server idle timeouts when output is still flowing", async () => {
     const manager = new CodexSessionManager();
     const projectDir = await tempDir("codex-subagents-app-idle-project-");

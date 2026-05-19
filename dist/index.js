@@ -21104,7 +21104,7 @@ import os4 from "node:os";
 import path5 from "node:path";
 
 // src/binary.ts
-import { accessSync, constants } from "node:fs";
+import { accessSync, constants, statSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 function cleanOption(value) {
@@ -21115,6 +21115,7 @@ function cleanOption(value) {
 }
 function isExecutable(candidate) {
   try {
+    if (!statSync(candidate).isFile()) return false;
     accessSync(candidate, constants.X_OK);
     return true;
   } catch {
@@ -21316,7 +21317,7 @@ function parseStructuredOutput(text) {
 
 // src/logging.ts
 import { createHash, randomUUID } from "node:crypto";
-import { appendFileSync, mkdirSync, renameSync, statSync } from "node:fs";
+import { appendFileSync, chmodSync, mkdirSync, renameSync, statSync as statSync2 } from "node:fs";
 import path2 from "node:path";
 
 // src/redaction.ts
@@ -21366,14 +21367,18 @@ function redactSensitiveText(text) {
   }
   return redacted;
 }
-function redactJsonValue(value) {
+function isSensitiveKey(key) {
+  return SENSITIVE_ENV_KEY.test(key);
+}
+function redactJsonValue(value, key = "") {
+  if (key && isSensitiveKey(key)) return "[REDACTED]";
   if (typeof value === "string") return redactSensitiveText(value);
-  if (Array.isArray(value)) return value.map((item) => redactJsonValue(item));
+  if (Array.isArray(value)) return value.map((item) => redactJsonValue(item, key));
   if (!value || typeof value !== "object") return value;
   return Object.fromEntries(
-    Object.entries(value).map(([key, child]) => [
-      key,
-      redactJsonValue(child)
+    Object.entries(value).map(([key2, child]) => [
+      key2,
+      redactJsonValue(child, key2)
     ])
   );
 }
@@ -21401,6 +21406,7 @@ var levelWeight = {
 var logWriter = (line) => {
   writeDefaultLog(line);
 };
+var lastLogFileError;
 function configuredLogProfile(env = process.env) {
   const raw = env.CODEX_SUBAGENTS_LOG_PROFILE?.trim().toLowerCase();
   return raw === "production" ? "production" : "debug";
@@ -21511,7 +21517,8 @@ function loggingDiagnostics(env = process.env) {
     rawTrafficRedacted: rawTrafficRedacts(env),
     maxStringChars: maxStringChars(env),
     logFile: logFile || void 0,
-    logFileMaxBytes: logFile ? logFileMaxBytes(env) : void 0
+    logFileMaxBytes: logFile ? logFileMaxBytes(env) : void 0,
+    logFileLastError: lastLogFileError
   };
 }
 function writeDefaultLog(line) {
@@ -21522,12 +21529,18 @@ function writeDefaultLog(line) {
   try {
     mkdirSync(path2.dirname(logFile), { recursive: true });
     try {
-      if (statSync(logFile).size > logFileMaxBytes()) renameSync(logFile, `${logFile}.1`);
-    } catch {
+      if (statSync2(logFile).size > logFileMaxBytes()) renameSync(logFile, `${logFile}.1`);
+    } catch (error2) {
+      if (error2?.code !== "ENOENT") {
+        lastLogFileError = error2 instanceof Error ? error2.message : String(error2);
+      }
     }
     appendFileSync(logFile, `${line}
-`, "utf8");
-  } catch {
+`, { encoding: "utf8", mode: 384 });
+    chmodSync(logFile, 384);
+    lastLogFileError = void 0;
+  } catch (error2) {
+    lastLogFileError = error2 instanceof Error ? error2.message : String(error2);
   }
 }
 
@@ -21960,6 +21973,7 @@ var serviceTiers = ["fast", "flex"];
 var modelVerbosities = ["low", "medium", "high"];
 var reasoningSummaries = ["auto", "concise", "detailed", "none"];
 var sparkModel = "gpt-5.3-codex-spark";
+var maxPendingJsonLineChars = 1e6;
 var LimitedText = class {
   constructor(maxChars) {
     this.maxChars = maxChars;
@@ -21984,6 +21998,11 @@ var LimitedText = class {
     return this.truncatedCount;
   }
 };
+function versionProbeTimeoutMs(env = process.env) {
+  const parsed = Number(env.CODEX_SUBAGENTS_VERSION_TIMEOUT_MS);
+  if (!Number.isInteger(parsed) || parsed < 1) return 5e3;
+  return Math.min(parsed, 6e4);
+}
 function defaultReasoningEffort(env = process.env) {
   const value = env.CODEX_SUBAGENTS_DEFAULT_REASONING_EFFORT?.trim();
   return value !== "minimal" && reasoningEfforts.includes(value) ? value : "medium";
@@ -22248,6 +22267,11 @@ function parseJsonLine(line, summary) {
   try {
     event = JSON.parse(line);
   } catch {
+    if (line.length >= maxPendingJsonLineChars) {
+      summary.errors.push(
+        `Codex stdout JSONL line exceeded ${maxPendingJsonLineChars} chars; dropped or ignored data from an unterminated line.`
+      );
+    }
     summary.errors.push(`Unparseable Codex JSONL line: ${line.slice(0, 500)}`);
     return;
   }
@@ -22398,6 +22422,7 @@ async function runAgent(options) {
     events: options.includeEvents ? [] : void 0
   };
   let pendingLine = "";
+  let pendingLineOverflowReported = false;
   let timedOut = false;
   let timeoutReason;
   let cancelled = false;
@@ -22482,6 +22507,16 @@ async function runAgent(options) {
       stdout.append(chunk);
       publishSnapshot(true);
       pendingLine += chunk;
+      if (pendingLine.length > maxPendingJsonLineChars) {
+        const dropped = pendingLine.length - maxPendingJsonLineChars;
+        pendingLine = pendingLine.slice(-maxPendingJsonLineChars);
+        if (!pendingLineOverflowReported) {
+          pendingLineOverflowReported = true;
+          const message = `Codex stdout JSONL line exceeded ${maxPendingJsonLineChars} chars; dropped leading data from an unterminated line.`;
+          summary.errors.push(message);
+          logger.warn("codex.stdout_line_oversized", { runId, droppedChars: dropped, maxPendingJsonLineChars });
+        }
+      }
       let newlineIndex = pendingLine.indexOf("\n");
       while (newlineIndex >= 0) {
         const line = pendingLine.slice(0, newlineIndex);
@@ -22635,28 +22670,46 @@ async function runAgent(options) {
     });
   }
 }
-async function probeCodexVersion(codexBin, env = process.env) {
+async function probeCodexVersion(codexBin, env = process.env, options = {}) {
   const binary = resolveCodexBinary({ explicitPath: codexBin, env });
   const version2 = await new Promise((resolve) => {
+    let settled = false;
+    const finish = (result) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timeout);
+      resolve(result);
+    };
+    const output = new LimitedText(2e4);
+    const errorOutput = new LimitedText(2e4);
+    const timeoutMs = options.timeoutMs ?? versionProbeTimeoutMs(env);
     const child = spawn(binary.path, ["--version"], {
-      env: { ...process.env, ...env },
+      env: sanitizeChildEnv({ ...process.env, ...env }, false),
       stdio: ["ignore", "pipe", "pipe"],
-      shell: false
+      shell: false,
+      detached: process.platform !== "win32"
     });
-    let output = "";
-    let errorOutput = "";
+    trackChildProcess(child, { label: "codex-version", id: binary.path });
+    const timeout = setTimeout(() => {
+      killChildProcess(child, "SIGTERM");
+      finish({ error: `Codex version probe timed out after ${timeoutMs}ms` });
+    }, timeoutMs);
+    timeout.unref();
     child.stdout.setEncoding("utf8");
     child.stderr.setEncoding("utf8");
     child.stdout.on("data", (chunk) => {
-      output += chunk;
+      output.append(chunk);
     });
     child.stderr.on("data", (chunk) => {
-      errorOutput += chunk;
+      errorOutput.append(chunk);
     });
-    child.once("error", (error2) => resolve({ error: error2.message }));
+    child.once("error", (error2) => finish({ error: error2.message }));
     child.once("close", (code) => {
-      if (code === 0) resolve({ version: output.trim() || errorOutput.trim() });
-      else resolve({ error: errorOutput.trim() || output.trim() || `Exited with code ${code}` });
+      const stdoutText = output.text().trim();
+      const stderrText = errorOutput.text().trim();
+      const truncated = output.truncated() || errorOutput.truncated() ? ` [truncated stdout=${output.truncated()} stderr=${errorOutput.truncated()} chars]` : "";
+      if (code === 0) finish({ version: `${stdoutText || stderrText}${truncated}`.trim() });
+      else finish({ error: `${stderrText || stdoutText || `Exited with code ${code}`}${truncated}`.trim() });
     });
   });
   return { binary, ...version2 };
@@ -22700,7 +22753,7 @@ function aggregateAgentResults(results) {
 }
 
 // src/diagnostics.ts
-import { mkdir as mkdir2, mkdtemp as mkdtemp3, readFile as readFile3, writeFile as writeFile3 } from "node:fs/promises";
+import { mkdir as mkdir2, mkdtemp as mkdtemp3, open, writeFile as writeFile3 } from "node:fs/promises";
 import os5 from "node:os";
 import path6 from "node:path";
 var events = [];
@@ -22735,11 +22788,19 @@ function diagnosticStats() {
   };
 }
 async function tailFile(file, maxBytes = 2e5) {
+  let handle;
   try {
-    const text = await readFile3(file, "utf8");
-    return text.length <= maxBytes ? text : text.slice(text.length - maxBytes);
+    handle = await open(file, "r");
+    const stat3 = await handle.stat();
+    const length = Math.min(stat3.size, maxBytes);
+    const buffer = Buffer.alloc(length);
+    await handle.read(buffer, 0, length, stat3.size - length);
+    return buffer.toString("utf8");
   } catch {
     return void 0;
+  } finally {
+    await handle?.close().catch(() => {
+    });
   }
 }
 async function createDebugBundle(input = {}) {
@@ -22765,7 +22826,7 @@ async function createDebugBundle(input = {}) {
     session: input.session,
     job: input.job,
     notes: input.notes,
-    logTail: logFile ? await tailFile(logFile) : void 0
+    logTail: input.includeLogTail && logFile ? await tailFile(logFile) : void 0
   });
   const diagnosticsPath = path6.join(bundleDir, "diagnostics.json");
   await writeFile3(diagnosticsPath, JSON.stringify(payload, null, 2), "utf8");
@@ -23016,6 +23077,10 @@ async function runQueuedAgents(options, queueOptions = {}) {
 var CodexJobManager = class {
   jobs = /* @__PURE__ */ new Map();
   ttlMs = readPositiveInt(process.env.CODEX_SUBAGENTS_JOB_TTL_SECONDS, 3600, 86400) * 1e3;
+  maxJobs;
+  constructor(maxJobs = readPositiveInt(process.env.CODEX_SUBAGENTS_MAX_JOBS, 200, 1e4)) {
+    this.maxJobs = maxJobs;
+  }
   startAgent(options) {
     return this.start("agent", async (job) => {
       const result = await runQueuedAgent(options, {
@@ -23106,6 +23171,7 @@ var CodexJobManager = class {
     return {
       ...agentRunQueue.stats(),
       jobs: this.jobs.size,
+      maxJobs: this.maxJobs,
       waiters: [...this.jobs.values()].reduce((count, job) => count + job.waiters.size, 0)
     };
   }
@@ -23125,6 +23191,13 @@ var CodexJobManager = class {
   }
   start(kind, run) {
     this.prune();
+    this.pruneOverflow();
+    if (this.jobs.size >= this.maxJobs) {
+      logger.warn("job.start_rejected_backpressure", { kind, jobs: this.jobs.size, maxJobs: this.maxJobs });
+      throw new BackpressureError(
+        `Codex async job table is full (${this.jobs.size}/${this.maxJobs}). Wait for or cancel existing jobs before starting another asynchronous run.`
+      );
+    }
     const now = (/* @__PURE__ */ new Date()).toISOString();
     const job = {
       id: `job-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`,
@@ -23186,6 +23259,14 @@ var CodexJobManager = class {
     for (const [id, job] of this.jobs) {
       if (!job.completedAt) continue;
       if (Date.parse(job.completedAt) < cutoff) this.jobs.delete(id);
+    }
+  }
+  pruneOverflow() {
+    if (this.jobs.size < this.maxJobs) return;
+    const completed = [...this.jobs.entries()].filter(([, job]) => Boolean(job.completedAt)).sort(([, left], [, right]) => Date.parse(left.completedAt ?? "") - Date.parse(right.completedAt ?? ""));
+    for (const [id] of completed) {
+      if (this.jobs.size < this.maxJobs) return;
+      this.jobs.delete(id);
     }
   }
 };
@@ -23471,7 +23552,7 @@ function compactAgentResultForMcp(result, limits = singleAgentLimits) {
     stdoutTail: stdoutTail.text,
     eventSummary: compactSummary(result.eventSummary, limits),
     structuredOutput: compactUnknown(result.structuredOutput, limits.structuredStringChars),
-    commandPreview: result.commandPreview.slice(0, 40).map((arg) => truncateString(arg, 1e3).text),
+    commandPreview: result.commandPreview.slice(0, 40).map((arg) => truncateString(redactSensitiveText(arg), 1e3).text),
     mcpResponse: {
       compacted,
       finalMessageOmittedChars: finalMessage.omittedChars,
@@ -23540,6 +23621,7 @@ function isParallelResult(value) {
 // src/app-server.ts
 import { spawn as spawn2 } from "node:child_process";
 import { stat as stat2 } from "node:fs/promises";
+var maxPendingJsonLineChars2 = 1e6;
 var AppServerUnavailableError = class extends Error {
   constructor(message) {
     super(message);
@@ -23710,6 +23792,7 @@ var CodexAppServerSession = class _CodexAppServerSession {
   closedPromise;
   resolveClosed;
   lineBuffer = "";
+  lineBufferOverflowReported = false;
   requestCounter = 0;
   activeTurn;
   acceptingStartNotifications = false;
@@ -24136,11 +24219,29 @@ var CodexAppServerSession = class _CodexAppServerSession {
       chunk: summarizeRawTrafficForLog(chunk)
     });
     this.lineBuffer += chunk;
+    if (this.lineBuffer.length > maxPendingJsonLineChars2) {
+      const dropped = this.lineBuffer.length - maxPendingJsonLineChars2;
+      this.lineBuffer = this.lineBuffer.slice(-maxPendingJsonLineChars2);
+      if (!this.lineBufferOverflowReported) {
+        this.lineBufferOverflowReported = true;
+        const error2 = `Codex app-server stdout JSON line exceeded ${maxPendingJsonLineChars2} chars; dropped leading data from an unterminated line.`;
+        logger.warn("codex.app_server.stdout_line_oversized", {
+          ...this.logContext,
+          appServerId: this.id,
+          threadId: this.threadId || void 0,
+          activeTurnId: this.activeTurnId,
+          droppedChars: dropped,
+          maxPendingJsonLineChars: maxPendingJsonLineChars2
+        });
+        this.recordBufferedLineError(error2);
+      }
+    }
     let newlineIndex = this.lineBuffer.indexOf("\n");
     while (newlineIndex >= 0) {
       const line = this.lineBuffer.slice(0, newlineIndex);
       this.lineBuffer = this.lineBuffer.slice(newlineIndex + 1);
       this.handleLine(line);
+      this.lineBufferOverflowReported = false;
       newlineIndex = this.lineBuffer.indexOf("\n");
     }
   }
@@ -24366,6 +24467,18 @@ var CodexAppServerSession = class _CodexAppServerSession {
     this.activeTurn?.artifactWriter.appendStdout(`${line}
 `);
     this.activeTurn?.publishSnapshot(true);
+  }
+  recordBufferedLineError(error2) {
+    this.lastError = error2;
+    if (this.activeTurn) {
+      this.activeTurn.summary.errors.push(error2);
+      this.activeTurn.publishSnapshot(true);
+    } else if (this.acceptingStartNotifications) {
+      this.queuePendingStartNotification({
+        method: "internal/unparseableLine",
+        params: { error: error2, line: "" }
+      });
+    }
   }
   async probeThreadRead(timeoutMs) {
     try {
@@ -26895,7 +27008,8 @@ server.registerTool(
     inputSchema: {
       session_id: sessionIdSchema.optional(),
       job_id: jobIdSchema.optional(),
-      include_all_sessions: external_exports.boolean().default(false)
+      include_all_sessions: external_exports.boolean().default(false),
+      include_log_tail: external_exports.boolean().default(false).describe("Include a bounded tail of CODEX_SUBAGENTS_LOG_FILE in the bundle. This may contain raw MCP traffic.")
     }
   },
   async (args, extra) => loggedToolCall("codex_export_debug_bundle", args, extra, async () => {
@@ -26919,8 +27033,9 @@ server.registerTool(
       },
       notes: [
         "The bundle intentionally records environment key names, not environment values.",
-        "If CODEX_SUBAGENTS_LOG_FILE is configured, diagnostics.json includes a bounded tail of that log file."
-      ]
+        args.include_log_tail ? "A bounded CODEX_SUBAGENTS_LOG_FILE tail was included because include_log_tail was true." : "The configured log file tail was not included; rerun with include_log_tail=true when raw MCP traffic is needed."
+      ],
+      includeLogTail: args.include_log_tail
     });
     await progress.flush();
     return jsonResult({
@@ -27020,10 +27135,10 @@ server.registerTool(
       });
     }
     try {
-      const projectDir = args.project_dir ?? process.env.CLAUDE_PROJECT_DIR ?? process.cwd();
+      const projectDir = await resolveWorkingDirectory(args.project_dir);
       checks.push({
         name: "project_dir",
-        ok: Boolean(projectDir),
+        ok: true,
         detail: { projectDir: cleanOption(projectDir) }
       });
     } catch (error2) {

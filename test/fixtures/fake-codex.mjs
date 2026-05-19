@@ -15,6 +15,11 @@ function emit(event) {
 const args = process.argv.slice(2);
 
 if (args.includes("--version")) {
+  if (process.env.FAKE_CODEX_VERSION_HANG === "1") {
+    await new Promise(() => {
+      setInterval(() => {}, 1000);
+    });
+  }
   process.stdout.write("codex-cli fake-0.1.0\n");
   process.exit(0);
 }
@@ -131,6 +136,10 @@ if (args[0] === "app-server") {
         method: "item/agentMessage/delta",
         params: { threadId, turnId, itemId: "item_large", delta: "x".repeat(largeStreamChars) },
       });
+    }
+    const unterminatedStreamChars = numberMode("APP_UNTERMINATED_STDOUT_CHARS");
+    if (unterminatedStreamChars > 0) {
+      process.stdout.write("u".repeat(unterminatedStreamChars));
     }
     send({
       method: "item/agentMessage/delta",
@@ -460,6 +469,11 @@ if (prompt.includes("IGNORE_SIGTERM")) {
 const stdoutMatch = prompt.match(/BIG_STDOUT_CHARS=(\d+)/);
 if (stdoutMatch) {
   process.stdout.write("x".repeat(Number(stdoutMatch[1])));
+}
+
+const unterminatedStdoutMatch = prompt.match(/UNTERMINATED_STDOUT_CHARS=(\d+)/);
+if (unterminatedStdoutMatch) {
+  await new Promise((resolve) => process.stdout.write("u".repeat(Number(unterminatedStdoutMatch[1])), resolve));
 }
 
 const stderrMatch = prompt.match(/BIG_STDERR_CHARS=(\d+)/);

@@ -1,4 +1,5 @@
 import type { AgentRunPartial, AgentRunResult, CodexEventSummary } from "./runner.js";
+import { redactSensitiveText } from "./redaction.js";
 
 interface TruncatedString {
   text: string;
@@ -104,7 +105,9 @@ export function compactAgentResultForMcp(
     stdoutTail: stdoutTail.text,
     eventSummary: compactSummary(result.eventSummary, limits),
     structuredOutput: compactUnknown(result.structuredOutput, limits.structuredStringChars),
-    commandPreview: result.commandPreview.slice(0, 40).map((arg) => truncateString(arg, 1_000).text),
+    commandPreview: result.commandPreview
+      .slice(0, 40)
+      .map((arg) => truncateString(redactSensitiveText(arg), 1_000).text),
     mcpResponse: {
       compacted,
       finalMessageOmittedChars: finalMessage.omittedChars,

@@ -11,6 +11,7 @@ import {
   probeCodexVersion,
   reasoningEfforts,
   reasoningSummaries,
+  resolveWorkingDirectory,
   sandboxModes,
   serviceTiers,
 } from "./runner.js";
@@ -2020,6 +2021,10 @@ server.registerTool(
       session_id: sessionIdSchema.optional(),
       job_id: jobIdSchema.optional(),
       include_all_sessions: z.boolean().default(false),
+      include_log_tail: z
+        .boolean()
+        .default(false)
+        .describe("Include a bounded tail of CODEX_SUBAGENTS_LOG_FILE in the bundle. This may contain raw MCP traffic."),
     },
   },
   async (args, extra) =>
@@ -2048,8 +2053,11 @@ server.registerTool(
         },
         notes: [
           "The bundle intentionally records environment key names, not environment values.",
-          "If CODEX_SUBAGENTS_LOG_FILE is configured, diagnostics.json includes a bounded tail of that log file.",
+          args.include_log_tail
+            ? "A bounded CODEX_SUBAGENTS_LOG_FILE tail was included because include_log_tail was true."
+            : "The configured log file tail was not included; rerun with include_log_tail=true when raw MCP traffic is needed.",
         ],
+        includeLogTail: args.include_log_tail,
       });
       await progress.flush();
       return jsonResult({
@@ -2158,10 +2166,10 @@ server.registerTool(
       }
 
       try {
-        const projectDir = args.project_dir ?? process.env.CLAUDE_PROJECT_DIR ?? process.cwd();
+        const projectDir = await resolveWorkingDirectory(args.project_dir);
         checks.push({
           name: "project_dir",
-          ok: Boolean(projectDir),
+          ok: true,
           detail: { projectDir: cleanOption(projectDir) },
         });
       } catch (error) {

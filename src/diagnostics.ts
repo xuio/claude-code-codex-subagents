@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, open, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { loggingDiagnostics } from "./logging.js";
@@ -62,11 +62,18 @@ export function diagnosticStats(): Record<string, unknown> {
 }
 
 async function tailFile(file: string, maxBytes = 200_000): Promise<string | undefined> {
+  let handle: Awaited<ReturnType<typeof open>> | undefined;
   try {
-    const text = await readFile(file, "utf8");
-    return text.length <= maxBytes ? text : text.slice(text.length - maxBytes);
+    handle = await open(file, "r");
+    const stat = await handle.stat();
+    const length = Math.min(stat.size, maxBytes);
+    const buffer = Buffer.alloc(length);
+    await handle.read(buffer, 0, length, stat.size - length);
+    return buffer.toString("utf8");
   } catch {
     return undefined;
+  } finally {
+    await handle?.close().catch(() => {});
   }
 }
 
@@ -76,6 +83,7 @@ export async function createDebugBundle(input: {
   status?: unknown;
   notes?: string[];
   env?: NodeJS.ProcessEnv;
+  includeLogTail?: boolean;
 } = {}): Promise<{ bundleDir: string; diagnosticsPath: string }> {
   const env = input.env ?? process.env;
   const base = path.resolve(env.CODEX_SUBAGENTS_DEBUG_BUNDLE_DIR?.trim() || os.tmpdir());
@@ -101,7 +109,7 @@ export async function createDebugBundle(input: {
     session: input.session,
     job: input.job,
     notes: input.notes,
-    logTail: logFile ? await tailFile(logFile) : undefined,
+    logTail: input.includeLogTail && logFile ? await tailFile(logFile) : undefined,
   });
   const diagnosticsPath = path.join(bundleDir, "diagnostics.json");
   await writeFile(diagnosticsPath, JSON.stringify(payload, null, 2), "utf8");

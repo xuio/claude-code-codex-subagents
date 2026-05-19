@@ -48,15 +48,20 @@ export function redactSensitiveText(text: string): string {
   return redacted;
 }
 
-export function redactJsonValue<T>(value: T): T {
+export function isSensitiveKey(key: string): boolean {
+  return SENSITIVE_ENV_KEY.test(key);
+}
+
+export function redactJsonValue<T>(value: T, key = ""): T {
+  if (key && isSensitiveKey(key)) return "[REDACTED]" as T;
   if (typeof value === "string") return redactSensitiveText(value) as T;
-  if (Array.isArray(value)) return value.map((item) => redactJsonValue(item)) as T;
+  if (Array.isArray(value)) return value.map((item) => redactJsonValue(item, key)) as T;
   if (!value || typeof value !== "object") return value;
 
   return Object.fromEntries(
     Object.entries(value as Record<string, unknown>).map(([key, child]) => [
       key,
-      redactJsonValue(child),
+      redactJsonValue(child, key),
     ]),
   ) as T;
 }

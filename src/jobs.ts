@@ -349,6 +349,11 @@ export async function runQueuedAgents(
 export class CodexJobManager {
   private readonly jobs = new Map<string, JobRecord>();
   private readonly ttlMs = readPositiveInt(process.env.CODEX_SUBAGENTS_JOB_TTL_SECONDS, 3600, 86_400) * 1000;
+  private readonly maxJobs: number;
+
+  constructor(maxJobs = readPositiveInt(process.env.CODEX_SUBAGENTS_MAX_JOBS, 200, 10_000)) {
+    this.maxJobs = maxJobs;
+  }
 
   startAgent(options: AgentRunOptions): JobSnapshot {
     return this.start("agent", async (job) => {
@@ -446,11 +451,12 @@ export class CodexJobManager {
     return snapshot(job);
   }
 
-  stats(): QueueStats & { jobs: number; waiters: number } {
+  stats(): QueueStats & { jobs: number; maxJobs: number; waiters: number } {
     this.prune();
     return {
       ...agentRunQueue.stats(),
       jobs: this.jobs.size,
+      maxJobs: this.maxJobs,
       waiters: [...this.jobs.values()].reduce((count, job) => count + job.waiters.size, 0),
     };
   }
@@ -472,6 +478,13 @@ export class CodexJobManager {
 
   private start(kind: JobKind, run: (job: JobRecord) => Promise<unknown>): JobSnapshot {
     this.prune();
+    this.pruneOverflow();
+    if (this.jobs.size >= this.maxJobs) {
+      logger.warn("job.start_rejected_backpressure", { kind, jobs: this.jobs.size, maxJobs: this.maxJobs });
+      throw new BackpressureError(
+        `Codex async job table is full (${this.jobs.size}/${this.maxJobs}). Wait for or cancel existing jobs before starting another asynchronous run.`,
+      );
+    }
     const now = new Date().toISOString();
     const job: JobRecord = {
       id: `job-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`,
@@ -540,6 +553,17 @@ export class CodexJobManager {
     for (const [id, job] of this.jobs) {
       if (!job.completedAt) continue;
       if (Date.parse(job.completedAt) < cutoff) this.jobs.delete(id);
+    }
+  }
+
+  private pruneOverflow(): void {
+    if (this.jobs.size < this.maxJobs) return;
+    const completed = [...this.jobs.entries()]
+      .filter(([, job]) => Boolean(job.completedAt))
+      .sort(([, left], [, right]) => Date.parse(left.completedAt ?? "") - Date.parse(right.completedAt ?? ""));
+    for (const [id] of completed) {
+      if (this.jobs.size < this.maxJobs) return;
+      this.jobs.delete(id);
     }
   }
 }

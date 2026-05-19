@@ -5,6 +5,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import {
   buildCodexExecArgs,
   defaultReasoningEffort,
+  probeCodexVersion,
   resolveWorkingDirectory,
   runAgent,
   runAgents,
@@ -386,6 +387,20 @@ describe("runAgent", () => {
     expect(result.structuredOutputError).toBeTruthy();
   });
 
+  it("bounds unterminated stdout JSONL lines", async () => {
+    const projectDir = await tempDir("codex-subagents-repo-");
+
+    const result = await runAgent({
+      prompt: "oversized line UNTERMINATED_STDOUT_CHARS=1200000",
+      projectDir,
+      codexBin: fakeCodex,
+      maxOutputChars: 1_000,
+    });
+
+    expect(result.ok).toBe(true);
+    expect(result.eventSummary.errors.join("\n")).toContain("stdout JSONL line exceeded");
+  });
+
   it("returns a validation failure instead of running danger-full-access without the bypass flag", async () => {
     const projectDir = await tempDir("codex-subagents-repo-");
 
@@ -575,5 +590,20 @@ describe("runAgents", () => {
     expect(results[0]?.eventSummary.errors.join("\n")).toContain("no such file or directory");
     expect(results[1]?.name).toBe("good");
     expect(results[1]?.ok).toBe(true);
+  });
+});
+
+describe("probeCodexVersion", () => {
+  it("times out hung version probes", async () => {
+    const status = await probeCodexVersion(
+      fakeCodex,
+      {
+        ...process.env,
+        FAKE_CODEX_VERSION_HANG: "1",
+      },
+      { timeoutMs: 25 },
+    );
+
+    expect(status.error).toContain("timed out");
   });
 });

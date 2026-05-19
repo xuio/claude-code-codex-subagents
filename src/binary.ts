@@ -1,4 +1,4 @@
-import { accessSync, constants } from "node:fs";
+import { accessSync, constants, statSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
@@ -31,6 +31,7 @@ export function cleanOption(value: string | undefined): string | undefined {
 
 export function isExecutable(candidate: string): boolean {
   try {
+    if (!statSync(candidate).isFile()) return false;
     accessSync(candidate, constants.X_OK);
     return true;
   } catch {

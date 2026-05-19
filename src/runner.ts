@@ -39,6 +39,8 @@ export const reasoningSummaries = ["auto", "concise", "detailed", "none"] as con
 export const sparkModel = "gpt-5.3-codex-spark";
 export { mcpConfigPolicies, outputContracts };
 
+const maxPendingJsonLineChars = 1_000_000;
+
 export type ReasoningEffort = (typeof reasoningEfforts)[number];
 export type SandboxMode = (typeof sandboxModes)[number];
 export type ServiceTier = (typeof serviceTiers)[number];
@@ -203,6 +205,12 @@ class LimitedText {
   truncated(): number {
     return this.truncatedCount;
   }
+}
+
+function versionProbeTimeoutMs(env: NodeJS.ProcessEnv = process.env): number {
+  const parsed = Number(env.CODEX_SUBAGENTS_VERSION_TIMEOUT_MS);
+  if (!Number.isInteger(parsed) || parsed < 1) return 5_000;
+  return Math.min(parsed, 60_000);
 }
 
 export function defaultReasoningEffort(env: NodeJS.ProcessEnv = process.env): ReasoningEffort {
@@ -550,6 +558,11 @@ function parseJsonLine(line: string, summary: CodexEventSummary): void {
   try {
     event = JSON.parse(line) as Record<string, unknown>;
   } catch {
+    if (line.length >= maxPendingJsonLineChars) {
+      summary.errors.push(
+        `Codex stdout JSONL line exceeded ${maxPendingJsonLineChars} chars; dropped or ignored data from an unterminated line.`,
+      );
+    }
     summary.errors.push(`Unparseable Codex JSONL line: ${line.slice(0, 500)}`);
     return;
   }
@@ -712,6 +725,7 @@ export async function runAgent(options: AgentRunOptions): Promise<AgentRunResult
     events: options.includeEvents ? [] : undefined,
   };
   let pendingLine = "";
+  let pendingLineOverflowReported = false;
   let timedOut = false;
   let timeoutReason: "timeout" | "idle_timeout" | "spawn_timeout" | undefined;
   let cancelled = false;
@@ -806,6 +820,16 @@ export async function runAgent(options: AgentRunOptions): Promise<AgentRunResult
       stdout.append(chunk);
       publishSnapshot(true);
       pendingLine += chunk;
+      if (pendingLine.length > maxPendingJsonLineChars) {
+        const dropped = pendingLine.length - maxPendingJsonLineChars;
+        pendingLine = pendingLine.slice(-maxPendingJsonLineChars);
+        if (!pendingLineOverflowReported) {
+          pendingLineOverflowReported = true;
+          const message = `Codex stdout JSONL line exceeded ${maxPendingJsonLineChars} chars; dropped leading data from an unterminated line.`;
+          summary.errors.push(message);
+          logger.warn("codex.stdout_line_oversized", { runId, droppedChars: dropped, maxPendingJsonLineChars });
+        }
+      }
       let newlineIndex = pendingLine.indexOf("\n");
       while (newlineIndex >= 0) {
         const line = pendingLine.slice(0, newlineIndex);
@@ -1025,28 +1049,50 @@ export async function runAgents(options: ParallelRunOptions): Promise<AgentRunRe
 export async function probeCodexVersion(
   codexBin?: string,
   env: NodeJS.ProcessEnv = process.env,
+  options: { timeoutMs?: number } = {},
 ): Promise<{ binary: ResolvedCodexBinary; version?: string; error?: string }> {
   const binary = resolveCodexBinary({ explicitPath: codexBin, env });
   const version = await new Promise<{ version?: string; error?: string }>((resolve) => {
+    let settled = false;
+    const finish = (result: { version?: string; error?: string }) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timeout);
+      resolve(result);
+    };
+    const output = new LimitedText(20_000);
+    const errorOutput = new LimitedText(20_000);
+    const timeoutMs = options.timeoutMs ?? versionProbeTimeoutMs(env);
     const child = spawn(binary.path, ["--version"], {
-      env: { ...process.env, ...env },
+      env: sanitizeChildEnv({ ...process.env, ...env }, false),
       stdio: ["ignore", "pipe", "pipe"],
       shell: false,
+      detached: process.platform !== "win32",
     });
-    let output = "";
-    let errorOutput = "";
+    trackChildProcess(child, { label: "codex-version", id: binary.path });
+    const timeout = setTimeout(() => {
+      killChildProcess(child, "SIGTERM");
+      finish({ error: `Codex version probe timed out after ${timeoutMs}ms` });
+    }, timeoutMs);
+    timeout.unref();
     child.stdout.setEncoding("utf8");
     child.stderr.setEncoding("utf8");
     child.stdout.on("data", (chunk: string) => {
-      output += chunk;
+      output.append(chunk);
     });
     child.stderr.on("data", (chunk: string) => {
-      errorOutput += chunk;
+      errorOutput.append(chunk);
     });
-    child.once("error", (error) => resolve({ error: error.message }));
+    child.once("error", (error) => finish({ error: error.message }));
     child.once("close", (code) => {
-      if (code === 0) resolve({ version: output.trim() || errorOutput.trim() });
-      else resolve({ error: errorOutput.trim() || output.trim() || `Exited with code ${code}` });
+      const stdoutText = output.text().trim();
+      const stderrText = errorOutput.text().trim();
+      const truncated =
+        output.truncated() || errorOutput.truncated()
+          ? ` [truncated stdout=${output.truncated()} stderr=${errorOutput.truncated()} chars]`
+          : "";
+      if (code === 0) finish({ version: `${stdoutText || stderrText}${truncated}`.trim() });
+      else finish({ error: `${stderrText || stdoutText || `Exited with code ${code}`}${truncated}`.trim() });
     });
   });
 

@@ -1,5 +1,8 @@
+import { mkdtemp, rm } from "node:fs/promises";
+import os from "node:os";
+import path from "node:path";
 import { describe, expect, it } from "vitest";
-import { cleanOption, desktopCodexCandidates, resolveCodexBinary } from "../src/binary.js";
+import { cleanOption, desktopCodexCandidates, isExecutable, resolveCodexBinary } from "../src/binary.js";
 
 describe("resolveCodexBinary", () => {
   it("prefers the Codex desktop app binary over CODEX_BIN and PATH by default", () => {
@@ -92,6 +95,15 @@ describe("resolveCodexBinary", () => {
         existsExecutable: () => false,
       }),
     ).toThrow("Configured Codex binary is not executable: /missing/codex");
+  });
+
+  it("does not treat executable directories as binaries", async () => {
+    const dir = await mkdtemp(path.join(os.tmpdir(), "codex-subagents-binary-dir-"));
+    try {
+      expect(isExecutable(dir)).toBe(false);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
   });
 
   it("builds macOS desktop candidates from the standard app locations", () => {
