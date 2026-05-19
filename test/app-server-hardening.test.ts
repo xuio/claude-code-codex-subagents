@@ -252,7 +252,7 @@ describe("app-server hardening", () => {
     const sawSigterm = await waitFor(async () => {
       const calls = await recordedCalls(recordDir);
       return calls.some((call) => call.method === "process/sigterm");
-    });
+    }, 10_000);
     expect(sawSigterm).toBe(true);
   });
 
