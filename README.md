@@ -92,11 +92,24 @@ claude --plugin-dir .
 
 The plugin manifest points Claude Code at `dist/index.js`, so run `npm run build` after changing TypeScript source. The built file is committed so the plugin can be loaded directly from a clone.
 
+For local development against the installed plugin, link Claude's installed cache entry directly to this repository:
+
+```sh
+npm run dev:link
+```
+
+This makes both the Homebrew Claude Code CLI and the Claude Desktop bundled Claude Code CLI read the same working tree through `~/.claude/plugins/cache/codex-subagents-local/codex-subagents/<version>`. TypeScript source still needs to be rebuilt into `dist/index.js`; keep this running while editing MCP code:
+
+```sh
+npm run dev:watch
+```
+
 ## Development
 
 ```sh
 npm install
 npm run build
+npm run dev:link
 npm test
 npm run test:comprehensive
 npm run validate:plugin
