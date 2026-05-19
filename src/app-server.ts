@@ -853,7 +853,9 @@ export class CodexAppServerSession {
 
     if (method === "turn/completed") {
       const turn = params?.turn as JsonObject | undefined;
-      const status = resultStatusFromTurn(turn?.status);
+      const status = active.timeoutReason && turn?.status === "interrupted"
+        ? "timeout"
+        : resultStatusFromTurn(turn?.status);
       if (hasTurnErrorStatus(turn?.status) && turn?.error) {
         active.summary.errors.push(JSON.stringify(turn.error));
       }

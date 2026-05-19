@@ -47,13 +47,18 @@ export class SessionStateStore {
     }
   }
 
-  save(sessions: DurableSessionState[]): void {
+  save(sessions: DurableSessionState[], options: { replaceIds?: Iterable<string> } = {}): void {
     mkdirSync(path.dirname(this.file), { recursive: true });
     const temp = `${this.file}.${process.pid}.tmp`;
+    const replaceIds = new Set(options.replaceIds ?? sessions.map((session) => session.id));
+    const merged = [
+      ...this.load().filter((session) => !replaceIds.has(session.id)),
+      ...sessions,
+    ];
     const payload: SessionStateFile = {
       version: 1,
       updatedAt: new Date().toISOString(),
-      sessions,
+      sessions: merged,
     };
     writeFileSync(temp, `${JSON.stringify(payload, null, 2)}\n`, "utf8");
     renameSync(temp, this.file);

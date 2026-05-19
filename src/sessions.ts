@@ -180,6 +180,7 @@ function readPositiveInt(value: string | undefined, fallback: number, max: numbe
 export class CodexSessionManager {
   private readonly sessions = new Map<string, CodexSessionRecord>();
   private readonly stateStore: SessionStateStore | undefined;
+  private readonly persistedSessionIds = new Set<string>();
   private readonly completedTtlSeconds = readPositiveInt(
     process.env.CODEX_SUBAGENTS_SESSION_COMPLETED_TTL_SECONDS,
     3600,
@@ -304,6 +305,7 @@ export class CodexSessionManager {
       stateFile: this.stateStore?.file,
     };
     this.sessions.set(session.id, session);
+    if (this.stateStore) this.persistedSessionIds.add(session.id);
     const turn = this.enqueueTurn(session, {
       prompt: options.prompt,
       overrides: {
@@ -872,14 +874,13 @@ export class CodexSessionManager {
         { sessionTurnId: session.activeTurn?.id },
       );
     } catch (error) {
-      if (session.turns === 0 && shouldFallbackToExec(error)) {
+      if (session.turns === 0 && !session.appServer && shouldFallbackToExec(error)) {
         session.appServerFallbackReason = error instanceof Error ? error.message : String(error);
         logger.warn("session.app_server_fallback_to_exec", {
           sessionId: session.id,
           appServerFallbackReason: session.appServerFallbackReason,
           error: errorForLog(error),
         });
-        await session.appServer?.close().catch(() => {});
         session.appServer = undefined;
         session.protocol = "exec";
         return this.runExecTurn(session, {
@@ -1036,6 +1037,7 @@ export class CodexSessionManager {
       const record = this.recordFromState(persisted);
       if (!record) continue;
       this.sessions.set(record.id, record);
+      this.persistedSessionIds.add(record.id);
     }
     logger.info("session.state.loaded", { stateFile: store.file, sessions: this.sessions.size });
   }
@@ -1099,7 +1101,7 @@ export class CodexSessionManager {
         error: session.error,
       }));
     try {
-      store.save(states);
+      store.save(states, { replaceIds: this.persistedSessionIds });
     } catch (error) {
       logger.error("session.state.save_failed", { stateFile: store.file, error: errorForLog(error) });
     }

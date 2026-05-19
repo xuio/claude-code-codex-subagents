@@ -3,6 +3,7 @@ import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { AgentRunQueue, BackpressureError, CodexJobManager } from "../src/jobs.js";
+import { SessionStateStore, type DurableSessionState } from "../src/session-state.js";
 import { CodexSessionManager } from "../src/sessions.js";
 
 const fakeCodex = path.resolve("test/fixtures/fake-codex.mjs");
@@ -132,6 +133,24 @@ describe("app-server hardening", () => {
     manager.cancel(session.id);
   });
 
+  it("preserves timeout status when a timed-out turn completes as interrupted", async () => {
+    const manager = new CodexSessionManager();
+    const projectDir = await tempDir("codex-subagents-app-timeout-interrupted-project-");
+
+    const { result, session } = await manager.start({
+      prompt: "timeout interrupted probe DELAY_MS=500",
+      projectDir,
+      codexBin: fakeCodex,
+      timeoutMs: 30,
+      terminateGraceMs: 100,
+    });
+
+    expect(result.ok).toBe(false);
+    expect(result.status).toBe("timeout");
+    expect(result.timeoutReason).toBe("timeout");
+    manager.cancel(session.id);
+  });
+
   it("terminates the app-server child process when a session is cancelled", async () => {
     const manager = new CodexSessionManager();
     const projectDir = await tempDir("codex-subagents-app-cancel-project-");
@@ -227,6 +246,53 @@ describe("app-server hardening", () => {
     expect(session.supportsRealSteering).toBe(false);
     expect(session.appServerFallbackReason).toContain("fake thread start error");
     manager.cancel(session.id);
+  });
+
+  it("does not fall back to exec after turn/start may have been accepted", async () => {
+    const manager = new CodexSessionManager();
+    const projectDir = await tempDir("codex-subagents-app-turn-timeout-project-");
+    const recordDir = await tempDir("codex-subagents-app-turn-timeout-record-");
+
+    const { session, turn } = manager.startAsync({
+      prompt: "TURN_START_NO_RESPONSE",
+      projectDir,
+      codexBin: fakeCodex,
+      spawnTimeoutMs: 50,
+      env: {
+        FAKE_CODEX_RECORD_DIR: recordDir,
+      },
+    });
+
+    const waited = await manager.wait(session.id, 2_000, turn.id);
+    expect(waited.completed).toBe(true);
+    expect(waited.turn?.status).toBe("failed");
+    expect(waited.session?.protocol).toBe("app-server");
+
+    const calls = await recordedCalls(recordDir);
+    expect(calls.some((call) => call.protocol === "app-server" && call.method === "turn/start")).toBe(true);
+    expect(calls.some((call) => call.protocol === "exec")).toBe(false);
+    manager.cancel(session.id);
+  });
+
+  it("merges durable session state instead of overwriting unknown sessions", async () => {
+    const stateDir = await tempDir("codex-subagents-state-merge-");
+    const store = new SessionStateStore(path.join(stateDir, "sessions.json"));
+    const now = new Date().toISOString();
+    const state = (id: string): DurableSessionState => ({
+      id,
+      status: "active",
+      createdAt: now,
+      updatedAt: now,
+      codexThreadId: `thread-${id}`,
+      protocol: "app-server",
+      turns: 1,
+      baseOptions: { projectDir: stateDir },
+    });
+
+    store.save([state("external")], { replaceIds: ["external"] });
+    store.save([state("local")], { replaceIds: ["local"] });
+
+    expect(store.load().map((session) => session.id).sort()).toEqual(["external", "local"]);
   });
 
   it("marks live steering unsupported when turn/steer fails", async () => {

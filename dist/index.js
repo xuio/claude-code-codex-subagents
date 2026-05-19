@@ -24103,7 +24103,7 @@ var CodexAppServerSession = class _CodexAppServerSession {
     }
     if (method === "turn/completed") {
       const turn = params?.turn;
-      const status = resultStatusFromTurn(turn?.status);
+      const status = active.timeoutReason && turn?.status === "interrupted" ? "timeout" : resultStatusFromTurn(turn?.status);
       if (hasTurnErrorStatus(turn?.status) && turn?.error) {
         active.summary.errors.push(JSON.stringify(turn.error));
       }
@@ -24241,13 +24241,18 @@ var SessionStateStore = class {
       return [];
     }
   }
-  save(sessions) {
+  save(sessions, options = {}) {
     mkdirSync3(path7.dirname(this.file), { recursive: true });
     const temp = `${this.file}.${process.pid}.tmp`;
+    const replaceIds = new Set(options.replaceIds ?? sessions.map((session) => session.id));
+    const merged = [
+      ...this.load().filter((session) => !replaceIds.has(session.id)),
+      ...sessions
+    ];
     const payload = {
       version: 1,
       updatedAt: (/* @__PURE__ */ new Date()).toISOString(),
-      sessions
+      sessions: merged
     };
     writeFileSync2(temp, `${JSON.stringify(payload, null, 2)}
 `, "utf8");
@@ -24356,6 +24361,7 @@ function readPositiveInt2(value, fallback, max) {
 var CodexSessionManager = class {
   sessions = /* @__PURE__ */ new Map();
   stateStore;
+  persistedSessionIds = /* @__PURE__ */ new Set();
   completedTtlSeconds = readPositiveInt2(
     process.env.CODEX_SUBAGENTS_SESSION_COMPLETED_TTL_SECONDS,
     3600,
@@ -24460,6 +24466,7 @@ var CodexSessionManager = class {
       stateFile: this.stateStore?.file
     };
     this.sessions.set(session.id, session);
+    if (this.stateStore) this.persistedSessionIds.add(session.id);
     const turn = this.enqueueTurn(session, {
       prompt: options.prompt,
       overrides: {
@@ -24950,14 +24957,12 @@ var CodexSessionManager = class {
         { sessionTurnId: session.activeTurn?.id }
       );
     } catch (error2) {
-      if (session.turns === 0 && shouldFallbackToExec(error2)) {
+      if (session.turns === 0 && !session.appServer && shouldFallbackToExec(error2)) {
         session.appServerFallbackReason = error2 instanceof Error ? error2.message : String(error2);
         logger.warn("session.app_server_fallback_to_exec", {
           sessionId: session.id,
           appServerFallbackReason: session.appServerFallbackReason,
           error: errorForLog(error2)
-        });
-        await session.appServer?.close().catch(() => {
         });
         session.appServer = void 0;
         session.protocol = "exec";
@@ -25080,6 +25085,7 @@ var CodexSessionManager = class {
       const record2 = this.recordFromState(persisted);
       if (!record2) continue;
       this.sessions.set(record2.id, record2);
+      this.persistedSessionIds.add(record2.id);
     }
     logger.info("session.state.loaded", { stateFile: store.file, sessions: this.sessions.size });
   }
@@ -25139,7 +25145,7 @@ var CodexSessionManager = class {
       error: session.error
     }));
     try {
-      store.save(states);
+      store.save(states, { replaceIds: this.persistedSessionIds });
     } catch (error2) {
       logger.error("session.state.save_failed", { stateFile: store.file, error: errorForLog(error2) });
     }

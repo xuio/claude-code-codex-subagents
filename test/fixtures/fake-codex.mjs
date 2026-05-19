@@ -272,6 +272,9 @@ if (args[0] === "app-server") {
         return;
       }
       recordCall({ protocol: "app-server", method, prompt: activePrompt, threadId, turnId: activeTurn });
+      if (hasMode("TURN_START_NO_RESPONSE")) {
+        return;
+      }
       send({
         id,
         result: {
