@@ -44,6 +44,28 @@ async function callTool(name, args) {
   );
 }
 
+async function readCalls() {
+  try {
+    return (await readFile(path.join(recordDir, "calls.jsonl"), "utf8"))
+      .trim()
+      .split("\n")
+      .filter(Boolean)
+      .map((line) => JSON.parse(line));
+  } catch (error) {
+    if (error.code === "ENOENT") return [];
+    throw error;
+  }
+}
+
+async function waitFor(predicate, timeoutMs = 3_000) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (await predicate()) return true;
+    await new Promise((resolve) => setTimeout(resolve, 50));
+  }
+  return Boolean(await predicate());
+}
+
 try {
   await writeFile(
     path.join(projectDir, ".mcp.json"),
@@ -193,10 +215,40 @@ try {
     { length: JSON.stringify(hugeAsyncWait.structuredContent).length },
   );
 
-  const calls = (await readFile(path.join(recordDir, "calls.jsonl"), "utf8"))
-    .trim()
-    .split("\n")
-    .map((line) => JSON.parse(line));
+  const abortController = new AbortController();
+  const cancelledRun = client.callTool(
+    {
+      name: "run_agent",
+      arguments: {
+        prompt: "request cancellation propagation HANG_FOREVER",
+        project_dir: projectDir,
+        timeout_ms: 30_000,
+      },
+    },
+    CallToolResultSchema,
+    { signal: abortController.signal, timeout: 10_000 },
+  );
+  setTimeout(() => abortController.abort(), 100);
+  await cancelledRun.then(
+    () => {
+      throw new Error("run_agent should reject when its MCP request is cancelled");
+    },
+    () => {},
+  );
+  const sawCancelledSigterm = await waitFor(async () =>
+    (await readCalls()).some(
+      (call) =>
+        call.protocol === "exec" &&
+        call.method === "process/sigterm" &&
+        typeof call.prompt === "string" &&
+        call.prompt.includes("request cancellation propagation"),
+    ),
+  );
+  assert(sawCancelledSigterm, "request cancellation should terminate the Codex exec child");
+  const afterCancelStatus = await callTool("codex_status", {});
+  assert(afterCancelStatus.structuredContent?.ok, "server should remain usable after a cancelled MCP request", afterCancelStatus.structuredContent);
+
+  const calls = await readCalls();
   assert(calls.every((call) => call.hasCanaryApiKey === false), "secret env vars should not be forwarded by default", calls);
   assert(
     calls.some((call) => call.codexConfig?.includes("explicit_server")),

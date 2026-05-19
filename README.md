@@ -18,8 +18,10 @@ The plugin lets Claude Code launch one Codex agent or several Codex agents in pa
 - Prompt delivery: stdin, not command-line arguments.
 - Codex home: uses the user's Codex home by default; pass `isolated_codex_home: true` to use a temporary Codex home with auth but without inherited `config.toml` MCP servers.
 - Concurrency: Codex processes run through a global queue. Defaults are `CODEX_SUBAGENTS_MAX_GLOBAL_PROCESSES=4` and `CODEX_SUBAGENTS_MAX_PROJECT_PROCESSES=2`.
+- Retention: completed async jobs and idle/terminal sessions are pruned in-process so a long Claude session cannot grow unbounded.
 - Progress: long-running tools emit MCP `notifications/progress` events when the client supplies a progress token.
 - Logging: verbose JSONL logs are written to stderr by default. The logs include raw MCP JSON-RPC frames, tool arguments/results, prompt outputs, progress notifications, queue/job/session lifecycle, and Codex stdin/stdout/stderr traffic.
+- Recovery hints: failed and timed-out tool calls include a structured `recovery` object with the recommended next tool or action.
 - MCP responses: long Codex outputs are compacted before returning to Claude so successful runs do not trip Claude Code's tool-result size limits. The full raw traffic remains available in the verbose server logs.
 - Security: secret-looking output is redacted before it is returned to Claude, and secret-looking environment variables are not forwarded to Codex unless `forward_sensitive_env` is explicitly true.
 - Sessions: `start_session` and `send_session_prompt` use Codex app-server by default and preserve Codex context across turns without an external daemon.
@@ -32,7 +34,14 @@ Optional environment overrides:
 - `CODEX_SUBAGENTS_MAX_GLOBAL_PROCESSES`: maximum Codex child processes across this MCP server.
 - `CODEX_SUBAGENTS_MAX_PROJECT_PROCESSES`: maximum Codex child processes per project key.
 - `CODEX_SUBAGENTS_JOB_TTL_SECONDS`: completed async job retention window. Defaults to one hour.
+- `CODEX_SUBAGENTS_MAX_SESSIONS`: maximum retained persistent sessions. Defaults to `100`.
+- `CODEX_SUBAGENTS_SESSION_COMPLETED_TTL_SECONDS`: retention window for failed/cancelled sessions. Defaults to one hour.
+- `CODEX_SUBAGENTS_SESSION_IDLE_TTL_SECONDS`: retention window for idle resumable sessions. Defaults to one day.
+- `CODEX_SUBAGENTS_LOG_PROFILE`: `debug` or `production`. Defaults to `debug`; `production` defaults to `info` level and redacts raw traffic unless overridden.
 - `CODEX_SUBAGENTS_LOG_LEVEL`: `debug`, `info`, `warn`, `error`, or `silent`. Defaults to `debug`.
+- `CODEX_SUBAGENTS_LOG_RAW_REDACT`: set `1` to redact raw traffic logs or `0` to keep raw traffic unredacted.
+- `CODEX_SUBAGENTS_LOG_FILE`: optional JSONL log file path. Logs still go to stderr.
+- `CODEX_SUBAGENTS_LOG_FILE_MAX_BYTES`: rotate `CODEX_SUBAGENTS_LOG_FILE` to `.1` after this size. Defaults to `10000000`.
 - `CODEX_SUBAGENTS_LOG_MAX_STRING_CHARS`: maximum string payload retained per log field before truncation metadata is used. Defaults to `20000`.
 - `CODEX_SUBAGENTS_PROGRESS_HEARTBEAT_MS`: interval for progress heartbeats on blocking tool calls. Defaults to `10000`.
 - `CODEX_SUBAGENTS_SESSION_PROTOCOL`: set to `exec` to force the legacy `codex exec resume` session protocol. Defaults to `app-server`.
@@ -116,13 +125,16 @@ npm run build
 npm run dev:link
 npm test
 npm run test:comprehensive
+npm run diagnostics
 npm run validate:plugin
 npm run test:claude-desktop
 ```
 
 `test:ci` is the GitHub-safe suite. It uses the fake Codex binary and does not require Claude Code, the Codex desktop app, or live model credentials.
 
-`test:comprehensive` runs the TypeScript build, unit tests, stdio MCP smoke test, reliability matrix, MCP stress test, MCP progress notification test, advanced MCP behavior test, Codex desktop runtime probe, Claude plugin validation, and desktop-shipped Claude Code CLI plugin/auth checks. The runtime probe validates local Codex capabilities without invoking a model.
+`test:comprehensive` runs the TypeScript build, unit tests, stdio MCP smoke test, reliability matrix, MCP stress test, MCP progress notification test, advanced MCP behavior test, Codex desktop runtime probe, app-server protocol contract checks, real binary compatibility matrix, Claude plugin validation, and desktop-shipped Claude Code CLI plugin/auth checks. The runtime probe, protocol contract, and compatibility matrix validate local Codex capabilities without invoking a model.
+
+`npm run diagnostics` writes a sanitized diagnostics bundle under `/tmp` with git status, build output, Codex/Claude binary probes, and present environment key names. It records environment variable names only, not values.
 
 `test:stress` uses the fake Codex binary to exercise queued async jobs, noisy output, malformed JSONL, and truncation behavior.
 
@@ -137,6 +149,10 @@ npm run test:claude-desktop
 `test:claude-real-session` is an opt-in live Claude Code test for daemonless persistent sessions. It loads the symlinked installed plugin, starts a real Codex session, sends a follow-up without `project_dir`, and verifies the session stays pinned to the original project directory.
 
 `test:real-app-server-steering` is an opt-in live Codex test that calls the MCP server directly, starts a real app-server session, sends `turn/steer` during an active turn, and verifies the final answer reflects the steering prompt.
+
+`test:app-server-contract` generates Codex app-server JSON Schemas and verifies the methods this plugin depends on (`thread/start`, `turn/start`, `turn/steer`, `turn/interrupt`, and completion/message notifications).
+
+`test:real-matrix` checks every available real Codex binary candidate without invoking a model: desktop app binary, configured binary, and `codex` on `PATH`. It validates version probing, app-server schema generation, and `codex_status` through the MCP server.
 
 `test:real-soak` repeats the live real-Claude/real-Codex session checks. Set `CODEX_SUBAGENTS_REAL_SOAK_ROUNDS=10` or higher for a longer hardening run, and set `CODEX_SUBAGENTS_REAL_SOAK_FULL=1` to run the real-Claude-to-real-Codex scenario every round.
 

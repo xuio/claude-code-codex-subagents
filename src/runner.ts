@@ -9,6 +9,7 @@ import {
   parseStructuredOutput,
   schemaForOutputContract,
 } from "./contracts.js";
+import { killChildProcess, trackChildProcess } from "./lifecycle.js";
 import {
   errorForLog,
   logger,
@@ -464,25 +465,6 @@ function baseFailureResult(options: {
   };
 }
 
-function killChildProcess(child: ReturnType<typeof spawn>, signal: NodeJS.Signals): void {
-  if (child.exitCode !== null || child.killed) return;
-
-  try {
-    if (process.platform !== "win32" && child.pid) {
-      process.kill(-child.pid, signal);
-      return;
-    }
-  } catch {
-    // Fall back to killing the direct child below.
-  }
-
-  try {
-    child.kill(signal);
-  } catch {
-    // Ignore kill races; the close event decides the final state.
-  }
-}
-
 function cloneEventSummary(summary: CodexEventSummary): CodexEventSummary {
   return redactJsonValue({
     counts: { ...summary.counts },
@@ -680,6 +662,7 @@ export async function runAgent(options: AgentRunOptions): Promise<AgentRunResult
       shell: false,
       detached: process.platform !== "win32",
     });
+    trackChildProcess(child, { label: "codex-exec", id: runId });
     logger.debug("codex.process.created", { runId, childPid: child.pid });
 
     const makeSnapshot = (status: AgentRunPartial["status"]): AgentRunPartial => ({

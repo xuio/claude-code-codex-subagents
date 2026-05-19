@@ -1,6 +1,7 @@
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { stat } from "node:fs/promises";
 import { resolveCodexBinary, type ResolvedCodexBinary } from "./binary.js";
+import { killChildProcess, trackChildProcess } from "./lifecycle.js";
 import {
   defaultReasoningEffort,
   resolveRequestedModel,
@@ -211,6 +212,7 @@ export class CodexAppServerSession {
   private userAgent: string | undefined;
   private codexHome: string | undefined;
   private lastError: string | undefined;
+  private readonly untrackChild: () => void;
   private readonly capabilities: AppServerCapabilities = {
     initialize: false,
     threadStart: false,
@@ -229,6 +231,7 @@ export class CodexAppServerSession {
     readonly env: NodeJS.ProcessEnv,
     private readonly logContext: { sessionId?: string } = {},
   ) {
+    this.untrackChild = trackChildProcess(child, { label: "codex-app-server", id: this.id });
     this.closedPromise = new Promise((resolve) => {
       this.resolveClosed = resolve;
     });
@@ -243,6 +246,7 @@ export class CodexAppServerSession {
     });
     this.child.once("close", (code, signal) => {
       this.closed = true;
+      this.untrackChild();
       this.resolveClosed?.();
       const message = `Codex app-server exited with code ${code ?? "null"} signal ${signal ?? "null"}.`;
       this.lastError = message;
@@ -583,24 +587,10 @@ export class CodexAppServerSession {
   async close(status: "failed" | "cancelled" = "failed"): Promise<void> {
     this.closed = true;
     this.rejectAll(new AppServerUnavailableError("Codex app-server session was closed."), status);
-    try {
-      if (process.platform !== "win32" && this.child.pid) process.kill(-this.child.pid, "SIGTERM");
-      else this.child.kill("SIGTERM");
-    } catch {
-      try {
-        this.child.kill("SIGTERM");
-      } catch {
-        // Ignore shutdown races.
-      }
-    }
+    killChildProcess(this.child, "SIGTERM");
     const graceMs = 2_000;
     const force = setTimeout(() => {
-      try {
-        if (process.platform !== "win32" && this.child.pid) process.kill(-this.child.pid, "SIGKILL");
-        else this.child.kill("SIGKILL");
-      } catch {
-        // Ignore shutdown races.
-      }
+      killChildProcess(this.child, "SIGKILL");
     }, graceMs);
     force.unref();
     await Promise.race([
@@ -608,6 +598,7 @@ export class CodexAppServerSession {
       new Promise((resolve) => setTimeout(resolve, graceMs + 250)),
     ]);
     clearTimeout(force);
+    this.untrackChild();
     await this.preparedSubagents.cleanup().catch(() => {});
   }
 

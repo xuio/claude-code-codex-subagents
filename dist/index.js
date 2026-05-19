@@ -3225,8 +3225,8 @@ var require_utils = __commonJS({
       }
       return ind;
     }
-    function removeDotSegments(path4) {
-      let input = path4;
+    function removeDotSegments(path5) {
+      let input = path5;
       const output = [];
       let nextSlash = -1;
       let len = 0;
@@ -3478,8 +3478,8 @@ var require_schemes = __commonJS({
         wsComponent.secure = void 0;
       }
       if (wsComponent.resourceName) {
-        const [path4, query] = wsComponent.resourceName.split("?");
-        wsComponent.path = path4 && path4 !== "/" ? path4 : void 0;
+        const [path5, query] = wsComponent.resourceName.split("?");
+        wsComponent.path = path5 && path5 !== "/" ? path5 : void 0;
         wsComponent.query = query;
         wsComponent.resourceName = void 0;
       }
@@ -7363,8 +7363,8 @@ function getErrorMap() {
 
 // node_modules/zod/v3/helpers/parseUtil.js
 var makeIssue = (params) => {
-  const { data, path: path4, errorMaps, issueData } = params;
-  const fullPath = [...path4, ...issueData.path || []];
+  const { data, path: path5, errorMaps, issueData } = params;
+  const fullPath = [...path5, ...issueData.path || []];
   const fullIssue = {
     ...issueData,
     path: fullPath
@@ -7480,11 +7480,11 @@ var errorUtil;
 
 // node_modules/zod/v3/types.js
 var ParseInputLazyPath = class {
-  constructor(parent, value, path4, key) {
+  constructor(parent, value, path5, key) {
     this._cachedPath = [];
     this.parent = parent;
     this.data = value;
-    this._path = path4;
+    this._path = path5;
     this._key = key;
   }
   get path() {
@@ -11121,10 +11121,10 @@ function assignProp(target, prop, value) {
     configurable: true
   });
 }
-function getElementAtPath(obj, path4) {
-  if (!path4)
+function getElementAtPath(obj, path5) {
+  if (!path5)
     return obj;
-  return path4.reduce((acc, key) => acc?.[key], obj);
+  return path5.reduce((acc, key) => acc?.[key], obj);
 }
 function promiseAllObject(promisesObj) {
   const keys = Object.keys(promisesObj);
@@ -11444,11 +11444,11 @@ function aborted(x, startIndex = 0) {
   }
   return false;
 }
-function prefixIssues(path4, issues) {
+function prefixIssues(path5, issues) {
   return issues.map((iss) => {
     var _a;
     (_a = iss).path ?? (_a.path = []);
-    iss.path.unshift(path4);
+    iss.path.unshift(path5);
     return iss;
   });
 }
@@ -21101,7 +21101,7 @@ var StdioServerTransport = class {
 import { spawn } from "node:child_process";
 import { mkdtemp as mkdtemp2, readFile as readFile2, rm as rm2, stat, writeFile as writeFile2 } from "node:fs/promises";
 import os3 from "node:os";
-import path3 from "node:path";
+import path4 from "node:path";
 
 // src/binary.ts
 import { accessSync, constants } from "node:fs";
@@ -21316,6 +21316,8 @@ function parseStructuredOutput(text) {
 
 // src/logging.ts
 import { createHash, randomUUID } from "node:crypto";
+import { appendFileSync, mkdirSync, renameSync, statSync } from "node:fs";
+import path2 from "node:path";
 
 // src/redaction.ts
 var privateKeyPattern = new RegExp(
@@ -21397,14 +21399,18 @@ var levelWeight = {
   silent: Number.POSITIVE_INFINITY
 };
 var logWriter = (line) => {
-  process.stderr.write(`${line}
-`);
+  writeDefaultLog(line);
 };
+function configuredLogProfile(env = process.env) {
+  const raw = env.CODEX_SUBAGENTS_LOG_PROFILE?.trim().toLowerCase();
+  return raw === "production" ? "production" : "debug";
+}
 function configuredLogLevel(env = process.env) {
-  const raw = (env.CODEX_SUBAGENTS_LOG_LEVEL ?? env.CODEX_SUBAGENTS_LOG ?? "debug").trim().toLowerCase();
+  const fallback = configuredLogProfile(env) === "production" ? "info" : "debug";
+  const raw = (env.CODEX_SUBAGENTS_LOG_LEVEL ?? env.CODEX_SUBAGENTS_LOG ?? fallback).trim().toLowerCase();
   if (["0", "false", "off", "none", "quiet", "silent"].includes(raw)) return "silent";
   if (logLevels.includes(raw)) return raw;
-  return "debug";
+  return fallback;
 }
 function makeLogId(prefix) {
   return `${prefix}-${Date.now().toString(36)}-${randomUUID().slice(0, 8)}`;
@@ -21419,6 +21425,17 @@ function maxStringChars(env = process.env) {
   const parsed = Number(env.CODEX_SUBAGENTS_LOG_MAX_STRING_CHARS);
   if (!Number.isInteger(parsed) || parsed < 1) return 2e4;
   return Math.min(parsed, 1e6);
+}
+function logFileMaxBytes(env = process.env) {
+  const parsed = Number(env.CODEX_SUBAGENTS_LOG_FILE_MAX_BYTES);
+  if (!Number.isInteger(parsed) || parsed < 1) return 1e7;
+  return Math.min(parsed, 1e9);
+}
+function rawTrafficRedacts(env = process.env) {
+  const raw = env.CODEX_SUBAGENTS_LOG_RAW_REDACT?.trim().toLowerCase();
+  if (["1", "true", "yes", "on"].includes(raw ?? "")) return true;
+  if (["0", "false", "no", "off"].includes(raw ?? "")) return false;
+  return configuredLogProfile(env) === "production";
 }
 function shortenRaw(text, max = maxStringChars()) {
   if (text.length <= max) return text;
@@ -21474,7 +21491,7 @@ function log(level, event, fields = {}) {
   writeLog(level, event, fields, { redact: true });
 }
 function logRaw(level, event, fields = {}) {
-  writeLog(level, event, fields, { redact: false });
+  writeLog(level, event, fields, { redact: rawTrafficRedacts() });
 }
 var logger = {
   debug: (event, fields) => log("debug", event, fields),
@@ -21486,11 +21503,106 @@ var logger = {
   rawWarn: (event, fields) => logRaw("warn", event, fields),
   rawError: (event, fields) => logRaw("error", event, fields)
 };
+function loggingDiagnostics(env = process.env) {
+  const logFile = env.CODEX_SUBAGENTS_LOG_FILE?.trim();
+  return {
+    profile: configuredLogProfile(env),
+    level: configuredLogLevel(env),
+    rawTrafficRedacted: rawTrafficRedacts(env),
+    maxStringChars: maxStringChars(env),
+    logFile: logFile || void 0,
+    logFileMaxBytes: logFile ? logFileMaxBytes(env) : void 0
+  };
+}
+function writeDefaultLog(line) {
+  process.stderr.write(`${line}
+`);
+  const logFile = process.env.CODEX_SUBAGENTS_LOG_FILE?.trim();
+  if (!logFile) return;
+  try {
+    mkdirSync(path2.dirname(logFile), { recursive: true });
+    try {
+      if (statSync(logFile).size > logFileMaxBytes()) renameSync(logFile, `${logFile}.1`);
+    } catch {
+    }
+    appendFileSync(logFile, `${line}
+`, "utf8");
+  } catch {
+  }
+}
+
+// src/lifecycle.ts
+var trackedChildren = /* @__PURE__ */ new Map();
+var cleanupHandlers = /* @__PURE__ */ new Set();
+var cleanupPromise;
+function killChildProcess(child, signal) {
+  if (child.exitCode !== null || child.killed) return;
+  try {
+    if (process.platform !== "win32" && child.pid) {
+      process.kill(-child.pid, signal);
+      return;
+    }
+  } catch {
+  }
+  try {
+    child.kill(signal);
+  } catch {
+  }
+}
+function trackChildProcess(child, meta) {
+  trackedChildren.set(child, meta);
+  const untrack = () => trackedChildren.delete(child);
+  child.once("close", untrack);
+  child.once("error", untrack);
+  return untrack;
+}
+function registerCleanupHandler(handler) {
+  cleanupHandlers.add(handler);
+  return () => cleanupHandlers.delete(handler);
+}
+function lifecycleStats() {
+  return {
+    trackedChildren: trackedChildren.size,
+    cleanupHandlers: cleanupHandlers.size,
+    cleanupInProgress: Boolean(cleanupPromise)
+  };
+}
+async function cleanupRuntime(reason, graceMs = 2500) {
+  if (cleanupPromise) return cleanupPromise;
+  cleanupPromise = (async () => {
+    logger.warn("lifecycle.cleanup.start", {
+      reason,
+      trackedChildren: trackedChildren.size,
+      cleanupHandlers: cleanupHandlers.size
+    });
+    await Promise.allSettled(
+      [...cleanupHandlers].map(async (handler) => {
+        try {
+          await handler(reason);
+        } catch (error2) {
+          logger.error("lifecycle.cleanup.handler_failed", { reason, error: errorForLog(error2) });
+        }
+      })
+    );
+    for (const [child, meta] of trackedChildren) {
+      logger.warn("lifecycle.child.terminate", { reason, signal: "SIGTERM", ...meta, pid: child.pid });
+      killChildProcess(child, "SIGTERM");
+    }
+    const waitMs = Math.max(50, Math.min(graceMs, 1e3));
+    await new Promise((resolve) => setTimeout(resolve, waitMs));
+    for (const [child, meta] of trackedChildren) {
+      logger.warn("lifecycle.child.force_terminate", { reason, signal: "SIGKILL", ...meta, pid: child.pid });
+      killChildProcess(child, "SIGKILL");
+    }
+    logger.warn("lifecycle.cleanup.finish", { reason, remainingChildren: trackedChildren.size });
+  })();
+  return cleanupPromise;
+}
 
 // src/subagents.ts
 import { lstat, mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import os2 from "node:os";
-import path2 from "node:path";
+import path3 from "node:path";
 var modelPresets = ["default", "codex", "spark"];
 var mcpConfigPolicies = [
   "inherit_codex",
@@ -21624,35 +21736,35 @@ async function linkIfPresent(source, destination) {
   await symlink(source, destination);
 }
 async function prepareTempCodexHome(definitions, env, options = {}) {
-  const realCodexHome = env.CODEX_HOME?.trim() || path2.join(os2.homedir(), ".codex");
-  const tempCodexHome = await mkdtemp(path2.join(os2.tmpdir(), "codex-subagents-home-"));
+  const realCodexHome = env.CODEX_HOME?.trim() || path3.join(os2.homedir(), ".codex");
+  const tempCodexHome = await mkdtemp(path3.join(os2.tmpdir(), "codex-subagents-home-"));
   const links = [
-    linkIfPresent(path2.join(realCodexHome, "auth.json"), path2.join(tempCodexHome, "auth.json")),
-    linkIfPresent(path2.join(realCodexHome, "AGENTS.md"), path2.join(tempCodexHome, "AGENTS.md")),
-    linkIfPresent(path2.join(realCodexHome, "skills"), path2.join(tempCodexHome, "skills")),
-    linkIfPresent(path2.join(realCodexHome, "rules"), path2.join(tempCodexHome, "rules")),
-    linkIfPresent(path2.join(realCodexHome, "plugins"), path2.join(tempCodexHome, "plugins"))
+    linkIfPresent(path3.join(realCodexHome, "auth.json"), path3.join(tempCodexHome, "auth.json")),
+    linkIfPresent(path3.join(realCodexHome, "AGENTS.md"), path3.join(tempCodexHome, "AGENTS.md")),
+    linkIfPresent(path3.join(realCodexHome, "skills"), path3.join(tempCodexHome, "skills")),
+    linkIfPresent(path3.join(realCodexHome, "rules"), path3.join(tempCodexHome, "rules")),
+    linkIfPresent(path3.join(realCodexHome, "plugins"), path3.join(tempCodexHome, "plugins"))
   ];
   if (options.isolated || options.mcpServers) {
     links.push(
       writeFile(
-        path2.join(tempCodexHome, "config.toml"),
+        path3.join(tempCodexHome, "config.toml"),
         serializeGeneratedConfig(options.mcpServers),
         "utf8"
       )
     );
   } else {
-    links.push(linkIfPresent(path2.join(realCodexHome, "config.toml"), path2.join(tempCodexHome, "config.toml")));
+    links.push(linkIfPresent(path3.join(realCodexHome, "config.toml"), path3.join(tempCodexHome, "config.toml")));
   }
   await Promise.all(links);
-  const agentsDir = path2.join(tempCodexHome, "agents");
+  const agentsDir = path3.join(tempCodexHome, "agents");
   await mkdir(agentsDir, { recursive: true });
   await Promise.all(
     definitions.map(async (definition, index) => {
       const fileName = `${String(index + 1).padStart(2, "0")}-${sanitizeAgentFileName(
         definition.name
       )}.toml`;
-      await writeFile(path2.join(agentsDir, fileName), serializeCodexSubagent(definition), "utf8");
+      await writeFile(path3.join(agentsDir, fileName), serializeCodexSubagent(definition), "utf8");
     })
   );
   return tempCodexHome;
@@ -21721,8 +21833,8 @@ async function prepareSubagents(options) {
 async function readClaudeProjectMcpServers(projectDir) {
   if (!projectDir) return void 0;
   const candidates = [
-    path2.join(projectDir, ".mcp.json"),
-    path2.join(projectDir, ".claude", "mcp.json")
+    path3.join(projectDir, ".mcp.json"),
+    path3.join(projectDir, ".claude", "mcp.json")
   ];
   for (const candidate of candidates) {
     try {
@@ -21810,7 +21922,7 @@ async function resolveWorkingDirectory(cwd, env = process.env) {
   const requested = cwd?.trim();
   const claudeProjectDir = env.CLAUDE_PROJECT_DIR?.trim();
   const fallback = claudeProjectDir && !claudeProjectDir.includes("${") ? claudeProjectDir : process.env.PWD ?? process.cwd();
-  const resolved = path3.resolve(requested || fallback);
+  const resolved = path4.resolve(requested || fallback);
   const info = await stat(resolved);
   if (!info.isDirectory()) {
     throw new Error(`Codex working directory is not a directory: ${resolved}`);
@@ -21970,20 +22082,6 @@ function baseFailureResult(options) {
     }
   };
 }
-function killChildProcess(child, signal) {
-  if (child.exitCode !== null || child.killed) return;
-  try {
-    if (process.platform !== "win32" && child.pid) {
-      process.kill(-child.pid, signal);
-      return;
-    }
-  } catch {
-  }
-  try {
-    child.kill(signal);
-  } catch {
-  }
-}
 function cloneEventSummary(summary) {
   return redactJsonValue({
     counts: { ...summary.counts },
@@ -22113,7 +22211,7 @@ async function runAgent(options) {
     }
     throw error2;
   }
-  const tempDir = await mkdtemp2(path3.join(os3.tmpdir(), "codex-subagents-"));
+  const tempDir = await mkdtemp2(path4.join(os3.tmpdir(), "codex-subagents-"));
   const preparedSubagents = await prepareSubagents({
     definitions: options.codexSubagents,
     tasks: options.subagentTasks,
@@ -22129,9 +22227,9 @@ async function runAgent(options) {
     tempCodexHomeUsed: Boolean(preparedSubagents.tempCodexHome)
   });
   const childEnv = sanitizeChildEnv({ ...mergedEnv, ...preparedSubagents.env }, options.forwardSensitiveEnv);
-  const outputPath = path3.join(tempDir, "last-message.md");
+  const outputPath = path4.join(tempDir, "last-message.md");
   const outputSchema = schemaForOutputContract(options.outputContract, options.outputSchema);
-  const outputSchemaPath = outputSchema && !options.resumeSessionId && !options.resumeLast ? path3.join(tempDir, "output-schema.json") : void 0;
+  const outputSchemaPath = outputSchema && !options.resumeSessionId && !options.resumeLast ? path4.join(tempDir, "output-schema.json") : void 0;
   if (outputSchemaPath) await writeFile2(outputSchemaPath, JSON.stringify(outputSchema), "utf8");
   const args = buildCodexExecArgs({ ...options, cwd, outputSchemaPath }, outputPath, childEnv);
   logger.rawDebug("codex.spawn", {
@@ -22166,6 +22264,7 @@ async function runAgent(options) {
       shell: false,
       detached: process.platform !== "win32"
     });
+    trackChildProcess(child, { label: "codex-exec", id: runId });
     logger.debug("codex.process.created", { runId, childPid: child.pid });
     const makeSnapshot = (status2) => ({
       name: options.name,
@@ -22709,17 +22808,31 @@ var CodexJobManager = class {
     }
     return snapshot(job);
   }
-  async wait(id, timeoutMs) {
+  async wait(id, timeoutMs, abortSignal) {
     const job = this.jobs.get(id);
     if (!job) return void 0;
     if (job.completedAt) return snapshot(job);
+    if (abortSignal?.aborted) return snapshot(job);
     await new Promise((resolve) => {
-      const timeout = setTimeout(resolve, timeoutMs);
-      const waiter = () => {
+      let finished = false;
+      let waiter;
+      let abortHandler;
+      const finish = () => {
+        if (finished) return;
+        finished = true;
         clearTimeout(timeout);
+        if (waiter) job.waiters.delete(waiter);
+        if (abortHandler) abortSignal?.removeEventListener("abort", abortHandler);
         resolve();
       };
+      const timeout = setTimeout(finish, timeoutMs);
+      waiter = () => {
+        finish();
+      };
+      abortHandler = finish;
       job.waiters.add(waiter);
+      abortSignal?.addEventListener("abort", abortHandler, { once: true });
+      if (abortSignal?.aborted) finish();
     });
     return snapshot(job);
   }
@@ -22727,8 +22840,23 @@ var CodexJobManager = class {
     this.prune();
     return {
       ...agentRunQueue.stats(),
-      jobs: this.jobs.size
+      jobs: this.jobs.size,
+      waiters: [...this.jobs.values()].reduce((count, job) => count + job.waiters.size, 0)
     };
+  }
+  cancelAll(reason = "shutdown") {
+    logger.warn("job.cancel_all", { reason, jobs: this.jobs.size });
+    const snapshots = [];
+    for (const job of this.jobs.values()) {
+      if (!job.completedAt && job.status !== "cancelled") {
+        job.status = "cancelling";
+        job.updatedAt = (/* @__PURE__ */ new Date()).toISOString();
+        job.controller.abort();
+      }
+      this.notifyJob(job);
+      snapshots.push(snapshot(job));
+    }
+    return snapshots;
   }
   start(kind, run) {
     this.prune();
@@ -22773,10 +22901,13 @@ var CodexJobManager = class {
       const nowDone = (/* @__PURE__ */ new Date()).toISOString();
       job.completedAt = nowDone;
       job.updatedAt = nowDone;
-      for (const waiter of job.waiters) waiter();
-      job.waiters.clear();
+      this.notifyJob(job);
     });
     return snapshot(job);
+  }
+  notifyJob(job) {
+    for (const waiter of [...job.waiters]) waiter();
+    job.waiters.clear();
   }
   prune() {
     const cutoff = Date.now() - this.ttlMs;
@@ -22787,6 +22918,119 @@ var CodexJobManager = class {
   }
 };
 var jobManager = new CodexJobManager();
+
+// src/recovery.ts
+function messageFor(error2) {
+  return error2 instanceof Error ? error2.message : String(error2);
+}
+function recoveryForError(error2, context = "tool_call") {
+  const message = messageFor(error2);
+  const lower = message.toLowerCase();
+  if (lower.includes("cancelled") || lower.includes("aborted")) {
+    return {
+      recoverable: false,
+      reason: "request_cancelled",
+      recommendedAction: "The request was cancelled. Start a new run only if the cancellation was accidental."
+    };
+  }
+  if (lower.includes("unknown session_id")) {
+    return {
+      recoverable: false,
+      reason: "unknown_session",
+      recommendedAction: "Call list_sessions or start a new Codex session.",
+      recommendedTool: "list_sessions"
+    };
+  }
+  if (lower.includes("unknown job_id")) {
+    return {
+      recoverable: false,
+      reason: "unknown_job",
+      recommendedAction: "Start a new async Codex run.",
+      recommendedTool: "start_agent_run"
+    };
+  }
+  if (lower.includes("timed out") || lower.includes("timeout")) {
+    return {
+      recoverable: true,
+      reason: "timeout",
+      recommendedAction: "Inspect the current job or session, then retry with a larger timeout if it is still needed.",
+      retryAfterMs: 1e3
+    };
+  }
+  if (lower.includes("app-server") || lower.includes("app server")) {
+    return {
+      recoverable: true,
+      reason: "app_server_unavailable",
+      recommendedAction: "Retry once. If it repeats, use codex_status or force CODEX_SUBAGENTS_SESSION_PROTOCOL=exec.",
+      recommendedTool: "codex_status",
+      retryAfterMs: 1e3
+    };
+  }
+  if (lower.includes("validation") || lower.includes("reasoning_effort") || lower.includes("reasoning_summary")) {
+    return {
+      recoverable: false,
+      reason: "invalid_request",
+      recommendedAction: "Adjust the model/reasoning settings and retry. Do not use minimal reasoning or Spark with reasoning summaries."
+    };
+  }
+  return {
+    recoverable: true,
+    reason: context,
+    recommendedAction: "Retry once if the failure looks transient; otherwise call codex_doctor and inspect the verbose logs.",
+    recommendedTool: "codex_doctor",
+    retryAfterMs: 1e3
+  };
+}
+function recoveryForAgentResult(result) {
+  if (result.ok) return void 0;
+  if (result.validationError) {
+    return {
+      recoverable: false,
+      reason: "invalid_request",
+      recommendedAction: result.validationError
+    };
+  }
+  if (result.status === "timeout") {
+    return {
+      recoverable: true,
+      reason: result.timeoutReason ?? "timeout",
+      recommendedAction: "Retry with a larger timeout, use an async run, or split the task into smaller independent prompts.",
+      recommendedTool: "start_agent_run",
+      retryAfterMs: 1e3
+    };
+  }
+  if (result.status === "cancelled") {
+    return {
+      recoverable: false,
+      reason: "cancelled",
+      recommendedAction: "The Codex run was cancelled. Start a fresh run only if more work is needed."
+    };
+  }
+  return {
+    recoverable: true,
+    reason: "codex_failed",
+    recommendedAction: "Inspect stderr/eventSummary.errors. Retry with codex_doctor context if the failure appears environmental.",
+    recommendedTool: "codex_doctor"
+  };
+}
+function recoveryForWait(kind, timeoutReason) {
+  if (!timeoutReason) return void 0;
+  if (timeoutReason === "wait_cancelled") {
+    return {
+      recoverable: true,
+      reason: "wait_cancelled",
+      recommendedAction: kind === "codex_session" ? "The wait request was cancelled, but the session may still be running. Inspect it before deciding whether to cancel it." : "The wait request was cancelled, but the job may still be running. Inspect it before deciding whether to cancel it.",
+      recommendedTool: kind === "codex_session" ? "get_codex_session" : "get_agent_run"
+    };
+  }
+  return {
+    recoverable: true,
+    reason: "wait_timeout",
+    recommendedAction: kind === "codex_session" ? "Call get_codex_session to inspect progress or wait_codex_session again with a larger timeout." : "Call get_agent_run to inspect progress or wait_agent_run again with a larger timeout.",
+    recommendedTool: kind === "codex_session" ? "get_codex_session" : "get_agent_run",
+    retryAfterMs: 1e3
+  };
+}
 
 // src/response.ts
 var singleAgentLimits = {
@@ -23049,6 +23293,7 @@ var CodexAppServerSession = class _CodexAppServerSession {
     this.preparedSubagents = preparedSubagents;
     this.env = env;
     this.logContext = logContext;
+    this.untrackChild = trackChildProcess(child, { label: "codex-app-server", id: this.id });
     this.closedPromise = new Promise((resolve) => {
       this.resolveClosed = resolve;
     });
@@ -23063,6 +23308,7 @@ var CodexAppServerSession = class _CodexAppServerSession {
     });
     this.child.once("close", (code, signal) => {
       this.closed = true;
+      this.untrackChild();
       this.resolveClosed?.();
       const message = `Codex app-server exited with code ${code ?? "null"} signal ${signal ?? "null"}.`;
       this.lastError = message;
@@ -23098,6 +23344,7 @@ var CodexAppServerSession = class _CodexAppServerSession {
   userAgent;
   codexHome;
   lastError;
+  untrackChild;
   capabilities = {
     initialize: false,
     threadStart: false,
@@ -23404,22 +23651,10 @@ var CodexAppServerSession = class _CodexAppServerSession {
   async close(status = "failed") {
     this.closed = true;
     this.rejectAll(new AppServerUnavailableError("Codex app-server session was closed."), status);
-    try {
-      if (process.platform !== "win32" && this.child.pid) process.kill(-this.child.pid, "SIGTERM");
-      else this.child.kill("SIGTERM");
-    } catch {
-      try {
-        this.child.kill("SIGTERM");
-      } catch {
-      }
-    }
+    killChildProcess(this.child, "SIGTERM");
     const graceMs = 2e3;
     const force = setTimeout(() => {
-      try {
-        if (process.platform !== "win32" && this.child.pid) process.kill(-this.child.pid, "SIGKILL");
-        else this.child.kill("SIGKILL");
-      } catch {
-      }
+      killChildProcess(this.child, "SIGKILL");
     }, graceMs);
     force.unref();
     await Promise.race([
@@ -23427,6 +23662,7 @@ var CodexAppServerSession = class _CodexAppServerSession {
       new Promise((resolve) => setTimeout(resolve, graceMs + 250))
     ]);
     clearTimeout(force);
+    this.untrackChild();
     await this.preparedSubagents.cleanup().catch(() => {
     });
   }
@@ -23741,23 +23977,69 @@ function shouldFallbackToExec(error2, env = process.env) {
   if (env.CODEX_SUBAGENTS_DISABLE_EXEC_FALLBACK === "1") return false;
   return error2 instanceof AppServerUnavailableError || error2 instanceof Error;
 }
+function readPositiveInt2(value, fallback, max) {
+  const parsed = Number(value);
+  if (!Number.isInteger(parsed) || parsed < 1) return fallback;
+  return Math.min(parsed, max);
+}
 var CodexSessionManager = class {
   sessions = /* @__PURE__ */ new Map();
+  completedTtlSeconds = readPositiveInt2(
+    process.env.CODEX_SUBAGENTS_SESSION_COMPLETED_TTL_SECONDS,
+    3600,
+    86400
+  );
+  idleTtlSeconds = readPositiveInt2(
+    process.env.CODEX_SUBAGENTS_SESSION_IDLE_TTL_SECONDS,
+    86400,
+    604800
+  );
+  maxSessions = readPositiveInt2(process.env.CODEX_SUBAGENTS_MAX_SESSIONS, 100, 1e3);
   list() {
+    this.prune();
     return [...this.sessions.values()].map(snapshot2);
   }
   get(id) {
+    this.prune();
     const session = this.sessions.get(id);
     return session ? snapshot2(session) : void 0;
   }
+  stats() {
+    this.prune();
+    return {
+      sessions: this.sessions.size,
+      active: [...this.sessions.values()].filter((session) => Boolean(session.controller)).length,
+      queuedTurns: [...this.sessions.values()].reduce(
+        (count, session) => count + session.queuedTurns.length,
+        0
+      ),
+      waiters: [...this.sessions.values()].reduce(
+        (count, session) => count + session.waiters.size + session.queuedTurns.reduce((turnCount, turn) => turnCount + turn.waiters.size, 0) + (session.activeTurn?.waiters.size ?? 0),
+        0
+      ),
+      maxSessions: this.maxSessions,
+      completedTtlSeconds: this.completedTtlSeconds,
+      idleTtlSeconds: this.idleTtlSeconds
+    };
+  }
   async start(options, metadata = {}) {
     const { session, turn } = this.createSession(options, metadata);
-    this.ensureDrain(session);
-    await this.waitForTurn(session, turn);
-    if (!turn.result) {
-      throw new Error(turn.error ?? `Codex session turn did not produce a result: ${turn.id}`);
+    const abortHandler = () => {
+      logger.warn("session.start_request_cancelled", { sessionId: session.id, turnId: turn.id });
+      this.cancel(session.id);
+    };
+    options.abortSignal?.addEventListener("abort", abortHandler, { once: true });
+    try {
+      if (options.abortSignal?.aborted) this.cancel(session.id);
+      this.ensureDrain(session);
+      await this.waitForTurn(session, turn);
+      if (!turn.result) {
+        throw new Error(turn.error ?? `Codex session turn did not produce a result: ${turn.id}`);
+      }
+      return { session: snapshot2(session), result: turn.result };
+    } finally {
+      options.abortSignal?.removeEventListener("abort", abortHandler);
     }
-    return { session: snapshot2(session), result: turn.result };
   }
   startAsync(options, metadata = {}) {
     const { session, turn } = this.createSession(options, metadata);
@@ -23765,6 +24047,7 @@ var CodexSessionManager = class {
     return { session: snapshot2(session), turn: turnSnapshot(turn) };
   }
   createSession(options, metadata = {}) {
+    this.prune();
     const now = (/* @__PURE__ */ new Date()).toISOString();
     const { prompt: _prompt, abortSignal: _abortSignal, onSnapshot: _onSnapshot, ...baseOptions } = options;
     const session = {
@@ -23841,7 +24124,14 @@ var CodexSessionManager = class {
     const wait = options.wait ?? true;
     this.ensureDrain(session);
     if (!wait) return { session: snapshot2(session), turn: turnSnapshot(turn) };
-    await this.waitForTurn(session, turn);
+    const completed = await this.waitForTurn(session, turn, options.waitSignal);
+    if (!completed) {
+      return {
+        session: snapshot2(session),
+        turn: turnSnapshot(turn),
+        error: "Wait request was cancelled; the Codex session is still managed by this MCP server."
+      };
+    }
     return { session: snapshot2(session), turn: turnSnapshot(turn), result: turn.result, error: turn.error };
   }
   async steer(id, prompt, overrides = {}, options = {}) {
@@ -23875,7 +24165,17 @@ var CodexSessionManager = class {
             turn.updatedAt = (/* @__PURE__ */ new Date()).toISOString();
             this.notifyTurn(turn);
             this.notifySession(session);
-            if (options.wait && session.activeTurn) await this.waitForTurn(session, session.activeTurn);
+            if (options.wait && session.activeTurn) {
+              const completed = await this.waitForTurn(session, session.activeTurn, options.waitSignal);
+              if (!completed) {
+                return {
+                  session: snapshot2(session),
+                  turn: turnSnapshot(turn),
+                  delivery: "delivered_to_active_turn",
+                  error: "Wait request was cancelled; the Codex session is still managed by this MCP server."
+                };
+              }
+            }
             return {
               session: snapshot2(session),
               turn: turnSnapshot(turn),
@@ -23894,16 +24194,27 @@ var CodexSessionManager = class {
       wait: options.wait,
       kind: "steer",
       priority: "front",
-      interruptCurrent: options.interruptCurrent
+      interruptCurrent: options.interruptCurrent,
+      waitSignal: options.waitSignal
     });
     return {
       ...response,
       delivery: options.interruptCurrent && wasActive ? "interrupt_requested" : wasActive ? "queued_after_current" : "started_or_queued"
     };
   }
-  async wait(id, timeoutMs, turnId) {
+  async wait(id, timeoutMs, turnId, abortSignal) {
+    this.prune();
     const session = this.sessions.get(id);
     if (!session) return { error: `Unknown session_id: ${id}` };
+    if (abortSignal?.aborted) {
+      const turn2 = turnId ? this.findTurn(session, turnId) : void 0;
+      return {
+        session: snapshot2(session),
+        turn: turn2 ? turnSnapshot(turn2) : void 0,
+        completed: false,
+        timeoutReason: "wait_cancelled"
+      };
+    }
     const deadline = Date.now() + timeoutMs;
     while (Date.now() < deadline) {
       const turn2 = turnId ? this.findTurn(session, turnId) : void 0;
@@ -23917,13 +24228,33 @@ var CodexSessionManager = class {
       }
       await new Promise((resolve) => {
         const remaining = Math.max(1, deadline - Date.now());
-        const timeout = setTimeout(resolve, remaining);
-        const waiter = () => {
+        let finished = false;
+        let waiter;
+        let abortHandler;
+        const finish = () => {
+          if (finished) return;
+          finished = true;
           clearTimeout(timeout);
+          if (waiter) session.waiters.delete(waiter);
+          if (abortHandler) abortSignal?.removeEventListener("abort", abortHandler);
           resolve();
         };
+        const timeout = setTimeout(finish, remaining);
+        waiter = finish;
+        abortHandler = finish;
         session.waiters.add(waiter);
+        abortSignal?.addEventListener("abort", abortHandler, { once: true });
+        if (abortSignal?.aborted) finish();
       });
+      if (abortSignal?.aborted) {
+        const turn3 = turnId ? this.findTurn(session, turnId) : void 0;
+        return {
+          session: snapshot2(session),
+          turn: turn3 ? turnSnapshot(turn3) : void 0,
+          completed: false,
+          timeoutReason: "wait_cancelled"
+        };
+      }
     }
     const turn = turnId ? this.findTurn(session, turnId) : void 0;
     return {
@@ -23960,6 +24291,37 @@ var CodexSessionManager = class {
     }
     this.notifySession(session);
     return snapshot2(session);
+  }
+  async shutdown(reason = "shutdown") {
+    logger.warn("session.shutdown", { reason, sessions: this.sessions.size });
+    const closePromises = [];
+    const snapshots = [];
+    const now = (/* @__PURE__ */ new Date()).toISOString();
+    for (const session of this.sessions.values()) {
+      session.cancelRequested = true;
+      for (const turn of session.queuedTurns) {
+        turn.status = "cancelled";
+        turn.updatedAt = now;
+        turn.error = `Session was cancelled during ${reason}.`;
+        this.notifyTurn(turn);
+      }
+      session.queuedTurns = [];
+      if (session.activeTurn && !terminal(session.activeTurn.status)) {
+        session.activeTurn.status = "cancelled";
+        session.activeTurn.updatedAt = now;
+        session.activeTurn.error = `Session was cancelled during ${reason}.`;
+        this.notifyTurn(session.activeTurn);
+      }
+      session.status = "cancelled";
+      session.updatedAt = now;
+      if (session.controller) session.controller.abort();
+      if (session.appServer) closePromises.push(session.appServer.close("cancelled").catch(() => {
+      }));
+      this.notifySession(session);
+      snapshots.push(snapshot2(session));
+    }
+    await Promise.allSettled(closePromises);
+    return snapshots;
   }
   enqueueTurn(session, input) {
     const now = (/* @__PURE__ */ new Date()).toISOString();
@@ -24175,13 +24537,32 @@ var CodexSessionManager = class {
     if (session.activeTurn?.id === turnId) return session.activeTurn;
     return session.queuedTurns.find((turn) => turn.id === turnId) ?? session.recentTurns.find((turn) => turn.id === turnId);
   }
-  async waitForTurn(session, turn) {
+  async waitForTurn(session, turn, abortSignal) {
     while (!terminal(turn.status)) {
+      if (abortSignal?.aborted) return false;
       await new Promise((resolve) => {
-        turn.waiters.add(resolve);
-        session.waiters.add(resolve);
+        let finished = false;
+        let waiter;
+        let abortHandler;
+        const finish = () => {
+          if (finished) return;
+          finished = true;
+          if (waiter) {
+            turn.waiters.delete(waiter);
+            session.waiters.delete(waiter);
+          }
+          if (abortHandler) abortSignal?.removeEventListener("abort", abortHandler);
+          resolve();
+        };
+        waiter = finish;
+        abortHandler = finish;
+        turn.waiters.add(waiter);
+        session.waiters.add(waiter);
+        abortSignal?.addEventListener("abort", abortHandler, { once: true });
+        if (abortSignal?.aborted) finish();
       });
     }
+    return true;
   }
   async waitForAppServerActiveTurn(session, timeoutMs) {
     const deadline = Date.now() + timeoutMs;
@@ -24199,6 +24580,33 @@ var CodexSessionManager = class {
   notifySession(session) {
     for (const waiter of session.waiters) waiter();
     session.waiters.clear();
+  }
+  prune() {
+    const now = Date.now();
+    const completedTtlMs = this.completedTtlSeconds * 1e3;
+    const idleTtlMs = this.idleTtlSeconds * 1e3;
+    for (const [id, session] of this.sessions) {
+      if (!this.isPrunable(session)) continue;
+      const ageMs = now - Date.parse(session.updatedAt);
+      const ttlMs = session.status === "active" ? idleTtlMs : completedTtlMs;
+      if (ageMs > ttlMs) this.pruneSession(id, session, "ttl");
+    }
+    if (this.sessions.size <= this.maxSessions) return;
+    const candidates = [...this.sessions.entries()].filter(([, session]) => this.isPrunable(session)).sort(([, left], [, right]) => Date.parse(left.updatedAt) - Date.parse(right.updatedAt));
+    for (const [id, session] of candidates) {
+      if (this.sessions.size <= this.maxSessions) break;
+      this.pruneSession(id, session, "max_sessions");
+    }
+  }
+  isPrunable(session) {
+    return !session.controller && !session.draining && session.queuedTurns.length === 0 && (session.status === "active" || session.status === "failed" || session.status === "cancelled");
+  }
+  pruneSession(id, session, reason) {
+    logger.warn("session.pruned", { sessionId: id, reason, status: session.status });
+    this.sessions.delete(id);
+    void session.appServer?.close("cancelled").catch(() => {
+    });
+    this.notifySession(session);
   }
 };
 var sessionManager = new CodexSessionManager();
@@ -24399,6 +24807,35 @@ function jsonResult(value, isError = false) {
     ]
   };
 }
+function errorResult(error2, context = "tool_call") {
+  return jsonResult(
+    {
+      error: error2 instanceof Error ? error2.message : String(error2),
+      recovery: recoveryForError(error2, context)
+    },
+    true
+  );
+}
+function agentResultResponse(result) {
+  const recovery = recoveryForAgentResult(result);
+  return jsonResult(
+    {
+      agent: compactAgentResultForMcp(result),
+      recovery
+    },
+    !result.ok
+  );
+}
+function withRequestAbort(options, extra) {
+  if (!extra?.signal) return options;
+  return { ...options, abortSignal: extra.signal };
+}
+function requestCancelledError() {
+  return new Error("MCP request was cancelled by the client.");
+}
+function throwIfRequestAborted(extra) {
+  if (extra?.signal?.aborted) throw requestCancelledError();
+}
 async function loggedToolCall(tool, args, extra, run) {
   const toolCallId = makeLogId("tool");
   const started = Date.now();
@@ -24425,7 +24862,7 @@ async function loggedToolCall(tool, args, extra, run) {
       durationMs: Date.now() - started,
       error: errorForLog(error2)
     });
-    return jsonResult({ error: error2 instanceof Error ? error2.message : String(error2) }, true);
+    return errorResult(error2, tool);
   }
 }
 function createProgressReporter(extra) {
@@ -24766,7 +25203,7 @@ server.registerTool(
         const result = await withProgressHeartbeat(
           progress,
           "Still running Codex run",
-          () => runQueuedAgent(toFrontDoorRunOptions(args), {
+          () => runQueuedAgent(withRequestAbort(toFrontDoorRunOptions(args), extra), {
             onStart: (queuedMs) => {
               void progress.send(`Started Codex run after ${queuedMs}ms queued`);
             }
@@ -24774,11 +25211,11 @@ server.registerTool(
         );
         await reportAgentResult(progress, result);
         await progress.flush();
-        return jsonResult({ agent: compactAgentResultForMcp(result) }, !result.ok);
+        return agentResultResponse(result);
       } catch (error2) {
         await progress.flush();
         logger.error("ask_codex.failed", { error: errorForLog(error2) });
-        return jsonResult({ error: error2 instanceof Error ? error2.message : String(error2) }, true);
+        return errorResult(error2, "ask_codex");
       }
     });
   }
@@ -24804,7 +25241,7 @@ server.registerTool(
         const result = await withProgressHeartbeat(
           progress,
           "Still running Codex run",
-          () => runQueuedAgent(toRunOptions(args), {
+          () => runQueuedAgent(withRequestAbort(toRunOptions(args), extra), {
             onStart: (queuedMs) => {
               void progress.send(`Started Codex run after ${queuedMs}ms queued`);
             }
@@ -24812,16 +25249,11 @@ server.registerTool(
         );
         await reportAgentResult(progress, result);
         await progress.flush();
-        return jsonResult({ agent: compactAgentResultForMcp(result) }, !result.ok);
+        return agentResultResponse(result);
       } catch (error2) {
         await progress.flush();
         logger.error("run_agent.failed", { error: errorForLog(error2) });
-        return jsonResult(
-          {
-            error: error2 instanceof Error ? error2.message : String(error2)
-          },
-          true
-        );
+        return errorResult(error2, "run_agent");
       }
     });
   }
@@ -24841,6 +25273,7 @@ server.registerTool(
     return loggedToolCall("start_agent_run", args, extra, async () => {
       const progress = createProgressReporter(extra);
       try {
+        throwIfRequestAborted(extra);
         await progress.send("Queued asynchronous Codex run");
         const job = jobManager.startAgent(toRunOptions(args));
         await progress.send(`Started Codex job ${job.id}`);
@@ -24849,7 +25282,7 @@ server.registerTool(
       } catch (error2) {
         await progress.flush();
         logger.error("start_agent_run.failed", { error: errorForLog(error2) });
-        return jsonResult({ error: error2 instanceof Error ? error2.message : String(error2) }, true);
+        return errorResult(error2, "start_agent_run");
       }
     });
   }
@@ -24951,6 +25384,7 @@ server.registerTool(
           progress,
           `Still running ${args.tasks.length} Codex agents`,
           () => runQueuedAgents(toFrontDoorParallelRunOptions(args), {
+            signal: extra?.signal,
             onStart: (queuedMs, label) => {
               void progress.send(`Started ${label ?? "Codex agent"} after ${queuedMs}ms queued`, { total });
             },
@@ -24965,11 +25399,18 @@ server.registerTool(
         );
         const ok = results.every((result) => result.ok);
         await progress.flush();
-        return jsonResult({ ok, agents: compactAgentResultsForMcp(results) }, !ok);
+        return jsonResult(
+          {
+            ok,
+            agents: compactAgentResultsForMcp(results),
+            recoveries: results.map(recoveryForAgentResult)
+          },
+          !ok
+        );
       } catch (error2) {
         await progress.flush();
         logger.error("ask_codex_parallel.failed", { error: errorForLog(error2) });
-        return jsonResult({ error: error2 instanceof Error ? error2.message : String(error2) }, true);
+        return errorResult(error2, "ask_codex_parallel");
       }
     });
   }
@@ -24999,6 +25440,7 @@ server.registerTool(
           progress,
           `Still running ${args.agents.length} Codex agents`,
           () => runQueuedAgents(toParallelRunOptions(args), {
+            signal: extra?.signal,
             onStart: (queuedMs, label) => {
               void progress.send(`Started ${label ?? "Codex agent"} after ${queuedMs}ms queued`, { total });
             },
@@ -25016,19 +25458,15 @@ server.registerTool(
         return jsonResult(
           {
             ok,
-            agents: compactAgentResultsForMcp(results)
+            agents: compactAgentResultsForMcp(results),
+            recoveries: results.map(recoveryForAgentResult)
           },
           !ok
         );
       } catch (error2) {
         await progress.flush();
         logger.error("run_agents.failed", { error: errorForLog(error2) });
-        return jsonResult(
-          {
-            error: error2 instanceof Error ? error2.message : String(error2)
-          },
-          true
-        );
+        return errorResult(error2, "run_agents");
       }
     });
   }
@@ -25055,6 +25493,7 @@ server.registerTool(
           progress,
           `Still running ${args.agents.length} Codex agents for aggregation`,
           () => runQueuedAgents(toParallelRunOptions(args), {
+            signal: extra?.signal,
             onStart: (queuedMs, label) => {
               void progress.send(`Started ${label ?? "Codex agent"} after ${queuedMs}ms queued`, { total });
             },
@@ -25074,14 +25513,15 @@ server.registerTool(
           {
             ok: aggregation.ok,
             aggregation,
-            agents: compactAgentResultsForMcp(results)
+            agents: compactAgentResultsForMcp(results),
+            recoveries: results.map(recoveryForAgentResult)
           },
           !aggregation.ok
         );
       } catch (error2) {
         await progress.flush();
         logger.error("run_agents_aggregate.failed", { error: errorForLog(error2) });
-        return jsonResult({ error: error2 instanceof Error ? error2.message : String(error2) }, true);
+        return errorResult(error2, "run_agents_aggregate");
       }
     });
   }
@@ -25101,6 +25541,7 @@ server.registerTool(
     return loggedToolCall("start_agents_run", args, extra, async () => {
       const progress = createProgressReporter(extra);
       try {
+        throwIfRequestAborted(extra);
         await progress.send(`Queued asynchronous run for ${args.agents.length} Codex agents`);
         const job = jobManager.startAgents(toParallelRunOptions(args));
         await progress.send(`Started Codex job ${job.id}`);
@@ -25109,7 +25550,7 @@ server.registerTool(
       } catch (error2) {
         await progress.flush();
         logger.error("start_agents_run.failed", { error: errorForLog(error2) });
-        return jsonResult({ error: error2 instanceof Error ? error2.message : String(error2) }, true);
+        return errorResult(error2, "start_agents_run");
       }
     });
   }
@@ -25132,7 +25573,7 @@ server.registerTool(
       const job = jobManager.get(args.job_id);
       if (!job) {
         await progress.flush();
-        return jsonResult({ error: `Unknown job_id: ${args.job_id}` }, true);
+        return errorResult(new Error(`Unknown job_id: ${args.job_id}`), "get_agent_run");
       }
       return jsonResult({ job: compactJobSnapshotForMcp(job) });
     });
@@ -25154,22 +25595,28 @@ server.registerTool(
       await progress.send(`Waiting for Codex job ${args.job_id}`);
       const started = Date.now();
       let job = jobManager.get(args.job_id);
-      while (job && !job.completedAt && Date.now() - started < args.timeout_ms) {
+      while (job && !job.completedAt && Date.now() - started < args.timeout_ms && !extra?.signal?.aborted) {
         const remaining = args.timeout_ms - (Date.now() - started);
         await new Promise((resolve) => setTimeout(resolve, Math.min(1e3, Math.max(1, remaining))));
         job = jobManager.get(args.job_id);
         if (job) await progress.send(`Codex job ${job.status}`);
       }
+      const waitCancelled = Boolean(extra?.signal?.aborted);
       if (job && !job.completedAt) {
-        const waitedJob = await jobManager.wait(args.job_id, 1);
+        const waitedJob = await jobManager.wait(args.job_id, 1, extra?.signal);
         job = waitedJob ?? job;
       }
-      if (!job) return jsonResult({ error: `Unknown job_id: ${args.job_id}` }, true);
+      if (!job) return errorResult(new Error(`Unknown job_id: ${args.job_id}`), "wait_agent_run");
       if (job.completedAt) await progress.send(`Codex job ${job.status}`);
       await progress.flush();
+      const waitReason = job.completedAt ? void 0 : waitCancelled ? "wait_cancelled" : "wait_timeout";
       return jsonResult(
-        { job: compactJobSnapshotForMcp(job) },
-        job.status === "failed" || job.status === "cancelled"
+        {
+          job: compactJobSnapshotForMcp(job),
+          timeoutReason: waitReason,
+          recovery: recoveryForWait("agent_job", waitReason)
+        },
+        waitCancelled || job.status === "failed" || job.status === "cancelled"
       );
     });
   }
@@ -25189,7 +25636,7 @@ server.registerTool(
       await progress.send(`Cancelling Codex job ${args.job_id}`);
       await progress.flush();
       const job = jobManager.cancel(args.job_id);
-      if (!job) return jsonResult({ error: `Unknown job_id: ${args.job_id}` }, true);
+      if (!job) return errorResult(new Error(`Unknown job_id: ${args.job_id}`), "cancel_agent_run");
       return jsonResult({ job: compactJobSnapshotForMcp(job) });
     });
   }
@@ -25216,23 +25663,30 @@ server.registerTool(
           progress,
           "Still starting persistent Codex session",
           () => sessionManager.start(
-            {
-              ...toFrontDoorRunOptions(args),
-              ephemeral: false
-            },
+            withRequestAbort(
+              {
+                ...toFrontDoorRunOptions(args),
+                ephemeral: false
+              },
+              extra
+            ),
             { sessionName: args.session_name }
           )
         );
         await reportAgentResult(progress, result);
         await progress.flush();
         return jsonResult(
-          { session: compactSessionSnapshotForMcp(session), agent: compactAgentResultForMcp(result) },
+          {
+            session: compactSessionSnapshotForMcp(session),
+            agent: compactAgentResultForMcp(result),
+            recovery: recoveryForAgentResult(result)
+          },
           !result.ok
         );
       } catch (error2) {
         await progress.flush();
         logger.error("start_codex_session.failed", { error: errorForLog(error2) });
-        return jsonResult({ error: error2 instanceof Error ? error2.message : String(error2) }, true);
+        return errorResult(error2, "start_codex_session");
       }
     });
   }
@@ -25253,6 +25707,7 @@ server.registerTool(
     return loggedToolCall("start_codex_session_async", args, extra, async () => {
       const progress = createProgressReporter(extra);
       try {
+        throwIfRequestAborted(extra);
         await progress.send("Starting long-running Codex session");
         const { session, turn } = sessionManager.startAsync(
           {
@@ -25270,7 +25725,7 @@ server.registerTool(
       } catch (error2) {
         await progress.flush();
         logger.error("start_codex_session_async.failed", { error: errorForLog(error2) });
-        return jsonResult({ error: error2 instanceof Error ? error2.message : String(error2) }, true);
+        return errorResult(error2, "start_codex_session_async");
       }
     });
   }
@@ -25294,25 +25749,35 @@ server.registerTool(
         const { session, result, error: error2 } = await withProgressHeartbeat(
           progress,
           `Still running Codex session ${args.session_id}`,
-          () => sessionManager.send(args.session_id, args.task, toFrontDoorRunOptions(args))
+          () => sessionManager.send(args.session_id, args.task, toFrontDoorRunOptions(args), {
+            waitSignal: extra?.signal
+          })
         );
         if (error2 || !session || !result) {
           await progress.flush();
           return jsonResult(
-            { error: error2, session: session ? compactSessionSnapshotForMcp(session) : session },
+            {
+              error: error2,
+              session: session ? compactSessionSnapshotForMcp(session) : session,
+              recovery: recoveryForError(new Error(error2 ?? "Codex session did not return a result."), "continue_codex_session")
+            },
             true
           );
         }
         await reportAgentResult(progress, result);
         await progress.flush();
         return jsonResult(
-          { session: compactSessionSnapshotForMcp(session), agent: compactAgentResultForMcp(result) },
+          {
+            session: compactSessionSnapshotForMcp(session),
+            agent: compactAgentResultForMcp(result),
+            recovery: recoveryForAgentResult(result)
+          },
           !result.ok
         );
       } catch (error2) {
         await progress.flush();
         logger.error("continue_codex_session.failed", { error: errorForLog(error2) });
-        return jsonResult({ error: error2 instanceof Error ? error2.message : String(error2) }, true);
+        return errorResult(error2, "continue_codex_session");
       }
     });
   }
@@ -25335,7 +25800,8 @@ server.registerTool(
       try {
         await progress.send(`Queueing prompt for Codex session ${args.session_id}`);
         const run = () => sessionManager.send(args.session_id, args.task, toFrontDoorRunOptions(args), {
-          wait: args.wait_for_completion
+          wait: args.wait_for_completion,
+          waitSignal: extra?.signal
         });
         const { session, turn, result, error: error2 } = args.wait_for_completion ? await withProgressHeartbeat(
           progress,
@@ -25345,7 +25811,12 @@ server.registerTool(
         if (error2 || !session) {
           await progress.flush();
           return jsonResult(
-            { error: error2, session: session ? compactSessionSnapshotForMcp(session) : session, turn },
+            {
+              error: error2,
+              session: session ? compactSessionSnapshotForMcp(session) : session,
+              turn,
+              recovery: recoveryForError(new Error(error2 ?? "Codex session prompt did not return a session."), "send_codex_session_prompt")
+            },
             true
           );
         }
@@ -25356,14 +25827,15 @@ server.registerTool(
             session: compactSessionSnapshotForMcp(session),
             turn,
             queued: !args.wait_for_completion,
-            agent: result ? compactAgentResultForMcp(result) : void 0
+            agent: result ? compactAgentResultForMcp(result) : void 0,
+            recovery: result ? recoveryForAgentResult(result) : void 0
           },
           result ? !result.ok : false
         );
       } catch (error2) {
         await progress.flush();
         logger.error("send_codex_session_prompt.failed", { error: errorForLog(error2) });
-        return jsonResult({ error: error2 instanceof Error ? error2.message : String(error2) }, true);
+        return errorResult(error2, "send_codex_session_prompt");
       }
     });
   }
@@ -25392,7 +25864,8 @@ server.registerTool(
           toFrontDoorRunOptions({ ...args, task: args.steering_prompt }),
           {
             wait: args.wait_for_completion,
-            interruptCurrent: args.interrupt_current
+            interruptCurrent: args.interrupt_current,
+            waitSignal: extra?.signal
           }
         );
         const { session, turn, result, delivery, error: error2 } = args.wait_for_completion ? await withProgressHeartbeat(
@@ -25403,7 +25876,13 @@ server.registerTool(
         if (error2 || !session) {
           await progress.flush();
           return jsonResult(
-            { error: error2, session: session ? compactSessionSnapshotForMcp(session) : session, turn, delivery },
+            {
+              error: error2,
+              session: session ? compactSessionSnapshotForMcp(session) : session,
+              turn,
+              delivery,
+              recovery: recoveryForError(new Error(error2 ?? "Codex steering did not return a session."), "steer_codex_session")
+            },
             true
           );
         }
@@ -25415,14 +25894,15 @@ server.registerTool(
             turn,
             delivery,
             queued: !args.wait_for_completion,
-            agent: result ? compactAgentResultForMcp(result) : void 0
+            agent: result ? compactAgentResultForMcp(result) : void 0,
+            recovery: result ? recoveryForAgentResult(result) : void 0
           },
           result ? !result.ok : false
         );
       } catch (error2) {
         await progress.flush();
         logger.error("steer_codex_session.failed", { error: errorForLog(error2) });
-        return jsonResult({ error: error2 instanceof Error ? error2.message : String(error2) }, true);
+        return errorResult(error2, "steer_codex_session");
       }
     });
   }
@@ -25448,23 +25928,30 @@ server.registerTool(
           progress,
           "Still starting persistent Codex session",
           () => sessionManager.start(
-            {
-              ...toRunOptions(args),
-              ephemeral: false
-            },
+            withRequestAbort(
+              {
+                ...toRunOptions(args),
+                ephemeral: false
+              },
+              extra
+            ),
             { sessionName: args.session_name }
           )
         );
         await reportAgentResult(progress, result);
         await progress.flush();
         return jsonResult(
-          { session: compactSessionSnapshotForMcp(session), agent: compactAgentResultForMcp(result) },
+          {
+            session: compactSessionSnapshotForMcp(session),
+            agent: compactAgentResultForMcp(result),
+            recovery: recoveryForAgentResult(result)
+          },
           !result.ok
         );
       } catch (error2) {
         await progress.flush();
         logger.error("start_session.failed", { error: errorForLog(error2) });
-        return jsonResult({ error: error2 instanceof Error ? error2.message : String(error2) }, true);
+        return errorResult(error2, "start_session");
       }
     });
   }
@@ -25488,25 +25975,33 @@ server.registerTool(
         const { session, result, error: error2 } = await withProgressHeartbeat(
           progress,
           `Still running Codex session ${args.session_id}`,
-          () => sessionManager.send(args.session_id, args.prompt, toRunOptions(args))
+          () => sessionManager.send(args.session_id, args.prompt, toRunOptions(args), { waitSignal: extra?.signal })
         );
         if (error2 || !session || !result) {
           await progress.flush();
           return jsonResult(
-            { error: error2, session: session ? compactSessionSnapshotForMcp(session) : session },
+            {
+              error: error2,
+              session: session ? compactSessionSnapshotForMcp(session) : session,
+              recovery: recoveryForError(new Error(error2 ?? "Codex session did not return a result."), "send_session_prompt")
+            },
             true
           );
         }
         await reportAgentResult(progress, result);
         await progress.flush();
         return jsonResult(
-          { session: compactSessionSnapshotForMcp(session), agent: compactAgentResultForMcp(result) },
+          {
+            session: compactSessionSnapshotForMcp(session),
+            agent: compactAgentResultForMcp(result),
+            recovery: recoveryForAgentResult(result)
+          },
           !result.ok
         );
       } catch (error2) {
         await progress.flush();
         logger.error("send_session_prompt.failed", { error: errorForLog(error2) });
-        return jsonResult({ error: error2 instanceof Error ? error2.message : String(error2) }, true);
+        return errorResult(error2, "send_session_prompt");
       }
     });
   }
@@ -25522,7 +26017,7 @@ server.registerTool(
   },
   async (args, extra) => loggedToolCall("get_session", args, extra, async () => {
     const session = sessionManager.get(args.session_id);
-    if (!session) return jsonResult({ error: `Unknown session_id: ${args.session_id}` }, true);
+    if (!session) return errorResult(new Error(`Unknown session_id: ${args.session_id}`), "get_session");
     return jsonResult({ session: compactSessionSnapshotForMcp(session) });
   })
 );
@@ -25537,7 +26032,7 @@ server.registerTool(
   },
   async (args, extra) => loggedToolCall("get_codex_session", args, extra, async () => {
     const session = sessionManager.get(args.session_id);
-    if (!session) return jsonResult({ error: `Unknown session_id: ${args.session_id}` }, true);
+    if (!session) return errorResult(new Error(`Unknown session_id: ${args.session_id}`), "get_codex_session");
     return jsonResult({ session: compactSessionSnapshotForMcp(session) });
   })
 );
@@ -25559,23 +26054,26 @@ server.registerTool(
       const waited = await withProgressHeartbeat(
         progress,
         `Still waiting for Codex session ${args.session_id}`,
-        () => sessionManager.wait(args.session_id, args.timeout_ms, args.turn_id)
+        () => sessionManager.wait(args.session_id, args.timeout_ms, args.turn_id, extra?.signal)
       );
       await progress.send(
         waited.completed ? `Codex session ${args.session_id} is ready` : `Timed out waiting for Codex session ${args.session_id}`
       );
       await progress.flush();
-      if (waited.error || !waited.session) return jsonResult({ error: waited.error }, true);
+      if (waited.error || !waited.session) {
+        return errorResult(new Error(waited.error ?? "Codex session was not found."), "wait_codex_session");
+      }
       return jsonResult({
         completed: waited.completed,
         timeoutReason: waited.timeoutReason,
         session: compactSessionSnapshotForMcp(waited.session),
-        turn: waited.turn
-      });
+        turn: waited.turn,
+        recovery: recoveryForWait("codex_session", waited.timeoutReason)
+      }, waited.timeoutReason === "wait_cancelled");
     } catch (error2) {
       await progress.flush();
       logger.error("wait_codex_session.failed", { error: errorForLog(error2) });
-      return jsonResult({ error: error2 instanceof Error ? error2.message : String(error2) }, true);
+      return errorResult(error2, "wait_codex_session");
     }
   })
 );
@@ -25604,7 +26102,7 @@ server.registerTool(
   },
   async (args, extra) => loggedToolCall("cancel_session", args, extra, async () => {
     const session = sessionManager.cancel(args.session_id);
-    if (!session) return jsonResult({ error: `Unknown session_id: ${args.session_id}` }, true);
+    if (!session) return errorResult(new Error(`Unknown session_id: ${args.session_id}`), "cancel_session");
     return jsonResult({ session: compactSessionSnapshotForMcp(session) });
   })
 );
@@ -25650,17 +26148,14 @@ server.registerTool(
         mcpConfigPolicies,
         pluginCodexBin: cleanOption(process.env.CODEX_SUBAGENTS_CODEX_BIN),
         claudeProjectDir: cleanOption(process.env.CLAUDE_PROJECT_DIR),
-        queue: jobManager.stats()
+        queue: jobManager.stats(),
+        sessions: sessionManager.stats(),
+        logging: loggingDiagnostics(),
+        lifecycle: lifecycleStats()
       });
     } catch (error2) {
       logger.error("codex_status.failed", { error: errorForLog(error2) });
-      return jsonResult(
-        {
-          ok: false,
-          error: error2 instanceof Error ? error2.message : String(error2)
-        },
-        true
-      );
+      return errorResult(error2, "codex_status");
     }
   })
 );
@@ -25719,6 +26214,9 @@ server.registerTool(
       }
     });
     checks.push({ name: "queue", ok: true, detail: jobManager.stats() });
+    checks.push({ name: "sessions", ok: true, detail: sessionManager.stats() });
+    checks.push({ name: "logging", ok: true, detail: loggingDiagnostics() });
+    checks.push({ name: "lifecycle", ok: true, detail: lifecycleStats() });
     return jsonResult({
       ok,
       checks,
@@ -25814,7 +26312,25 @@ server.registerPrompt(
     return promptResult;
   }
 );
+registerCleanupHandler(async (reason) => {
+  jobManager.cancelAll(reason);
+  await sessionManager.shutdown(reason);
+});
+function installProcessCleanup() {
+  let shutdownStarted = false;
+  const shutdown = (reason, exitCode) => {
+    if (shutdownStarted) return;
+    shutdownStarted = true;
+    void cleanupRuntime(reason).finally(() => {
+      if (exitCode !== void 0) process.exit(exitCode);
+    });
+  };
+  process.once("SIGINT", () => shutdown("SIGINT", 130));
+  process.once("SIGTERM", () => shutdown("SIGTERM", 143));
+  process.stdin.once("close", () => shutdown("stdin_close"));
+}
 async function main() {
+  installProcessCleanup();
   process.on("unhandledRejection", (error2) => {
     logger.error("process.unhandled_rejection", { error: errorForLog(error2) });
   });
@@ -25822,7 +26338,7 @@ async function main() {
     logger.error("process.uncaught_exception", { error: errorForLog(error2) });
   });
   logger.info("server.starting", {
-    logLevel: process.env.CODEX_SUBAGENTS_LOG_LEVEL ?? process.env.CODEX_SUBAGENTS_LOG ?? "debug"
+    logging: loggingDiagnostics()
   });
   const transport = new StdioServerTransport();
   installTransportLogging(transport);

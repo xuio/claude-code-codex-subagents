@@ -315,7 +315,7 @@ export async function runQueuedAgents(
   return results;
 }
 
-class CodexJobManager {
+export class CodexJobManager {
   private readonly jobs = new Map<string, JobRecord>();
   private readonly ttlMs = readPositiveInt(process.env.CODEX_SUBAGENTS_JOB_TTL_SECONDS, 3600, 86_400) * 1000;
 
@@ -379,29 +379,59 @@ class CodexJobManager {
     return snapshot(job);
   }
 
-  async wait(id: string, timeoutMs: number): Promise<JobSnapshot | undefined> {
+  async wait(id: string, timeoutMs: number, abortSignal?: AbortSignal): Promise<JobSnapshot | undefined> {
     const job = this.jobs.get(id);
     if (!job) return undefined;
     if (job.completedAt) return snapshot(job);
+    if (abortSignal?.aborted) return snapshot(job);
 
     await new Promise<void>((resolve) => {
-      const timeout = setTimeout(resolve, timeoutMs);
-      const waiter = () => {
+      let finished = false;
+      let waiter: (() => void) | undefined;
+      let abortHandler: (() => void) | undefined;
+      const finish = () => {
+        if (finished) return;
+        finished = true;
         clearTimeout(timeout);
+        if (waiter) job.waiters.delete(waiter);
+        if (abortHandler) abortSignal?.removeEventListener("abort", abortHandler);
         resolve();
       };
+      const timeout = setTimeout(finish, timeoutMs);
+      waiter = () => {
+        finish();
+      };
+      abortHandler = finish;
       job.waiters.add(waiter);
+      abortSignal?.addEventListener("abort", abortHandler, { once: true });
+      if (abortSignal?.aborted) finish();
     });
 
     return snapshot(job);
   }
 
-  stats(): QueueStats & { jobs: number } {
+  stats(): QueueStats & { jobs: number; waiters: number } {
     this.prune();
     return {
       ...agentRunQueue.stats(),
       jobs: this.jobs.size,
+      waiters: [...this.jobs.values()].reduce((count, job) => count + job.waiters.size, 0),
     };
+  }
+
+  cancelAll(reason = "shutdown"): JobSnapshot[] {
+    logger.warn("job.cancel_all", { reason, jobs: this.jobs.size });
+    const snapshots: JobSnapshot[] = [];
+    for (const job of this.jobs.values()) {
+      if (!job.completedAt && job.status !== "cancelled") {
+        job.status = "cancelling";
+        job.updatedAt = new Date().toISOString();
+        job.controller.abort();
+      }
+      this.notifyJob(job);
+      snapshots.push(snapshot(job));
+    }
+    return snapshots;
   }
 
   private start(kind: JobKind, run: (job: JobRecord) => Promise<unknown>): JobSnapshot {
@@ -451,11 +481,15 @@ class CodexJobManager {
         const nowDone = new Date().toISOString();
         job.completedAt = nowDone;
         job.updatedAt = nowDone;
-        for (const waiter of job.waiters) waiter();
-        job.waiters.clear();
+        this.notifyJob(job);
       });
 
     return snapshot(job);
+  }
+
+  private notifyJob(job: JobRecord): void {
+    for (const waiter of [...job.waiters]) waiter();
+    job.waiters.clear();
   }
 
   private prune(): void {

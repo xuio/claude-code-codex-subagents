@@ -1,8 +1,11 @@
 import { createHash, randomUUID } from "node:crypto";
+import { appendFileSync, mkdirSync, renameSync, statSync } from "node:fs";
+import path from "node:path";
 import { redactJsonValue, redactSensitiveText } from "./redaction.js";
 
 export const logLevels = ["debug", "info", "warn", "error", "silent"] as const;
 export type LogLevel = (typeof logLevels)[number];
+export type LogProfile = "debug" | "production";
 
 const levelWeight: Record<LogLevel, number> = {
   debug: 10,
@@ -15,14 +18,20 @@ const levelWeight: Record<LogLevel, number> = {
 const sensitiveKeyRe = /(api[_-]?key|token|secret|password|private[_-]?key|cookie|session|credential|auth)/i;
 
 let logWriter: (line: string) => void = (line) => {
-  process.stderr.write(`${line}\n`);
+  writeDefaultLog(line);
 };
 
+export function configuredLogProfile(env: NodeJS.ProcessEnv = process.env): LogProfile {
+  const raw = env.CODEX_SUBAGENTS_LOG_PROFILE?.trim().toLowerCase();
+  return raw === "production" ? "production" : "debug";
+}
+
 export function configuredLogLevel(env: NodeJS.ProcessEnv = process.env): LogLevel {
-  const raw = (env.CODEX_SUBAGENTS_LOG_LEVEL ?? env.CODEX_SUBAGENTS_LOG ?? "debug").trim().toLowerCase();
+  const fallback = configuredLogProfile(env) === "production" ? "info" : "debug";
+  const raw = (env.CODEX_SUBAGENTS_LOG_LEVEL ?? env.CODEX_SUBAGENTS_LOG ?? fallback).trim().toLowerCase();
   if (["0", "false", "off", "none", "quiet", "silent"].includes(raw)) return "silent";
   if (logLevels.includes(raw as LogLevel)) return raw as LogLevel;
-  return "debug";
+  return fallback;
 }
 
 export function makeLogId(prefix: string): string {
@@ -40,6 +49,19 @@ function maxStringChars(env: NodeJS.ProcessEnv = process.env): number {
   const parsed = Number(env.CODEX_SUBAGENTS_LOG_MAX_STRING_CHARS);
   if (!Number.isInteger(parsed) || parsed < 1) return 20_000;
   return Math.min(parsed, 1_000_000);
+}
+
+function logFileMaxBytes(env: NodeJS.ProcessEnv = process.env): number {
+  const parsed = Number(env.CODEX_SUBAGENTS_LOG_FILE_MAX_BYTES);
+  if (!Number.isInteger(parsed) || parsed < 1) return 10_000_000;
+  return Math.min(parsed, 1_000_000_000);
+}
+
+export function rawTrafficRedacts(env: NodeJS.ProcessEnv = process.env): boolean {
+  const raw = env.CODEX_SUBAGENTS_LOG_RAW_REDACT?.trim().toLowerCase();
+  if (["1", "true", "yes", "on"].includes(raw ?? "")) return true;
+  if (["0", "false", "no", "off"].includes(raw ?? "")) return false;
+  return configuredLogProfile(env) === "production";
 }
 
 function shorten(text: string, max = maxStringChars()): string | { chars: number; sha256: string; preview: string } {
@@ -143,7 +165,7 @@ export function log(level: Exclude<LogLevel, "silent">, event: string, fields: R
 }
 
 export function logRaw(level: Exclude<LogLevel, "silent">, event: string, fields: Record<string, unknown> = {}): void {
-  writeLog(level, event, fields, { redact: false });
+  writeLog(level, event, fields, { redact: rawTrafficRedacts() });
 }
 
 export const logger = {
@@ -163,6 +185,35 @@ export function setLogWriterForTest(writer: (line: string) => void): void {
 
 export function resetLogWriterForTest(): void {
   logWriter = (line) => {
-    process.stderr.write(`${line}\n`);
+    writeDefaultLog(line);
   };
+}
+
+export function loggingDiagnostics(env: NodeJS.ProcessEnv = process.env): Record<string, unknown> {
+  const logFile = env.CODEX_SUBAGENTS_LOG_FILE?.trim();
+  return {
+    profile: configuredLogProfile(env),
+    level: configuredLogLevel(env),
+    rawTrafficRedacted: rawTrafficRedacts(env),
+    maxStringChars: maxStringChars(env),
+    logFile: logFile || undefined,
+    logFileMaxBytes: logFile ? logFileMaxBytes(env) : undefined,
+  };
+}
+
+function writeDefaultLog(line: string): void {
+  process.stderr.write(`${line}\n`);
+  const logFile = process.env.CODEX_SUBAGENTS_LOG_FILE?.trim();
+  if (!logFile) return;
+  try {
+    mkdirSync(path.dirname(logFile), { recursive: true });
+    try {
+      if (statSync(logFile).size > logFileMaxBytes()) renameSync(logFile, `${logFile}.1`);
+    } catch {
+      // Missing files or rotation races are harmless.
+    }
+    appendFileSync(logFile, `${line}\n`, "utf8");
+  } catch {
+    // Logging must never break MCP traffic or Codex execution.
+  }
 }

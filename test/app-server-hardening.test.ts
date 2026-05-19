@@ -2,6 +2,7 @@ import { mkdtemp, readFile, realpath, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
+import { CodexJobManager } from "../src/jobs.js";
 import { CodexSessionManager } from "../src/sessions.js";
 
 const fakeCodex = path.resolve("test/fixtures/fake-codex.mjs");
@@ -259,6 +260,64 @@ describe("app-server hardening", () => {
     expect(waited.completed).toBe(false);
     expect(waited.timeoutReason).toBe("wait_timeout");
     expect(waited.session?.active).toBe(true);
+    expect(manager.stats().waiters).toBe(0);
     manager.cancel(session.id);
+  });
+
+  it("cleans timed-out waiters for sessions and async jobs", async () => {
+    const manager = new CodexSessionManager();
+    const jobs = new CodexJobManager();
+    const projectDir = await tempDir("codex-subagents-waiter-cleanup-project-");
+
+    const { session } = manager.startAsync({
+      prompt: "session waiter cleanup DELAY_MS=160",
+      projectDir,
+      codexBin: fakeCodex,
+    });
+    const job = jobs.startAgent({
+      prompt: "job waiter cleanup DELAY_MS=160",
+      projectDir,
+      codexBin: fakeCodex,
+    });
+
+    await Promise.all([
+      manager.wait(session.id, 5),
+      manager.wait(session.id, 5),
+      jobs.wait(job.id, 5),
+      jobs.wait(job.id, 5),
+    ]);
+
+    expect(manager.stats().waiters).toBe(0);
+    expect(jobs.stats().waiters).toBe(0);
+
+    const [sessionDone, jobDone] = await Promise.all([
+      manager.wait(session.id, 2_000),
+      jobs.wait(job.id, 2_000),
+    ]);
+    expect(sessionDone.completed).toBe(true);
+    expect(jobDone?.status).toBe("completed");
+    await manager.shutdown("test_cleanup");
+  });
+
+  it("bounds retained idle sessions by max session count", async () => {
+    const previousMax = process.env.CODEX_SUBAGENTS_MAX_SESSIONS;
+    process.env.CODEX_SUBAGENTS_MAX_SESSIONS = "2";
+    const manager = new CodexSessionManager();
+    const projectDir = await tempDir("codex-subagents-retention-project-");
+    try {
+      const first = await manager.start({ prompt: "retention first", projectDir, codexBin: fakeCodex });
+      const second = await manager.start({ prompt: "retention second", projectDir, codexBin: fakeCodex });
+      const third = await manager.start({ prompt: "retention third", projectDir, codexBin: fakeCodex });
+
+      const sessions = manager.list();
+      expect(sessions).toHaveLength(2);
+      expect(manager.get(first.session.id)).toBeUndefined();
+      expect(manager.get(second.session.id)).toBeDefined();
+      expect(manager.get(third.session.id)).toBeDefined();
+    } finally {
+      if (previousMax === undefined) delete process.env.CODEX_SUBAGENTS_MAX_SESSIONS;
+      else process.env.CODEX_SUBAGENTS_MAX_SESSIONS = previousMax;
+      await manager.shutdown("test_cleanup");
+    }
   });
 });

@@ -22,6 +22,7 @@
     "test:watch": "vitest",
     "dev:link": "node scripts/link-claude-dev-plugin.mjs",
     "dev:watch": "node scripts/watch-dist.mjs",
+    "diagnostics": "node scripts/diagnostics.mjs",
     "validate:plugin": "claude plugin validate .",
     "smoke:mcp": "node test/smoke-mcp.mjs",
     "test:reliability": "node test/reliability-matrix.mjs",
@@ -30,6 +31,8 @@
     "test:advanced": "node test/advanced-mcp.mjs",
     "test:dev-link": "node test/dev-link.mjs",
     "test:codex-runtime": "node test/codex-runtime-probe.mjs",
+    "test:app-server-contract": "node test/app-server-protocol-contract.mjs",
+    "test:real-matrix": "node test/real-compatibility-matrix.mjs",
     "test:claude-orchestration": "node test/claude-orchestration.mjs",
     "test:claude-autodiscovery": "node test/claude-autodiscovery.mjs",
     "test:claude-session-steering": "node test/claude-session-steering.mjs",
@@ -39,7 +42,7 @@
     "test:claude-real-session": "node test/claude-real-session.mjs",
     "test:real-soak": "node test/real-soak.mjs",
     "test:ci": "npm run build && npm test && npm run smoke:mcp && npm run test:reliability && npm run test:stress && npm run test:progress && npm run test:advanced && npm run test:dev-link",
-    "test:comprehensive": "npm run build && npm test && npm run smoke:mcp && npm run test:reliability && npm run test:stress && npm run test:progress && npm run test:advanced && npm run test:codex-runtime && npm run validate:plugin && npm run test:claude-desktop",
+    "test:comprehensive": "npm run build && npm test && npm run smoke:mcp && npm run test:reliability && npm run test:stress && npm run test:progress && npm run test:advanced && npm run test:codex-runtime && npm run test:app-server-contract && npm run test:real-matrix && npm run validate:plugin && npm run test:claude-desktop",
     "test:claude-desktop": "node test/claude-desktop-cli.mjs"
   },
   "keywords": [

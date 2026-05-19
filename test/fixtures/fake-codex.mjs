@@ -363,11 +363,18 @@ for await (const chunk of process.stdin) {
   prompt += chunk;
 }
 
-if (prompt.includes("IGNORE_SIGTERM")) {
-  process.on("SIGTERM", () => {});
-}
-
 recordCall({ protocol: "exec", prompt });
+
+if (prompt.includes("IGNORE_SIGTERM")) {
+  process.on("SIGTERM", () => {
+    recordCall({ protocol: "exec", method: "process/sigterm", prompt });
+  });
+} else {
+  process.once("SIGTERM", () => {
+    recordCall({ protocol: "exec", method: "process/sigterm", prompt });
+    process.exit(143);
+  });
+}
 
 const stdoutMatch = prompt.match(/BIG_STDOUT_CHARS=(\d+)/);
 if (stdoutMatch) {

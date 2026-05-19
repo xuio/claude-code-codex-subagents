@@ -7,6 +7,7 @@ type SessionStatus = "active" | "running" | "failed" | "cancelled";
 type SessionTurnKind = "prompt" | "steer";
 type SessionTurnStatus = "queued" | "running" | "completed" | "failed" | "cancelled";
 type SessionProtocol = "app-server" | "exec";
+type SessionWaitTimeoutReason = "wait_timeout" | "wait_cancelled";
 
 export interface CodexSessionTurnSnapshot {
   id: string;
@@ -41,6 +42,16 @@ export interface CodexSessionSnapshot {
   partial?: AgentRunPartial;
   lastResult?: AgentRunResult;
   error?: string;
+}
+
+export interface CodexSessionStats {
+  sessions: number;
+  active: number;
+  queuedTurns: number;
+  waiters: number;
+  maxSessions: number;
+  completedTtlSeconds: number;
+  idleTtlSeconds: number;
 }
 
 interface CodexSessionTurnRecord extends CodexSessionTurnSnapshot {
@@ -135,16 +146,58 @@ function shouldFallbackToExec(error: unknown, env: NodeJS.ProcessEnv = process.e
   return error instanceof AppServerUnavailableError || error instanceof Error;
 }
 
+function readPositiveInt(value: string | undefined, fallback: number, max: number): number {
+  const parsed = Number(value);
+  if (!Number.isInteger(parsed) || parsed < 1) return fallback;
+  return Math.min(parsed, max);
+}
+
 export class CodexSessionManager {
   private readonly sessions = new Map<string, CodexSessionRecord>();
+  private readonly completedTtlSeconds = readPositiveInt(
+    process.env.CODEX_SUBAGENTS_SESSION_COMPLETED_TTL_SECONDS,
+    3600,
+    86_400,
+  );
+  private readonly idleTtlSeconds = readPositiveInt(
+    process.env.CODEX_SUBAGENTS_SESSION_IDLE_TTL_SECONDS,
+    86_400,
+    604_800,
+  );
+  private readonly maxSessions = readPositiveInt(process.env.CODEX_SUBAGENTS_MAX_SESSIONS, 100, 1_000);
 
   list(): CodexSessionSnapshot[] {
+    this.prune();
     return [...this.sessions.values()].map(snapshot);
   }
 
   get(id: string): CodexSessionSnapshot | undefined {
+    this.prune();
     const session = this.sessions.get(id);
     return session ? snapshot(session) : undefined;
+  }
+
+  stats(): CodexSessionStats {
+    this.prune();
+    return {
+      sessions: this.sessions.size,
+      active: [...this.sessions.values()].filter((session) => Boolean(session.controller)).length,
+      queuedTurns: [...this.sessions.values()].reduce(
+        (count, session) => count + session.queuedTurns.length,
+        0,
+      ),
+      waiters: [...this.sessions.values()].reduce(
+        (count, session) =>
+          count +
+          session.waiters.size +
+          session.queuedTurns.reduce((turnCount, turn) => turnCount + turn.waiters.size, 0) +
+          (session.activeTurn?.waiters.size ?? 0),
+        0,
+      ),
+      maxSessions: this.maxSessions,
+      completedTtlSeconds: this.completedTtlSeconds,
+      idleTtlSeconds: this.idleTtlSeconds,
+    };
   }
 
   async start(
@@ -152,12 +205,22 @@ export class CodexSessionManager {
     metadata: { sessionName?: string } = {},
   ): Promise<{ session: CodexSessionSnapshot; result: AgentRunResult }> {
     const { session, turn } = this.createSession(options, metadata);
-    this.ensureDrain(session);
-    await this.waitForTurn(session, turn);
-    if (!turn.result) {
-      throw new Error(turn.error ?? `Codex session turn did not produce a result: ${turn.id}`);
+    const abortHandler = () => {
+      logger.warn("session.start_request_cancelled", { sessionId: session.id, turnId: turn.id });
+      this.cancel(session.id);
+    };
+    options.abortSignal?.addEventListener("abort", abortHandler, { once: true });
+    try {
+      if (options.abortSignal?.aborted) this.cancel(session.id);
+      this.ensureDrain(session);
+      await this.waitForTurn(session, turn);
+      if (!turn.result) {
+        throw new Error(turn.error ?? `Codex session turn did not produce a result: ${turn.id}`);
+      }
+      return { session: snapshot(session), result: turn.result };
+    } finally {
+      options.abortSignal?.removeEventListener("abort", abortHandler);
     }
-    return { session: snapshot(session), result: turn.result };
   }
 
   startAsync(
@@ -173,6 +236,7 @@ export class CodexSessionManager {
     options: AgentRunOptions,
     metadata: { sessionName?: string } = {},
   ): { session: CodexSessionRecord; turn: CodexSessionTurnRecord } {
+    this.prune();
     const now = new Date().toISOString();
     const { prompt: _prompt, abortSignal: _abortSignal, onSnapshot: _onSnapshot, ...baseOptions } = options;
     const session: CodexSessionRecord = {
@@ -220,6 +284,7 @@ export class CodexSessionManager {
       kind?: SessionTurnKind;
       priority?: "normal" | "front";
       interruptCurrent?: boolean;
+      waitSignal?: AbortSignal;
     } = {},
   ): Promise<{ session?: CodexSessionSnapshot; turn?: CodexSessionTurnSnapshot; result?: AgentRunResult; error?: string }> {
     const session = this.sessions.get(id);
@@ -264,7 +329,14 @@ export class CodexSessionManager {
     this.ensureDrain(session);
     if (!wait) return { session: snapshot(session), turn: turnSnapshot(turn) };
 
-    await this.waitForTurn(session, turn);
+    const completed = await this.waitForTurn(session, turn, options.waitSignal);
+    if (!completed) {
+      return {
+        session: snapshot(session),
+        turn: turnSnapshot(turn),
+        error: "Wait request was cancelled; the Codex session is still managed by this MCP server.",
+      };
+    }
     return { session: snapshot(session), turn: turnSnapshot(turn), result: turn.result, error: turn.error };
   }
 
@@ -272,7 +344,7 @@ export class CodexSessionManager {
     id: string,
     prompt: string,
     overrides: Omit<AgentRunOptions, "prompt" | "abortSignal" | "onSnapshot"> = {},
-    options: { wait?: boolean; interruptCurrent?: boolean } = {},
+    options: { wait?: boolean; interruptCurrent?: boolean; waitSignal?: AbortSignal } = {},
   ): Promise<{
     session?: CodexSessionSnapshot;
     turn?: CodexSessionTurnSnapshot;
@@ -310,7 +382,17 @@ export class CodexSessionManager {
             turn.updatedAt = new Date().toISOString();
             this.notifyTurn(turn);
             this.notifySession(session);
-            if (options.wait && session.activeTurn) await this.waitForTurn(session, session.activeTurn);
+            if (options.wait && session.activeTurn) {
+              const completed = await this.waitForTurn(session, session.activeTurn, options.waitSignal);
+              if (!completed) {
+                return {
+                  session: snapshot(session),
+                  turn: turnSnapshot(turn),
+                  delivery: "delivered_to_active_turn",
+                  error: "Wait request was cancelled; the Codex session is still managed by this MCP server.",
+                };
+              }
+            }
             return {
               session: snapshot(session),
               turn: turnSnapshot(turn),
@@ -330,6 +412,7 @@ export class CodexSessionManager {
       kind: "steer",
       priority: "front",
       interruptCurrent: options.interruptCurrent,
+      waitSignal: options.waitSignal,
     });
     return {
       ...response,
@@ -345,15 +428,26 @@ export class CodexSessionManager {
     id: string,
     timeoutMs: number,
     turnId?: string,
+    abortSignal?: AbortSignal,
   ): Promise<{
     session?: CodexSessionSnapshot;
     turn?: CodexSessionTurnSnapshot;
     completed?: boolean;
-    timeoutReason?: "wait_timeout";
+    timeoutReason?: SessionWaitTimeoutReason;
     error?: string;
   }> {
+    this.prune();
     const session = this.sessions.get(id);
     if (!session) return { error: `Unknown session_id: ${id}` };
+    if (abortSignal?.aborted) {
+      const turn = turnId ? this.findTurn(session, turnId) : undefined;
+      return {
+        session: snapshot(session),
+        turn: turn ? turnSnapshot(turn) : undefined,
+        completed: false,
+        timeoutReason: "wait_cancelled",
+      };
+    }
 
     const deadline = Date.now() + timeoutMs;
     while (Date.now() < deadline) {
@@ -369,13 +463,33 @@ export class CodexSessionManager {
 
       await new Promise<void>((resolve) => {
         const remaining = Math.max(1, deadline - Date.now());
-        const timeout = setTimeout(resolve, remaining);
-        const waiter = () => {
+        let finished = false;
+        let waiter: (() => void) | undefined;
+        let abortHandler: (() => void) | undefined;
+        const finish = () => {
+          if (finished) return;
+          finished = true;
           clearTimeout(timeout);
+          if (waiter) session.waiters.delete(waiter);
+          if (abortHandler) abortSignal?.removeEventListener("abort", abortHandler);
           resolve();
         };
+        const timeout = setTimeout(finish, remaining);
+        waiter = finish;
+        abortHandler = finish;
         session.waiters.add(waiter);
+        abortSignal?.addEventListener("abort", abortHandler, { once: true });
+        if (abortSignal?.aborted) finish();
       });
+      if (abortSignal?.aborted) {
+        const turn = turnId ? this.findTurn(session, turnId) : undefined;
+        return {
+          session: snapshot(session),
+          turn: turn ? turnSnapshot(turn) : undefined,
+          completed: false,
+          timeoutReason: "wait_cancelled",
+        };
+      }
     }
 
     const turn = turnId ? this.findTurn(session, turnId) : undefined;
@@ -414,6 +528,39 @@ export class CodexSessionManager {
     }
     this.notifySession(session);
     return snapshot(session);
+  }
+
+  async shutdown(reason = "shutdown"): Promise<CodexSessionSnapshot[]> {
+    logger.warn("session.shutdown", { reason, sessions: this.sessions.size });
+    const closePromises: Array<Promise<void>> = [];
+    const snapshots: CodexSessionSnapshot[] = [];
+    const now = new Date().toISOString();
+
+    for (const session of this.sessions.values()) {
+      session.cancelRequested = true;
+      for (const turn of session.queuedTurns) {
+        turn.status = "cancelled";
+        turn.updatedAt = now;
+        turn.error = `Session was cancelled during ${reason}.`;
+        this.notifyTurn(turn);
+      }
+      session.queuedTurns = [];
+      if (session.activeTurn && !terminal(session.activeTurn.status)) {
+        session.activeTurn.status = "cancelled";
+        session.activeTurn.updatedAt = now;
+        session.activeTurn.error = `Session was cancelled during ${reason}.`;
+        this.notifyTurn(session.activeTurn);
+      }
+      session.status = "cancelled";
+      session.updatedAt = now;
+      if (session.controller) session.controller.abort();
+      if (session.appServer) closePromises.push(session.appServer.close("cancelled").catch(() => {}));
+      this.notifySession(session);
+      snapshots.push(snapshot(session));
+    }
+
+    await Promise.allSettled(closePromises);
+    return snapshots;
   }
 
   private enqueueTurn(
@@ -669,13 +816,36 @@ export class CodexSessionManager {
       session.recentTurns.find((turn) => turn.id === turnId);
   }
 
-  private async waitForTurn(session: CodexSessionRecord, turn: CodexSessionTurnRecord): Promise<void> {
+  private async waitForTurn(
+    session: CodexSessionRecord,
+    turn: CodexSessionTurnRecord,
+    abortSignal?: AbortSignal,
+  ): Promise<boolean> {
     while (!terminal(turn.status)) {
+      if (abortSignal?.aborted) return false;
       await new Promise<void>((resolve) => {
-        turn.waiters.add(resolve);
-        session.waiters.add(resolve);
+        let finished = false;
+        let waiter: (() => void) | undefined;
+        let abortHandler: (() => void) | undefined;
+        const finish = () => {
+          if (finished) return;
+          finished = true;
+          if (waiter) {
+            turn.waiters.delete(waiter);
+            session.waiters.delete(waiter);
+          }
+          if (abortHandler) abortSignal?.removeEventListener("abort", abortHandler);
+          resolve();
+        };
+        waiter = finish;
+        abortHandler = finish;
+        turn.waiters.add(waiter);
+        session.waiters.add(waiter);
+        abortSignal?.addEventListener("abort", abortHandler, { once: true });
+        if (abortSignal?.aborted) finish();
       });
     }
+    return true;
   }
 
   private async waitForAppServerActiveTurn(
@@ -699,6 +869,43 @@ export class CodexSessionManager {
   private notifySession(session: CodexSessionRecord): void {
     for (const waiter of session.waiters) waiter();
     session.waiters.clear();
+  }
+
+  private prune(): void {
+    const now = Date.now();
+    const completedTtlMs = this.completedTtlSeconds * 1000;
+    const idleTtlMs = this.idleTtlSeconds * 1000;
+    for (const [id, session] of this.sessions) {
+      if (!this.isPrunable(session)) continue;
+      const ageMs = now - Date.parse(session.updatedAt);
+      const ttlMs = session.status === "active" ? idleTtlMs : completedTtlMs;
+      if (ageMs > ttlMs) this.pruneSession(id, session, "ttl");
+    }
+
+    if (this.sessions.size <= this.maxSessions) return;
+    const candidates = [...this.sessions.entries()]
+      .filter(([, session]) => this.isPrunable(session))
+      .sort(([, left], [, right]) => Date.parse(left.updatedAt) - Date.parse(right.updatedAt));
+    for (const [id, session] of candidates) {
+      if (this.sessions.size <= this.maxSessions) break;
+      this.pruneSession(id, session, "max_sessions");
+    }
+  }
+
+  private isPrunable(session: CodexSessionRecord): boolean {
+    return (
+      !session.controller &&
+      !session.draining &&
+      session.queuedTurns.length === 0 &&
+      (session.status === "active" || session.status === "failed" || session.status === "cancelled")
+    );
+  }
+
+  private pruneSession(id: string, session: CodexSessionRecord, reason: "ttl" | "max_sessions"): void {
+    logger.warn("session.pruned", { sessionId: id, reason, status: session.status });
+    this.sessions.delete(id);
+    void session.appServer?.close("cancelled").catch(() => {});
+    this.notifySession(session);
   }
 }
 
