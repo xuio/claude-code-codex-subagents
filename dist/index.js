@@ -22929,6 +22929,568 @@ function isParallelResult(value) {
   );
 }
 
+// src/app-server.ts
+import { spawn as spawn2 } from "node:child_process";
+import { stat as stat2 } from "node:fs/promises";
+var AppServerUnavailableError = class extends Error {
+  constructor(message) {
+    super(message);
+    this.name = "AppServerUnavailableError";
+  }
+};
+var LimitedText2 = class {
+  constructor(maxChars) {
+    this.maxChars = maxChars;
+  }
+  maxChars;
+  value = "";
+  truncatedCount = 0;
+  append(chunk) {
+    const remaining = this.maxChars - this.value.length;
+    if (remaining > 0) this.value += chunk.slice(0, remaining);
+    if (chunk.length > remaining) this.truncatedCount += chunk.length - Math.max(0, remaining);
+  }
+  text() {
+    return this.value;
+  }
+  truncated() {
+    return this.truncatedCount;
+  }
+};
+function userText(text) {
+  return { type: "text", text, text_elements: [] };
+}
+function sandboxPolicy(options) {
+  if (options.dangerouslyBypassApprovalsAndSandbox) return { type: "dangerFullAccess" };
+  switch (options.sandbox ?? "read-only") {
+    case "danger-full-access":
+      return { type: "dangerFullAccess" };
+    case "workspace-write":
+      return {
+        type: "workspaceWrite",
+        writableRoots: [],
+        networkAccess: false,
+        excludeTmpdirEnvVar: false,
+        excludeSlashTmp: false
+      };
+    default:
+      return { type: "readOnly", networkAccess: false };
+  }
+}
+function sandboxMode(options) {
+  if (options.dangerouslyBypassApprovalsAndSandbox) return "danger-full-access";
+  return options.sandbox ?? "read-only";
+}
+function appServerConfig(options, reasoningEffort) {
+  const config2 = {
+    model_reasoning_effort: reasoningEffort
+  };
+  if (options.modelVerbosity) config2.model_verbosity = options.modelVerbosity;
+  if (options.reasoningSummary) config2.model_reasoning_summary = options.reasoningSummary;
+  if (options.serviceTier) config2.service_tier = options.serviceTier;
+  if (options.subagentRuntime?.maxThreads !== void 0) {
+    config2.agents = {
+      ...typeof config2.agents === "object" && config2.agents ? config2.agents : {},
+      max_threads: options.subagentRuntime.maxThreads
+    };
+  }
+  if (options.subagentRuntime?.maxDepth !== void 0) {
+    config2.agents = {
+      ...typeof config2.agents === "object" && config2.agents ? config2.agents : {},
+      max_depth: options.subagentRuntime.maxDepth
+    };
+  }
+  if (options.subagentRuntime?.jobMaxRuntimeSeconds !== void 0) {
+    config2.agents = {
+      ...typeof config2.agents === "object" && config2.agents ? config2.agents : {},
+      job_max_runtime_seconds: options.subagentRuntime.jobMaxRuntimeSeconds
+    };
+  }
+  return config2;
+}
+function hasTurnErrorStatus(status) {
+  return status === "failed" || status === "interrupted";
+}
+function resultStatusFromTurn(status) {
+  if (status === "completed") return "completed";
+  if (status === "interrupted") return "cancelled";
+  return "failed";
+}
+function makeSummary(includeEvents, threadId) {
+  return {
+    counts: {},
+    threadId,
+    commands: [],
+    errors: [],
+    events: includeEvents ? [] : void 0
+  };
+}
+function cloneSummary(summary) {
+  return redactJsonValue({
+    counts: { ...summary.counts },
+    threadId: summary.threadId,
+    usage: summary.usage,
+    commands: summary.commands.map((command) => ({ ...command })),
+    errors: [...summary.errors],
+    lastAgentMessage: summary.lastAgentMessage,
+    events: summary.events ? [...summary.events] : void 0
+  });
+}
+function truncate2(text, maxChars) {
+  if (text.length <= maxChars) return { text, truncatedChars: 0 };
+  return { text: text.slice(0, maxChars), truncatedChars: text.length - maxChars };
+}
+var CodexAppServerSession = class _CodexAppServerSession {
+  constructor(child, codexBinary, cwd, threadId, preparedSubagents, env) {
+    this.child = child;
+    this.codexBinary = codexBinary;
+    this.cwd = cwd;
+    this.threadId = threadId;
+    this.preparedSubagents = preparedSubagents;
+    this.env = env;
+    this.child.stdout.setEncoding("utf8");
+    this.child.stderr.setEncoding("utf8");
+    this.child.stdout.on("data", (chunk) => this.handleStdout(chunk));
+    this.child.stderr.on("data", (chunk) => this.handleStderr(chunk));
+    this.child.once("error", (error2) => {
+      this.spawnError = error2;
+      this.rejectAll(new AppServerUnavailableError(`Codex app-server failed: ${error2.message}`));
+    });
+    this.child.once("close", (code, signal) => {
+      this.closed = true;
+      logger.warn("codex.app_server.closed", { appServerId: this.id, exitCode: code, signal });
+      this.rejectAll(new AppServerUnavailableError(`Codex app-server exited with code ${code ?? "null"} signal ${signal ?? "null"}.`));
+    });
+  }
+  child;
+  codexBinary;
+  cwd;
+  threadId;
+  preparedSubagents;
+  env;
+  id = makeLogId("appserver");
+  pending = /* @__PURE__ */ new Map();
+  notificationHandlers = /* @__PURE__ */ new Set();
+  lineBuffer = "";
+  requestCounter = 0;
+  activeTurn;
+  closed = false;
+  spawnError;
+  static async create(options) {
+    const mergedEnv = { ...process.env, ...options.env };
+    const cwd = await resolveWorkingDirectory(options.projectDir ?? options.cwd, mergedEnv);
+    const codexBinary = resolveCodexBinary({
+      explicitPath: options.codexBin,
+      env: mergedEnv
+    });
+    const info = await stat2(cwd);
+    if (!info.isDirectory()) throw new Error(`Codex working directory is not a directory: ${cwd}`);
+    const preparedSubagents = await prepareSubagents({
+      definitions: options.codexSubagents,
+      tasks: options.subagentTasks,
+      env: options.env,
+      isolatedCodexHome: options.isolatedCodexHome,
+      mcpConfigPolicy: options.mcpConfigPolicy,
+      codexMcpServers: options.codexMcpServers,
+      projectDir: cwd
+    });
+    const childEnv = sanitizeChildEnv({ ...mergedEnv, ...preparedSubagents.env }, options.forwardSensitiveEnv);
+    const child = spawn2(codexBinary.path, ["app-server", "--listen", "stdio://"], {
+      cwd,
+      env: childEnv,
+      stdio: ["pipe", "pipe", "pipe"],
+      shell: false,
+      detached: process.platform !== "win32"
+    });
+    const session = new _CodexAppServerSession(child, codexBinary, cwd, "", preparedSubagents, childEnv);
+    logger.rawDebug("codex.app_server.spawn", {
+      appServerId: session.id,
+      binary: codexBinary,
+      cwd,
+      args: ["app-server", "--listen", "stdio://"]
+    });
+    try {
+      await session.initialize(options.spawnTimeoutMs ?? 1e4);
+      const { model, reasoningEffort } = validateRunConfiguration(options, childEnv);
+      const thread = await session.request("thread/start", {
+        cwd,
+        model,
+        serviceTier: options.serviceTier ?? null,
+        approvalPolicy: "never",
+        sandbox: sandboxMode(options),
+        config: appServerConfig(options, reasoningEffort),
+        serviceName: "claude-code-codex-subagents",
+        ephemeral: options.ephemeral ?? false,
+        threadSource: "subagent"
+      }, options.spawnTimeoutMs ?? 3e4);
+      const threadId = thread.thread?.id;
+      if (!threadId) throw new AppServerUnavailableError("Codex app-server did not return a thread id.");
+      session.threadId = threadId;
+      return session;
+    } catch (error2) {
+      await session.close();
+      throw error2;
+    }
+  }
+  async initialize(timeoutMs) {
+    await this.request("initialize", {
+      clientInfo: { name: "claude-code-codex-subagents", version: "0.1.1" },
+      capabilities: null
+    }, timeoutMs);
+  }
+  get activeTurnId() {
+    return this.activeTurn?.turnId;
+  }
+  async startTurn(options, abortSignal, onSnapshot) {
+    if (this.activeTurn) throw new Error(`Codex app-server already has an active turn: ${this.activeTurn.turnId}`);
+    const started = Date.now();
+    const maxOutputChars = options.maxOutputChars ?? 6e4;
+    const { model, reasoningEffort, reasoningSummary } = validateRunConfiguration(options, this.env);
+    const summary = makeSummary(options.includeEvents, this.threadId);
+    const stdout = new LimitedText2(maxOutputChars);
+    const stderr = new LimitedText2(Math.min(maxOutputChars, 2e4));
+    let timeout;
+    let idleTimeout;
+    let abortHandler;
+    let timedOut = false;
+    let timeoutReason;
+    const prompt = `${this.preparedSubagents.promptPrefix}${options.prompt}`;
+    const turnResponse = await this.request("turn/start", {
+      threadId: this.threadId,
+      input: [userText(prompt)],
+      cwd: this.cwd,
+      approvalPolicy: "never",
+      sandboxPolicy: sandboxPolicy(options),
+      model,
+      serviceTier: options.serviceTier ?? null,
+      effort: reasoningEffort,
+      summary: reasoningSummary ?? null
+    }, options.spawnTimeoutMs ?? 3e4);
+    const turnId = turnResponse.turn?.id;
+    if (!turnId) throw new AppServerUnavailableError("Codex app-server did not return a turn id.");
+    logger.rawDebug("codex.app_server.turn.start", {
+      appServerId: this.id,
+      threadId: this.threadId,
+      turnId,
+      prompt: summarizeRawTrafficForLog(prompt)
+    });
+    const finish = (status, error2) => {
+      const final = truncate2(redactSensitiveText(summary.lastAgentMessage ?? ""), maxOutputChars);
+      const result2 = {
+        name: options.name,
+        ok: status === "completed",
+        status,
+        durationMs: Date.now() - started,
+        codexBinary: this.codexBinary,
+        cwd: this.cwd,
+        model: resolveRequestedModel(options, this.env),
+        modelPreset: options.modelPreset,
+        reasoningEffort: options.reasoningEffort ?? defaultReasoningEffort(this.env),
+        sandbox: options.sandbox ?? "read-only",
+        dangerouslyBypassApprovalsAndSandbox: Boolean(options.dangerouslyBypassApprovalsAndSandbox),
+        serviceTier: options.serviceTier,
+        exitCode: status === "completed" ? 0 : null,
+        signal: null,
+        finalMessage: final.text,
+        stderr: redactSensitiveText(stderr.text() || error2 || ""),
+        stdoutTail: redactSensitiveText(stdout.text()),
+        truncated: {
+          stdoutChars: stdout.truncated(),
+          stderrChars: stderr.truncated(),
+          finalMessageChars: final.truncatedChars
+        },
+        eventSummary: cloneSummary(summary),
+        commandPreview: [this.codexBinary.path, "app-server", "--listen", "stdio://", "turn/start"],
+        timeoutReason,
+        codexSubagents: {
+          customAgents: this.preparedSubagents.names,
+          requestedTasks: options.subagentTasks?.length ?? 0,
+          tempCodexHomeUsed: Boolean(this.preparedSubagents.tempCodexHome)
+        }
+      };
+      logger[result2.ok ? "rawInfo" : "rawError"]("codex.app_server.turn.finish", {
+        appServerId: this.id,
+        threadId: this.threadId,
+        turnId,
+        status,
+        finalMessage: summarizeRawTrafficForLog(result2.finalMessage),
+        eventSummary: summarizeRawTrafficForLog(summary)
+      });
+      return result2;
+    };
+    const result = await new Promise((resolve) => {
+      const publishSnapshot = (force = false) => {
+        if (!onSnapshot) return;
+        const active = this.activeTurn;
+        if (!active) return;
+        const now = Date.now();
+        if (!force && now - active.lastSnapshotAt < 500) return;
+        active.lastSnapshotAt = now;
+        onSnapshot({
+          name: options.name,
+          status: timedOut ? "timeout" : "running",
+          durationMs: Date.now() - started,
+          cwd: this.cwd,
+          stdoutTail: redactSensitiveText(stdout.text()),
+          stderrTail: redactSensitiveText(stderr.text()),
+          lastAgentMessage: summary.lastAgentMessage ? redactSensitiveText(summary.lastAgentMessage) : void 0,
+          eventSummary: cloneSummary(summary)
+        });
+      };
+      this.activeTurn = {
+        turnId,
+        started,
+        options,
+        stdout,
+        stderr,
+        summary,
+        finalMessage: "",
+        resolve,
+        publishSnapshot,
+        lastSnapshotAt: 0
+      };
+      publishSnapshot(true);
+      const interrupt = (reason) => {
+        if (reason === "timeout" || reason === "idle_timeout") {
+          timedOut = true;
+          timeoutReason = reason;
+        }
+        void this.interrupt(turnId).catch((error2) => {
+          summary.errors.push(`Codex app-server interrupt failed: ${error2.message}`);
+          resolve(finish(reason === "cancelled" ? "cancelled" : "timeout", error2.message));
+        });
+        publishSnapshot(true);
+      };
+      abortHandler = () => interrupt("cancelled");
+      abortSignal?.addEventListener("abort", abortHandler, { once: true });
+      if (abortSignal?.aborted) interrupt("cancelled");
+      const resetIdleTimeout = () => {
+        if (!options.idleTimeoutMs) return;
+        if (idleTimeout) clearTimeout(idleTimeout);
+        idleTimeout = setTimeout(() => interrupt("idle_timeout"), options.idleTimeoutMs);
+        idleTimeout.unref();
+      };
+      resetIdleTimeout();
+      timeout = setTimeout(() => interrupt("timeout"), options.timeoutMs ?? 6e5);
+      timeout.unref();
+    });
+    if (timeout) clearTimeout(timeout);
+    if (idleTimeout) clearTimeout(idleTimeout);
+    if (abortHandler) abortSignal?.removeEventListener("abort", abortHandler);
+    this.activeTurn = void 0;
+    return result;
+  }
+  async steer(prompt) {
+    const turnId = this.activeTurn?.turnId;
+    if (!turnId) return { delivered: false };
+    const response = await this.request("turn/steer", {
+      threadId: this.threadId,
+      expectedTurnId: turnId,
+      input: [userText(prompt)]
+    }, 1e4);
+    return { delivered: true, turnId: response.turnId ?? turnId };
+  }
+  async interrupt(turnId = this.activeTurn?.turnId) {
+    if (!turnId) return;
+    await this.request("turn/interrupt", {
+      threadId: this.threadId,
+      turnId
+    }, 1e4);
+  }
+  async close() {
+    this.closed = true;
+    this.rejectAll(new AppServerUnavailableError("Codex app-server session was closed."));
+    try {
+      this.child.kill("SIGTERM");
+    } catch {
+    }
+    await this.preparedSubagents.cleanup().catch(() => {
+    });
+  }
+  request(method, params, timeoutMs) {
+    if (this.closed || this.spawnError) {
+      return Promise.reject(
+        new AppServerUnavailableError(this.spawnError?.message ?? "Codex app-server is closed.")
+      );
+    }
+    const id = `${Date.now().toString(36)}-${++this.requestCounter}`;
+    const payload = { id, method, params };
+    logger.rawDebug("codex.app_server.request", {
+      appServerId: this.id,
+      payload: summarizeRawTrafficForLog(payload)
+    });
+    return new Promise((resolve, reject) => {
+      const timeout = setTimeout(() => {
+        this.pending.delete(id);
+        reject(new AppServerUnavailableError(`Codex app-server request timed out: ${method}`));
+      }, timeoutMs);
+      timeout.unref();
+      this.pending.set(id, { method, resolve, reject, timeout });
+      this.child.stdin.write(`${JSON.stringify(payload)}
+`, (error2) => {
+        if (!error2) return;
+        clearTimeout(timeout);
+        this.pending.delete(id);
+        reject(new AppServerUnavailableError(`Codex app-server stdin write failed: ${error2.message}`));
+      });
+    });
+  }
+  handleStdout(chunk) {
+    logger.rawDebug("codex.app_server.stdout", {
+      appServerId: this.id,
+      chunk: summarizeRawTrafficForLog(chunk)
+    });
+    this.lineBuffer += chunk;
+    let newlineIndex = this.lineBuffer.indexOf("\n");
+    while (newlineIndex >= 0) {
+      const line = this.lineBuffer.slice(0, newlineIndex);
+      this.lineBuffer = this.lineBuffer.slice(newlineIndex + 1);
+      this.handleLine(line);
+      newlineIndex = this.lineBuffer.indexOf("\n");
+    }
+  }
+  handleStderr(chunk) {
+    logger.rawDebug("codex.app_server.stderr", {
+      appServerId: this.id,
+      chunk: summarizeRawTrafficForLog(chunk)
+    });
+    this.activeTurn?.stderr.append(chunk);
+    this.activeTurn?.publishSnapshot(true);
+  }
+  handleLine(line) {
+    if (!line.trim()) return;
+    let message;
+    try {
+      message = JSON.parse(line);
+    } catch {
+      this.activeTurn?.summary.errors.push(`Unparseable Codex app-server line: ${line.slice(0, 500)}`);
+      return;
+    }
+    const id = typeof message.id === "string" || typeof message.id === "number" ? String(message.id) : void 0;
+    if (id && this.pending.has(id)) {
+      const pending = this.pending.get(id);
+      if (!pending) return;
+      this.pending.delete(id);
+      clearTimeout(pending.timeout);
+      if (message.error) {
+        pending.reject(new AppServerUnavailableError(JSON.stringify(message.error)));
+      } else {
+        pending.resolve(message.result);
+      }
+      return;
+    }
+    if (typeof message.method === "string" && id) {
+      this.respondToServerRequest(id, message.method);
+      return;
+    }
+    if (typeof message.method === "string") {
+      this.handleNotification(message);
+    }
+  }
+  respondToServerRequest(id, method) {
+    const result = method.includes("requestApproval") ? { decision: "decline" } : method.includes("requestUserInput") ? { answers: {} } : method.includes("elicitation/request") ? { action: "decline", content: null } : method.includes("tool/call") ? { contentItems: [], success: false } : {};
+    this.child.stdin.write(`${JSON.stringify({ id, result })}
+`);
+  }
+  handleNotification(message) {
+    for (const handler of this.notificationHandlers) handler(message);
+    const method = message.method;
+    const params = message.params;
+    const active = this.activeTurn;
+    if (!active) return;
+    active.stdout.append(`${JSON.stringify(message)}
+`);
+    active.summary.counts[method] = (active.summary.counts[method] ?? 0) + 1;
+    if (active.summary.events) active.summary.events.push(message);
+    const turnId = typeof params?.turnId === "string" ? params.turnId : typeof params?.turn?.id === "string" ? (params?.turn).id : void 0;
+    if (turnId && turnId !== active.turnId) return;
+    if (method === "thread/tokenUsage/updated") {
+      active.summary.usage = params?.tokenUsage ?? params;
+    }
+    if (method === "item/agentMessage/delta" && typeof params?.delta === "string") {
+      active.finalMessage += params.delta;
+      active.summary.lastAgentMessage = active.finalMessage;
+    }
+    if (method === "item/completed") {
+      const item = params?.item;
+      if (item?.type === "agentMessage" && typeof item.text === "string") {
+        active.finalMessage = item.text;
+        active.summary.lastAgentMessage = item.text;
+      }
+      if (item?.type === "commandExecution") {
+        active.summary.commands.push({
+          command: typeof item.command === "string" ? item.command : void 0,
+          status: typeof item.status === "string" ? item.status : void 0
+        });
+      }
+    }
+    if (method === "error") {
+      active.summary.errors.push(JSON.stringify(params ?? message));
+    }
+    if (method === "turn/completed") {
+      const turn = params?.turn;
+      const status = resultStatusFromTurn(turn?.status);
+      if (hasTurnErrorStatus(turn?.status) && turn?.error) {
+        active.summary.errors.push(JSON.stringify(turn.error));
+      }
+      active.completed = true;
+      active.status = status;
+      active.resolve(this.finishActiveTurn(status));
+      return;
+    }
+    active.publishSnapshot();
+  }
+  finishActiveTurn(status) {
+    const active = this.activeTurn;
+    if (!active) throw new Error("No active app-server turn to finish.");
+    const maxOutputChars = active.options.maxOutputChars ?? 6e4;
+    const final = truncate2(redactSensitiveText(active.summary.lastAgentMessage ?? ""), maxOutputChars);
+    return {
+      name: active.options.name,
+      ok: status === "completed",
+      status,
+      durationMs: Date.now() - active.started,
+      codexBinary: this.codexBinary,
+      cwd: this.cwd,
+      model: resolveRequestedModel(active.options, this.env),
+      modelPreset: active.options.modelPreset,
+      reasoningEffort: active.options.reasoningEffort ?? defaultReasoningEffort(this.env),
+      sandbox: active.options.sandbox ?? "read-only",
+      dangerouslyBypassApprovalsAndSandbox: Boolean(active.options.dangerouslyBypassApprovalsAndSandbox),
+      serviceTier: active.options.serviceTier,
+      exitCode: status === "completed" ? 0 : null,
+      signal: null,
+      finalMessage: final.text,
+      stderr: redactSensitiveText(active.stderr.text()),
+      stdoutTail: redactSensitiveText(active.stdout.text()),
+      truncated: {
+        stdoutChars: active.stdout.truncated(),
+        stderrChars: active.stderr.truncated(),
+        finalMessageChars: final.truncatedChars
+      },
+      eventSummary: cloneSummary(active.summary),
+      commandPreview: [this.codexBinary.path, "app-server", "--listen", "stdio://", "turn/start"],
+      codexSubagents: {
+        customAgents: this.preparedSubagents.names,
+        requestedTasks: active.options.subagentTasks?.length ?? 0,
+        tempCodexHomeUsed: Boolean(this.preparedSubagents.tempCodexHome)
+      }
+    };
+  }
+  rejectAll(error2) {
+    for (const [id, pending] of this.pending) {
+      clearTimeout(pending.timeout);
+      pending.reject(error2);
+      this.pending.delete(id);
+    }
+    if (this.activeTurn) {
+      this.activeTurn.summary.errors.push(error2.message);
+      this.activeTurn.resolve(this.finishActiveTurn("failed"));
+      this.activeTurn = void 0;
+    }
+  }
+};
+
 // src/sessions.ts
 function withoutUndefined(value) {
   return Object.fromEntries(
@@ -22958,6 +23520,8 @@ function snapshot2(session) {
     projectDir: session.projectDir,
     cwd: session.cwd,
     codexThreadId: session.codexThreadId,
+    protocol: session.protocol,
+    supportsRealSteering: session.protocol === "app-server" && Boolean(session.appServer),
     turns: session.turns,
     active: Boolean(session.controller),
     activeTurn: session.activeTurn ? turnSnapshot(session.activeTurn) : void 0,
@@ -22970,6 +23534,13 @@ function snapshot2(session) {
 }
 function terminal(status) {
   return status === "completed" || status === "failed" || status === "cancelled";
+}
+function defaultSessionProtocol(env = process.env) {
+  return env.CODEX_SUBAGENTS_SESSION_PROTOCOL === "exec" ? "exec" : "app-server";
+}
+function shouldFallbackToExec(error2, env = process.env) {
+  if (env.CODEX_SUBAGENTS_DISABLE_EXEC_FALLBACK === "1") return false;
+  return error2 instanceof AppServerUnavailableError || error2 instanceof Error;
 }
 var CodexSessionManager = class {
   sessions = /* @__PURE__ */ new Map();
@@ -23005,6 +23576,7 @@ var CodexSessionManager = class {
       updatedAt: now,
       projectDir: options.projectDir,
       cwd: options.cwd,
+      protocol: defaultSessionProtocol(),
       turns: 0,
       baseOptions: {
         ...baseOptions,
@@ -23080,6 +23652,38 @@ var CodexSessionManager = class {
       return { error: `Unknown session_id: ${id}` };
     }
     const wasActive = Boolean(session.controller);
+    if (session.protocol === "app-server" && session.appServer && session.activeTurn && !options.interruptCurrent) {
+      const turn = this.recordSteerDelivery(session, prompt);
+      try {
+        const delivered = await session.appServer.steer(prompt);
+        turn.status = delivered.delivered ? "completed" : "failed";
+        turn.resultOk = delivered.delivered;
+        turn.resultStatus = delivered.delivered ? "completed" : "failed";
+        turn.error = delivered.delivered ? void 0 : "No active Codex app-server turn accepted steering.";
+        turn.updatedAt = (/* @__PURE__ */ new Date()).toISOString();
+        this.notifyTurn(turn);
+        this.notifySession(session);
+        if (options.wait && session.activeTurn) await this.waitForTurn(session, session.activeTurn);
+        return {
+          session: snapshot2(session),
+          turn: turnSnapshot(turn),
+          delivery: delivered.delivered ? "delivered_to_active_turn" : "queued_after_current",
+          error: turn.error
+        };
+      } catch (error2) {
+        logger.error("session.steer_app_server_failed", {
+          sessionId: id,
+          error: errorForLog(error2)
+        });
+        turn.status = "failed";
+        turn.error = error2 instanceof Error ? error2.message : String(error2);
+        turn.resultOk = false;
+        turn.resultStatus = "failed";
+        turn.updatedAt = (/* @__PURE__ */ new Date()).toISOString();
+        this.notifyTurn(turn);
+        this.notifySession(session);
+      }
+    }
     const response = await this.send(id, prompt, overrides, {
       wait: options.wait,
       kind: "steer",
@@ -23140,10 +23744,12 @@ var CodexSessionManager = class {
     if (session.controller) {
       session.status = "cancelled";
       session.updatedAt = (/* @__PURE__ */ new Date()).toISOString();
+      void session.appServer?.close();
       session.controller.abort();
     } else {
       session.status = "cancelled";
       session.updatedAt = (/* @__PURE__ */ new Date()).toISOString();
+      void session.appServer?.close();
     }
     this.notifySession(session);
     return snapshot2(session);
@@ -23169,6 +23775,20 @@ var CodexSessionManager = class {
       turn: summarizeRawTrafficForLog(turnSnapshot(turn)),
       queuedTurns: session.queuedTurns.length
     });
+    this.notifySession(session);
+    return turn;
+  }
+  recordSteerDelivery(session, prompt) {
+    const turn = this.enqueueTurn(session, {
+      prompt,
+      overrides: {},
+      kind: "steer",
+      priority: "front"
+    });
+    const index = session.queuedTurns.indexOf(turn);
+    if (index >= 0) session.queuedTurns.splice(index, 1);
+    turn.status = "running";
+    turn.updatedAt = (/* @__PURE__ */ new Date()).toISOString();
     this.notifySession(session);
     return turn;
   }
@@ -23216,7 +23836,7 @@ var CodexSessionManager = class {
       ...session.baseOptions,
       ...withoutUndefined(turn.overrides),
       prompt: turn.prompt,
-      resumeSessionId: session.codexThreadId,
+      resumeSessionId: session.protocol === "exec" ? session.codexThreadId : void 0,
       ephemeral: false
     };
     const controller = new AbortController();
@@ -23235,46 +23855,8 @@ var CodexSessionManager = class {
       resumeLast: options.resumeLast
     });
     try {
-      const result = await runQueuedAgent(
-        {
-          ...options,
-          abortSignal: controller.signal
-        },
-        {
-          onSnapshot: (partial2) => {
-            session.partial = partial2;
-            session.updatedAt = (/* @__PURE__ */ new Date()).toISOString();
-            logger.rawDebug("session.turn.partial", {
-              sessionId: session.id,
-              partial: summarizeRawTrafficForLog(partial2)
-            });
-          }
-        }
-      );
-      session.turns += 1;
-      session.lastResult = result;
-      session.codexThreadId = result.eventSummary.threadId ?? session.codexThreadId;
-      session.projectDir = result.cwd;
-      session.cwd = result.cwd;
-      session.baseOptions = {
-        ...session.baseOptions,
-        projectDir: result.cwd,
-        cwd: void 0
-      };
-      turn.result = result;
-      turn.resultOk = result.ok;
-      turn.resultStatus = result.status;
-      turn.status = result.ok ? "completed" : result.status === "cancelled" ? "cancelled" : "failed";
-      turn.updatedAt = (/* @__PURE__ */ new Date()).toISOString();
-      session.status = result.ok ? "active" : result.status === "cancelled" && session.queuedTurns.length > 0 && !session.cancelRequested ? "running" : result.status === "cancelled" ? "cancelled" : "failed";
-      session.updatedAt = (/* @__PURE__ */ new Date()).toISOString();
-      logger.rawInfo("session.turn.finish", {
-        session: summarizeRawTrafficForLog(snapshot2(session)),
-        turn: summarizeRawTrafficForLog(turnSnapshot(turn)),
-        result: summarizeRawTrafficForLog(result)
-      });
-      this.notifyTurn(turn);
-      this.notifySession(session);
+      const result = session.protocol === "app-server" ? await this.runAppServerTurn(session, options, controller) : await this.runExecTurn(session, options, controller);
+      this.completeTurn(session, turn, result);
       return result;
     } catch (error2) {
       session.status = controller.signal.aborted ? "cancelled" : "failed";
@@ -23296,6 +23878,86 @@ var CodexSessionManager = class {
       session.activeTurn = void 0;
       this.notifySession(session);
     }
+  }
+  async runExecTurn(session, options, controller) {
+    return runQueuedAgent(
+      {
+        ...options,
+        abortSignal: controller.signal
+      },
+      {
+        onSnapshot: (partial2) => {
+          session.partial = partial2;
+          session.updatedAt = (/* @__PURE__ */ new Date()).toISOString();
+          logger.rawDebug("session.turn.partial", {
+            sessionId: session.id,
+            partial: summarizeRawTrafficForLog(partial2)
+          });
+        }
+      }
+    );
+  }
+  async runAppServerTurn(session, options, controller) {
+    try {
+      if (!session.appServer) {
+        session.appServer = await CodexAppServerSession.create(options);
+        session.codexThreadId = session.appServer.threadId;
+      }
+      return await session.appServer.startTurn(
+        options,
+        controller.signal,
+        (partial2) => {
+          session.partial = partial2;
+          session.updatedAt = (/* @__PURE__ */ new Date()).toISOString();
+          logger.rawDebug("session.turn.partial", {
+            sessionId: session.id,
+            partial: summarizeRawTrafficForLog(partial2)
+          });
+        }
+      );
+    } catch (error2) {
+      if (session.turns === 0 && shouldFallbackToExec(error2)) {
+        logger.warn("session.app_server_fallback_to_exec", {
+          sessionId: session.id,
+          error: errorForLog(error2)
+        });
+        await session.appServer?.close().catch(() => {
+        });
+        session.appServer = void 0;
+        session.protocol = "exec";
+        return this.runExecTurn(session, {
+          ...options,
+          resumeSessionId: void 0
+        }, controller);
+      }
+      throw error2;
+    }
+  }
+  completeTurn(session, turn, result) {
+    session.turns += 1;
+    session.lastResult = result;
+    session.codexThreadId = result.eventSummary.threadId ?? session.codexThreadId;
+    session.projectDir = result.cwd;
+    session.cwd = result.cwd;
+    session.baseOptions = {
+      ...session.baseOptions,
+      projectDir: result.cwd,
+      cwd: void 0
+    };
+    turn.result = result;
+    turn.resultOk = result.ok;
+    turn.resultStatus = result.status;
+    turn.status = result.ok ? "completed" : result.status === "cancelled" ? "cancelled" : "failed";
+    turn.updatedAt = (/* @__PURE__ */ new Date()).toISOString();
+    session.status = result.ok ? "active" : result.status === "cancelled" && session.queuedTurns.length > 0 && !session.cancelRequested ? "running" : result.status === "cancelled" ? "cancelled" : "failed";
+    session.updatedAt = (/* @__PURE__ */ new Date()).toISOString();
+    logger.rawInfo("session.turn.finish", {
+      session: summarizeRawTrafficForLog(snapshot2(session)),
+      turn: summarizeRawTrafficForLog(turnSnapshot(turn)),
+      result: summarizeRawTrafficForLog(result)
+    });
+    this.notifyTurn(turn);
+    this.notifySession(session);
   }
   findTurn(session, turnId) {
     if (session.activeTurn?.id === turnId) return session.activeTurn;
@@ -23329,10 +23991,10 @@ var usageGuide = [
   "Tool choice:",
   '- Prefer ask_codex for one delegated Codex task. This is the clearest front door for normal "ask Codex" or "Codex second opinion" requests.',
   "- Prefer ask_codex_parallel when the work can be split into independent concurrent tasks, for example separate reviewers for API flow, tests, security, performance, UI, docs, or migration risk.",
-  "- Prefer start_codex_session and continue_codex_session when the user wants a Codex agent to keep context across multiple prompts.",
+  "- Prefer start_codex_session and continue_codex_session when the user wants a Codex agent to keep context across multiple prompts. Persistent sessions use Codex app-server by default and fall back to codex exec only when app-server is unavailable.",
   "- Prefer start_codex_session_async when Claude needs a session id immediately while Codex keeps working in the background.",
   "- Use send_codex_session_prompt to add prompts to an active or idle Codex session queue without losing context.",
-  "- Use steer_codex_session to insert a high-priority steering prompt for a running Codex session; use interrupt_current only when the active turn should be cancelled and redirected.",
+  "- Use steer_codex_session to send real live steering into a running app-server turn; use interrupt_current only when the active turn should be cancelled and redirected. If a session had to fall back to codex exec, steering degrades to the next high-priority queued turn.",
   "- Use get_codex_session or wait_codex_session to inspect or wait for long-running Codex sessions.",
   "- Use codex_choose_tool if you are unsure which Codex tool fits the request.",
   "- Use run_agent, run_agents, run_agents_aggregate, start_session, and send_session_prompt for lower-level/manual control; they are compatibility tools behind the intuitive front doors.",
@@ -23843,7 +24505,7 @@ server.registerTool(
         "Use start_codex_session for a new multi-turn Codex worker and continue_codex_session for follow-ups.",
         "Use start_codex_session_async when Claude needs the session id immediately and will poll or wait later.",
         "Use send_codex_session_prompt to queue additional prompts onto an active or idle Codex session.",
-        "Use steer_codex_session to insert high-priority steering into a running session; interrupt_current cancels the active turn before running the steering turn.",
+        "Use steer_codex_session to send live app-server steering into a running session; interrupt_current cancels the active turn before running the steering turn.",
         "Use start_agent_run/start_agents_run for slow jobs that should not hold a blocking MCP request open.",
         "Use run_agents_aggregate only when Claude needs a deterministic consensus object.",
         "Pass project_dir whenever Claude knows the active project directory.",
@@ -23856,7 +24518,7 @@ server.registerTool(
         continue_codex_session: ["send_session_prompt"],
         start_codex_session_async: ["start_session + return immediately"],
         send_codex_session_prompt: ["queued continue_codex_session"],
-        steer_codex_session: ["high-priority queued session prompt"]
+        steer_codex_session: ["live app-server turn steering"]
       }
     });
   })
@@ -24488,12 +25150,12 @@ server.registerTool(
   "steer_codex_session",
   {
     title: "Steer Codex session",
-    description: "Add a high-priority steering prompt to an active Codex session. Because daemonless Codex exec reads stdin before the turn starts, steering is delivered as the next persistent turn; set interrupt_current true to cancel the active turn and run the steering turn next.",
+    description: "Send a steering prompt to an active Codex session. App-server sessions deliver this into the currently running turn via Codex turn/steer. If the session fell back to codex exec, steering is delivered as the next high-priority persistent turn. Set interrupt_current true only to cancel the active turn and run the steering prompt next.",
     inputSchema: {
       session_id: sessionIdSchema,
       steering_prompt: external_exports.string().min(1).describe("Steering instruction to apply to the Codex session, for example a changed priority or constraint."),
       interrupt_current: external_exports.boolean().default(false).describe("Cancel the currently running turn and run this steering prompt next. Leave false to avoid losing in-flight work."),
-      wait_for_completion: external_exports.boolean().default(false).describe("When true, wait until the steering turn completes. Leave false for active long-running sessions."),
+      wait_for_completion: external_exports.boolean().default(false).describe("When true, wait until the steered active turn or queued fallback steering turn completes. Leave false for active long-running sessions."),
       ...frontDoorInputSchema
     }
   },
@@ -24746,6 +25408,8 @@ server.registerTool(
         defaultSandbox: "read-only",
         fullAccessFlag: "dangerously_bypass_approvals_and_sandbox",
         defaultServiceTier: "codex-default",
+        defaultSessionProtocol: process.env.CODEX_SUBAGENTS_SESSION_PROTOCOL === "exec" ? "exec" : "app-server",
+        appServerFallback: process.env.CODEX_SUBAGENTS_DISABLE_EXEC_FALLBACK === "1" ? "disabled" : "enabled",
         modelPresets: {
           codex: "gpt-5.3-codex",
           spark: "gpt-5.3-codex-spark"

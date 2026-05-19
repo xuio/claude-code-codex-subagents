@@ -39,10 +39,10 @@ const usageGuide = [
   "Tool choice:",
   "- Prefer ask_codex for one delegated Codex task. This is the clearest front door for normal \"ask Codex\" or \"Codex second opinion\" requests.",
   "- Prefer ask_codex_parallel when the work can be split into independent concurrent tasks, for example separate reviewers for API flow, tests, security, performance, UI, docs, or migration risk.",
-  "- Prefer start_codex_session and continue_codex_session when the user wants a Codex agent to keep context across multiple prompts.",
+  "- Prefer start_codex_session and continue_codex_session when the user wants a Codex agent to keep context across multiple prompts. Persistent sessions use Codex app-server by default and fall back to codex exec only when app-server is unavailable.",
   "- Prefer start_codex_session_async when Claude needs a session id immediately while Codex keeps working in the background.",
   "- Use send_codex_session_prompt to add prompts to an active or idle Codex session queue without losing context.",
-  "- Use steer_codex_session to insert a high-priority steering prompt for a running Codex session; use interrupt_current only when the active turn should be cancelled and redirected.",
+  "- Use steer_codex_session to send real live steering into a running app-server turn; use interrupt_current only when the active turn should be cancelled and redirected. If a session had to fall back to codex exec, steering degrades to the next high-priority queued turn.",
   "- Use get_codex_session or wait_codex_session to inspect or wait for long-running Codex sessions.",
   "- Use codex_choose_tool if you are unsure which Codex tool fits the request.",
   "- Use run_agent, run_agents, run_agents_aggregate, start_session, and send_session_prompt for lower-level/manual control; they are compatibility tools behind the intuitive front doors.",
@@ -855,7 +855,7 @@ server.registerTool(
           "Use start_codex_session for a new multi-turn Codex worker and continue_codex_session for follow-ups.",
           "Use start_codex_session_async when Claude needs the session id immediately and will poll or wait later.",
           "Use send_codex_session_prompt to queue additional prompts onto an active or idle Codex session.",
-          "Use steer_codex_session to insert high-priority steering into a running session; interrupt_current cancels the active turn before running the steering turn.",
+          "Use steer_codex_session to send live app-server steering into a running session; interrupt_current cancels the active turn before running the steering turn.",
           "Use start_agent_run/start_agents_run for slow jobs that should not hold a blocking MCP request open.",
           "Use run_agents_aggregate only when Claude needs a deterministic consensus object.",
           "Pass project_dir whenever Claude knows the active project directory.",
@@ -868,7 +868,7 @@ server.registerTool(
           continue_codex_session: ["send_session_prompt"],
           start_codex_session_async: ["start_session + return immediately"],
           send_codex_session_prompt: ["queued continue_codex_session"],
-          steer_codex_session: ["high-priority queued session prompt"],
+          steer_codex_session: ["live app-server turn steering"],
         },
       });
     }),
@@ -1595,7 +1595,7 @@ server.registerTool(
   {
     title: "Steer Codex session",
     description:
-      "Add a high-priority steering prompt to an active Codex session. Because daemonless Codex exec reads stdin before the turn starts, steering is delivered as the next persistent turn; set interrupt_current true to cancel the active turn and run the steering turn next.",
+      "Send a steering prompt to an active Codex session. App-server sessions deliver this into the currently running turn via Codex turn/steer. If the session fell back to codex exec, steering is delivered as the next high-priority persistent turn. Set interrupt_current true only to cancel the active turn and run the steering prompt next.",
     inputSchema: {
       session_id: sessionIdSchema,
       steering_prompt: z
@@ -1609,7 +1609,7 @@ server.registerTool(
       wait_for_completion: z
         .boolean()
         .default(false)
-        .describe("When true, wait until the steering turn completes. Leave false for active long-running sessions."),
+        .describe("When true, wait until the steered active turn or queued fallback steering turn completes. Leave false for active long-running sessions."),
       ...frontDoorInputSchema,
     },
   },
@@ -1891,6 +1891,8 @@ server.registerTool(
           defaultSandbox: "read-only",
           fullAccessFlag: "dangerously_bypass_approvals_and_sandbox",
           defaultServiceTier: "codex-default",
+          defaultSessionProtocol: process.env.CODEX_SUBAGENTS_SESSION_PROTOCOL === "exec" ? "exec" : "app-server",
+          appServerFallback: process.env.CODEX_SUBAGENTS_DISABLE_EXEC_FALLBACK === "1" ? "disabled" : "enabled",
           modelPresets: {
             codex: "gpt-5.3-codex",
             spark: "gpt-5.3-codex-spark",

@@ -1,3 +1,4 @@
+import { AppServerUnavailableError, CodexAppServerSession } from "./app-server.js";
 import { runQueuedAgent } from "./jobs.js";
 import { errorForLog, logger, summarizeRawTrafficForLog } from "./logging.js";
 import type { AgentRunOptions, AgentRunPartial, AgentRunResult } from "./runner.js";
@@ -5,6 +6,7 @@ import type { AgentRunOptions, AgentRunPartial, AgentRunResult } from "./runner.
 type SessionStatus = "active" | "running" | "failed" | "cancelled";
 type SessionTurnKind = "prompt" | "steer";
 type SessionTurnStatus = "queued" | "running" | "completed" | "failed" | "cancelled";
+type SessionProtocol = "app-server" | "exec";
 
 export interface CodexSessionTurnSnapshot {
   id: string;
@@ -27,6 +29,8 @@ export interface CodexSessionSnapshot {
   projectDir?: string;
   cwd?: string;
   codexThreadId?: string;
+  protocol: SessionProtocol;
+  supportsRealSteering: boolean;
   turns: number;
   active: boolean;
   activeTurn?: CodexSessionTurnSnapshot;
@@ -52,6 +56,8 @@ interface CodexSessionRecord {
   projectDir?: string;
   cwd?: string;
   codexThreadId?: string;
+  protocol: SessionProtocol;
+  appServer?: CodexAppServerSession;
   turns: number;
   partial?: AgentRunPartial;
   lastResult?: AgentRunResult;
@@ -96,6 +102,8 @@ function snapshot(session: CodexSessionRecord): CodexSessionSnapshot {
     projectDir: session.projectDir,
     cwd: session.cwd,
     codexThreadId: session.codexThreadId,
+    protocol: session.protocol,
+    supportsRealSteering: session.protocol === "app-server" && Boolean(session.appServer),
     turns: session.turns,
     active: Boolean(session.controller),
     activeTurn: session.activeTurn ? turnSnapshot(session.activeTurn) : undefined,
@@ -109,6 +117,15 @@ function snapshot(session: CodexSessionRecord): CodexSessionSnapshot {
 
 function terminal(status: SessionTurnStatus): boolean {
   return status === "completed" || status === "failed" || status === "cancelled";
+}
+
+function defaultSessionProtocol(env: NodeJS.ProcessEnv = process.env): SessionProtocol {
+  return env.CODEX_SUBAGENTS_SESSION_PROTOCOL === "exec" ? "exec" : "app-server";
+}
+
+function shouldFallbackToExec(error: unknown, env: NodeJS.ProcessEnv = process.env): boolean {
+  if (env.CODEX_SUBAGENTS_DISABLE_EXEC_FALLBACK === "1") return false;
+  return error instanceof AppServerUnavailableError || error instanceof Error;
 }
 
 export class CodexSessionManager {
@@ -159,6 +176,7 @@ export class CodexSessionManager {
       updatedAt: now,
       projectDir: options.projectDir,
       cwd: options.cwd,
+      protocol: defaultSessionProtocol(),
       turns: 0,
       baseOptions: {
         ...baseOptions,
@@ -252,7 +270,7 @@ export class CodexSessionManager {
     session?: CodexSessionSnapshot;
     turn?: CodexSessionTurnSnapshot;
     result?: AgentRunResult;
-    delivery?: "queued_after_current" | "interrupt_requested" | "started_or_queued";
+    delivery?: "delivered_to_active_turn" | "queued_after_current" | "interrupt_requested" | "started_or_queued";
     error?: string;
   }> {
     const session = this.sessions.get(id);
@@ -261,6 +279,38 @@ export class CodexSessionManager {
       return { error: `Unknown session_id: ${id}` };
     }
     const wasActive = Boolean(session.controller);
+    if (session.protocol === "app-server" && session.appServer && session.activeTurn && !options.interruptCurrent) {
+      const turn = this.recordSteerDelivery(session, prompt);
+      try {
+        const delivered = await session.appServer.steer(prompt);
+        turn.status = delivered.delivered ? "completed" : "failed";
+        turn.resultOk = delivered.delivered;
+        turn.resultStatus = delivered.delivered ? "completed" : "failed";
+        turn.error = delivered.delivered ? undefined : "No active Codex app-server turn accepted steering.";
+        turn.updatedAt = new Date().toISOString();
+        this.notifyTurn(turn);
+        this.notifySession(session);
+        if (options.wait && session.activeTurn) await this.waitForTurn(session, session.activeTurn);
+        return {
+          session: snapshot(session),
+          turn: turnSnapshot(turn),
+          delivery: delivered.delivered ? "delivered_to_active_turn" : "queued_after_current",
+          error: turn.error,
+        };
+      } catch (error) {
+        logger.error("session.steer_app_server_failed", {
+          sessionId: id,
+          error: errorForLog(error),
+        });
+        turn.status = "failed";
+        turn.error = error instanceof Error ? error.message : String(error);
+        turn.resultOk = false;
+        turn.resultStatus = "failed";
+        turn.updatedAt = new Date().toISOString();
+        this.notifyTurn(turn);
+        this.notifySession(session);
+      }
+    }
     const response = await this.send(id, prompt, overrides, {
       wait: options.wait,
       kind: "steer",
@@ -334,10 +384,12 @@ export class CodexSessionManager {
     if (session.controller) {
       session.status = "cancelled";
       session.updatedAt = new Date().toISOString();
+      void session.appServer?.close();
       session.controller.abort();
     } else {
       session.status = "cancelled";
       session.updatedAt = new Date().toISOString();
+      void session.appServer?.close();
     }
     this.notifySession(session);
     return snapshot(session);
@@ -372,6 +424,21 @@ export class CodexSessionManager {
       turn: summarizeRawTrafficForLog(turnSnapshot(turn)),
       queuedTurns: session.queuedTurns.length,
     });
+    this.notifySession(session);
+    return turn;
+  }
+
+  private recordSteerDelivery(session: CodexSessionRecord, prompt: string): CodexSessionTurnRecord {
+    const turn = this.enqueueTurn(session, {
+      prompt,
+      overrides: {},
+      kind: "steer",
+      priority: "front",
+    });
+    const index = session.queuedTurns.indexOf(turn);
+    if (index >= 0) session.queuedTurns.splice(index, 1);
+    turn.status = "running";
+    turn.updatedAt = new Date().toISOString();
     this.notifySession(session);
     return turn;
   }
@@ -423,7 +490,7 @@ export class CodexSessionManager {
       ...session.baseOptions,
       ...withoutUndefined(turn.overrides),
       prompt: turn.prompt,
-      resumeSessionId: session.codexThreadId,
+      resumeSessionId: session.protocol === "exec" ? session.codexThreadId : undefined,
       ephemeral: false,
     };
     const controller = new AbortController();
@@ -443,52 +510,10 @@ export class CodexSessionManager {
     });
 
     try {
-      const result = await runQueuedAgent(
-        {
-          ...options,
-          abortSignal: controller.signal,
-        },
-        {
-          onSnapshot: (partial) => {
-            session.partial = partial;
-            session.updatedAt = new Date().toISOString();
-            logger.rawDebug("session.turn.partial", {
-              sessionId: session.id,
-              partial: summarizeRawTrafficForLog(partial),
-            });
-          },
-        },
-      );
-      session.turns += 1;
-      session.lastResult = result;
-      session.codexThreadId = result.eventSummary.threadId ?? session.codexThreadId;
-      session.projectDir = result.cwd;
-      session.cwd = result.cwd;
-      session.baseOptions = {
-        ...session.baseOptions,
-        projectDir: result.cwd,
-        cwd: undefined,
-      };
-      turn.result = result;
-      turn.resultOk = result.ok;
-      turn.resultStatus = result.status;
-      turn.status = result.ok ? "completed" : result.status === "cancelled" ? "cancelled" : "failed";
-      turn.updatedAt = new Date().toISOString();
-      session.status = result.ok
-        ? "active"
-        : result.status === "cancelled" && session.queuedTurns.length > 0 && !session.cancelRequested
-          ? "running"
-          : result.status === "cancelled"
-            ? "cancelled"
-            : "failed";
-      session.updatedAt = new Date().toISOString();
-      logger.rawInfo("session.turn.finish", {
-        session: summarizeRawTrafficForLog(snapshot(session)),
-        turn: summarizeRawTrafficForLog(turnSnapshot(turn)),
-        result: summarizeRawTrafficForLog(result),
-      });
-      this.notifyTurn(turn);
-      this.notifySession(session);
+      const result = session.protocol === "app-server"
+        ? await this.runAppServerTurn(session, options, controller)
+        : await this.runExecTurn(session, options, controller);
+      this.completeTurn(session, turn, result);
       return result;
     } catch (error) {
       session.status = controller.signal.aborted ? "cancelled" : "failed";
@@ -510,6 +535,106 @@ export class CodexSessionManager {
       session.activeTurn = undefined;
       this.notifySession(session);
     }
+  }
+
+  private async runExecTurn(
+    session: CodexSessionRecord,
+    options: AgentRunOptions,
+    controller: AbortController,
+  ): Promise<AgentRunResult> {
+    return runQueuedAgent(
+        {
+          ...options,
+          abortSignal: controller.signal,
+        },
+        {
+          onSnapshot: (partial) => {
+            session.partial = partial;
+            session.updatedAt = new Date().toISOString();
+            logger.rawDebug("session.turn.partial", {
+              sessionId: session.id,
+              partial: summarizeRawTrafficForLog(partial),
+            });
+          },
+        },
+      );
+  }
+
+  private async runAppServerTurn(
+    session: CodexSessionRecord,
+    options: AgentRunOptions,
+    controller: AbortController,
+  ): Promise<AgentRunResult> {
+    try {
+      if (!session.appServer) {
+        session.appServer = await CodexAppServerSession.create(options);
+        session.codexThreadId = session.appServer.threadId;
+      }
+      return await session.appServer.startTurn(
+        options,
+        controller.signal,
+        (partial) => {
+          session.partial = partial;
+          session.updatedAt = new Date().toISOString();
+          logger.rawDebug("session.turn.partial", {
+            sessionId: session.id,
+            partial: summarizeRawTrafficForLog(partial),
+          });
+        },
+      );
+    } catch (error) {
+      if (session.turns === 0 && shouldFallbackToExec(error)) {
+        logger.warn("session.app_server_fallback_to_exec", {
+          sessionId: session.id,
+          error: errorForLog(error),
+        });
+        await session.appServer?.close().catch(() => {});
+        session.appServer = undefined;
+        session.protocol = "exec";
+        return this.runExecTurn(session, {
+          ...options,
+          resumeSessionId: undefined,
+        }, controller);
+      }
+      throw error;
+    }
+  }
+
+  private completeTurn(
+    session: CodexSessionRecord,
+    turn: CodexSessionTurnRecord,
+    result: AgentRunResult,
+  ): void {
+    session.turns += 1;
+    session.lastResult = result;
+    session.codexThreadId = result.eventSummary.threadId ?? session.codexThreadId;
+    session.projectDir = result.cwd;
+    session.cwd = result.cwd;
+    session.baseOptions = {
+      ...session.baseOptions,
+      projectDir: result.cwd,
+      cwd: undefined,
+    };
+    turn.result = result;
+    turn.resultOk = result.ok;
+    turn.resultStatus = result.status;
+    turn.status = result.ok ? "completed" : result.status === "cancelled" ? "cancelled" : "failed";
+    turn.updatedAt = new Date().toISOString();
+    session.status = result.ok
+      ? "active"
+      : result.status === "cancelled" && session.queuedTurns.length > 0 && !session.cancelRequested
+        ? "running"
+        : result.status === "cancelled"
+          ? "cancelled"
+          : "failed";
+    session.updatedAt = new Date().toISOString();
+    logger.rawInfo("session.turn.finish", {
+      session: summarizeRawTrafficForLog(snapshot(session)),
+      turn: summarizeRawTrafficForLog(turnSnapshot(turn)),
+      result: summarizeRawTrafficForLog(result),
+    });
+    this.notifyTurn(turn);
+    this.notifySession(session);
   }
 
   private findTurn(session: CodexSessionRecord, turnId: string): CodexSessionTurnRecord | undefined {

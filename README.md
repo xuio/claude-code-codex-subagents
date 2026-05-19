@@ -14,6 +14,7 @@ The plugin lets Claude Code launch one Codex agent or several Codex agents in pa
 - Full local access: opt in per call with `dangerously_bypass_approvals_and_sandbox: true`, which maps to Codex's `--dangerously-bypass-approvals-and-sandbox` flag and allows DNS/network access plus unrestricted file and git writes.
 - Service tier: omitted by default so Codex uses its normal account/default service tier. Pass `service_tier` only when you explicitly want one.
 - Transport: stdio MCP, launched by Claude Code for the active session. No daemon is required.
+- Session protocol: persistent sessions use `codex app-server --listen stdio://` by default so `steer_codex_session` can deliver real live steering into an active turn. If app-server startup fails, the plugin falls back to the older `codex exec resume` session path.
 - Prompt delivery: stdin, not command-line arguments.
 - Codex home: uses the user's Codex home by default; pass `isolated_codex_home: true` to use a temporary Codex home with auth but without inherited `config.toml` MCP servers.
 - Concurrency: Codex processes run through a global queue. Defaults are `CODEX_SUBAGENTS_MAX_GLOBAL_PROCESSES=4` and `CODEX_SUBAGENTS_MAX_PROJECT_PROCESSES=2`.
@@ -21,7 +22,7 @@ The plugin lets Claude Code launch one Codex agent or several Codex agents in pa
 - Logging: verbose JSONL logs are written to stderr by default. The logs include raw MCP JSON-RPC frames, tool arguments/results, prompt outputs, progress notifications, queue/job/session lifecycle, and Codex stdin/stdout/stderr traffic.
 - MCP responses: long Codex outputs are compacted before returning to Claude so successful runs do not trip Claude Code's tool-result size limits. The full raw traffic remains available in the verbose server logs.
 - Security: secret-looking output is redacted before it is returned to Claude, and secret-looking environment variables are not forwarded to Codex unless `forward_sensitive_env` is explicitly true.
-- Sessions: `start_session` and `send_session_prompt` use Codex's recorded thread id so a Codex subagent can keep context across multiple prompts without a background daemon.
+- Sessions: `start_session` and `send_session_prompt` use Codex app-server by default and preserve Codex context across turns without an external daemon.
 
 Optional environment overrides:
 
@@ -34,6 +35,8 @@ Optional environment overrides:
 - `CODEX_SUBAGENTS_LOG_LEVEL`: `debug`, `info`, `warn`, `error`, or `silent`. Defaults to `debug`.
 - `CODEX_SUBAGENTS_LOG_MAX_STRING_CHARS`: maximum string payload retained per log field before truncation metadata is used. Defaults to `20000`.
 - `CODEX_SUBAGENTS_PROGRESS_HEARTBEAT_MS`: interval for progress heartbeats on blocking tool calls. Defaults to `10000`.
+- `CODEX_SUBAGENTS_SESSION_PROTOCOL`: set to `exec` to force the legacy `codex exec resume` session protocol. Defaults to `app-server`.
+- `CODEX_SUBAGENTS_DISABLE_EXEC_FALLBACK`: set to `1` to fail instead of falling back to `codex exec` when app-server is unavailable.
 
 ## Spark And Nested Subagents
 
@@ -133,6 +136,8 @@ npm run test:claude-desktop
 
 `test:claude-real-session` is an opt-in live Claude Code test for daemonless persistent sessions. It loads the symlinked installed plugin, starts a real Codex session, sends a follow-up without `project_dir`, and verifies the session stays pinned to the original project directory.
 
+`test:real-app-server-steering` is an opt-in live Codex test that calls the MCP server directly, starts a real app-server session, sends `turn/steer` during an active turn, and verifies the final answer reflects the steering prompt.
+
 `test:claude-autodiscovery` is an opt-in live Claude Code test for automatic tool selection. It gives Claude a natural "ask Codex" request, loads the local plugin with the fake Codex binary, and verifies that Claude chooses the intuitive Codex MCP front door without being told the exact low-level tool name.
 
 Run Claude Code with the local plugin:
@@ -157,13 +162,13 @@ After startup, ask Claude to use Codex subagents, or invoke the plugin skill:
 
 `ask_codex_parallel` is the preferred front door for multiple independent Codex tasks. It launches bounded parallel Codex `exec` processes and returns one structured result per task.
 
-`start_codex_session` and `continue_codex_session` are the preferred front doors for daemonless persistent Codex sessions.
+`start_codex_session` and `continue_codex_session` are the preferred front doors for daemonless persistent Codex sessions. They use a per-session `codex app-server --listen stdio://` child by default, owned by this MCP server process.
 
 `start_codex_session_async` starts a persistent Codex session and returns a `session.id` immediately while Codex keeps working.
 
 `send_codex_session_prompt` queues an additional prompt onto an active or idle Codex session. It returns immediately by default and can also wait for completion.
 
-`steer_codex_session` inserts a high-priority steering prompt into a persistent Codex session. By default it runs after the active turn; `interrupt_current: true` cancels the active turn and runs the steering turn next.
+`steer_codex_session` sends a steering prompt into the currently active app-server turn with Codex `turn/steer`. If a session had to fall back to `codex exec`, steering degrades to the next high-priority queued turn. `interrupt_current: true` cancels the active turn and runs the steering prompt next.
 
 `get_codex_session` and `wait_codex_session` inspect or wait for long-running Codex sessions and queued turns.
 
@@ -179,7 +184,7 @@ After startup, ask Claude to use Codex subagents, or invoke the plugin skill:
 
 `get_agent_run`, `wait_agent_run`, and `cancel_agent_run` inspect, wait for, or cancel async jobs.
 
-`start_session`, `send_session_prompt`, `get_session`, `list_sessions`, and `cancel_session` manage daemonless persistent Codex sessions using Codex's own resumable thread ids. They are compatibility aliases behind the intuitive session tools.
+`start_session`, `send_session_prompt`, `get_session`, `list_sessions`, and `cancel_session` manage daemonless persistent Codex sessions. They are compatibility aliases behind the intuitive session tools.
 
 `codex_status` reports the resolved Codex binary, server working directory, Claude project directory, default model, default reasoning effort, feature sets, and version probe.
 

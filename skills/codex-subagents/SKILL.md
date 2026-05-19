@@ -8,7 +8,7 @@ Use the `codex-subagents` MCP server when the task benefits from delegating work
 
 Default behavior:
 
-- Launches Codex through `codex exec` over a stdio MCP tool call; no background daemon is required.
+- Launches one-shot Codex work through `codex exec`; persistent sessions use `codex app-server --listen stdio://` by default for real live steering. The app-server child is owned by the MCP server process, so no external background daemon is required.
 - Prefers the Codex desktop app binary at `/Applications/Codex.app/Contents/Resources/codex` when it exists.
 - Runs Codex in `read-only` sandbox mode unless the user explicitly requests a different sandbox.
 - Uses non-interactive approvals so write or privileged operations fail instead of prompting.
@@ -27,9 +27,9 @@ Prefer the intuitive front-door tools for normal use:
 
 - For one delegated task, call `ask_codex`. Make `task` self-contained: include the scope, expected read-only behavior, and output shape Claude needs. For code review and exploration, ask for concise findings with file paths and line references.
 - For independent tasks that can run concurrently, call `ask_codex_parallel` with one task object per workstream. Split by ownership such as API flow, tests, security, performance, UI, docs, or migration risk. Keep tasks concrete and bounded, and set `max_parallel` to the smaller of the useful agent count and `4` unless the user asks for more.
-- For multi-turn Codex work, call `start_codex_session` for the initial task and `continue_codex_session` for follow-ups. Session tools use Codex's recorded thread id and remain daemonless; the MCP server keeps only metadata and the last result.
-- For long-running multi-turn Codex work, call `start_codex_session_async` so Claude gets a `session.id` immediately. Then use `send_codex_session_prompt` to queue normal follow-ups, `steer_codex_session` to insert a high-priority steering turn, `get_codex_session` to inspect partial progress, and `wait_codex_session` to wait until a turn or the whole queue completes.
-- `steer_codex_session` is intentionally safe by default: Codex `exec` reads stdin before the turn starts, so steering is delivered as the next persistent turn. Set `interrupt_current: true` only when the active turn should be cancelled and redirected.
+- For multi-turn Codex work, call `start_codex_session` for the initial task and `continue_codex_session` for follow-ups. Session tools use Codex app-server by default, preserve context across turns, and remain daemonless because the app-server child exits with this MCP server.
+- For long-running multi-turn Codex work, call `start_codex_session_async` so Claude gets a `session.id` immediately. Then use `send_codex_session_prompt` to queue normal follow-ups, `steer_codex_session` to steer the active app-server turn, `get_codex_session` to inspect partial progress, and `wait_codex_session` to wait until a turn or the whole queue completes.
+- `steer_codex_session` delivers real live steering with Codex `turn/steer` when `session.supportsRealSteering` is true. If a session reports `protocol: "exec"`, app-server was unavailable and steering degrades to the next high-priority queued turn. Set `interrupt_current: true` only when the active turn should be cancelled and redirected.
 - If unsure which path fits, call `codex_choose_tool` before delegating.
 
 Use the lower-level compatibility tools only when they fit better: `run_agent`, `run_agents`, `start_session`, and `send_session_prompt` expose the same execution paths with more literal naming. When Claude needs a concise consensus object from several agents, call `run_agents_aggregate`. Prefer `output_contract: "review_findings"` for review-style aggregation.

@@ -76,7 +76,7 @@ await mkdir(recordDir, { recursive: true });
 try {
   const prompt = `Validate the codex-subagents plugin's long-running session flow from inside Claude Code. Use only the codex-subagents MCP tools. Use this exact fake Codex binary: ${fakeCodex}. Use this exact project_dir: ${projectDir}.
 
-Start a Codex Spark session in the background with task "CLAUDE_STEERING_START DELAY_MS=2000". While it is running, add a normal follow-up prompt "CLAUDE_STEERING_FOLLOW" without waiting for that prompt to complete. Also steer the session with steering prompt "CLAUDE_STEERING_STEER" without waiting for steering to complete, so that steering runs before the normal follow-up. Then wait until the session is idle.
+Start a Codex Spark session in the background with task "CLAUDE_STEERING_START DELAY_MS=2000". Poll get_codex_session until the session reports supportsRealSteering true and has an activeTurn. While it is running, first steer the session with steering prompt "CLAUDE_STEERING_STEER" without waiting for steering to complete. Then add a normal follow-up prompt "CLAUDE_STEERING_FOLLOW" without waiting for that prompt to complete. Then wait until the session is idle.
 
 Return exactly one compact JSON object and no markdown. Shape: {"ok": boolean, "turns": number, "steerCompleted": boolean, "completed": boolean}.`;
 
@@ -162,7 +162,7 @@ Return exactly one compact JSON object and no markdown. Shape: {"ok": boolean, "
     (String(envelope.result ?? "").trim() ? extractJsonResult(envelope.result) : undefined);
   assert(validation, "Claude session steering returned no structured result", envelope);
   assert(validation.ok === true, "Claude should report session steering success", validation);
-  assert(validation.turns >= 3, "Claude should observe three session turns", validation);
+  assert(validation.turns >= 2, "Claude should observe the steered active turn plus follow-up", validation);
   assert(validation.steerCompleted === true, "Claude should observe completed steering", validation);
   assert(validation.completed === true, "Claude should wait until the session is idle", validation);
 
@@ -171,9 +171,12 @@ Return exactly one compact JSON object and no markdown. Shape: {"ok": boolean, "
     .split("\n")
     .map((line) => JSON.parse(line));
   const prompts = calls.map((call) => call.prompt);
-  assert(prompts[0]?.includes("CLAUDE_STEERING_START"), "Fake Codex should receive the async start first", prompts);
-  assert(prompts[1]?.includes("CLAUDE_STEERING_STEER"), "Steering should run before queued follow-up", prompts);
-  assert(prompts[2]?.includes("CLAUDE_STEERING_FOLLOW"), "Queued follow-up should run after steering", prompts);
+  const firstStart = prompts.findIndex((prompt) => prompt?.includes("CLAUDE_STEERING_START"));
+  const firstSteer = prompts.findIndex((prompt) => prompt?.includes("CLAUDE_STEERING_STEER"));
+  const firstFollow = prompts.findIndex((prompt) => prompt?.includes("CLAUDE_STEERING_FOLLOW"));
+  assert(firstStart >= 0, "Fake Codex should receive the async start", prompts);
+  assert(firstSteer > firstStart, "Fake Codex should receive live steering after start", prompts);
+  assert(firstFollow > firstSteer, "Queued follow-up should run after steering", prompts);
 
   console.log(
     `Claude session steering passed in ${envelope.duration_ms}ms, cost $${envelope.total_cost_usd}`,
