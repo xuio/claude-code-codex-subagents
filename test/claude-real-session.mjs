@@ -2,6 +2,7 @@ import { spawnSync } from "node:child_process";
 import { readdir, stat } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
+import { extractJsonResult } from "./json-result.mjs";
 
 const root = process.cwd();
 const codexBin =
@@ -69,12 +70,6 @@ async function resolveClaudeCodeBinary() {
   return resolved;
 }
 
-function extractJsonResult(rawResult) {
-  const trimmed = rawResult.trim();
-  const fenced = trimmed.match(/^```(?:json)?\s*([\s\S]*?)\s*```$/);
-  return JSON.parse(fenced ? fenced[1] : trimmed);
-}
-
 function assert(condition, message, details) {
   if (!condition) {
     throw new Error(`${message}${details ? `\n${JSON.stringify(details, null, 2)}` : ""}`);
@@ -89,7 +84,7 @@ Perform exactly these checks:
 3. Call continue_codex_session for that session id with task "Follow-up persistent session validation. Stay read-only. Reply exactly REAL_SESSION_FOLLOW_OK", codex_bin "${codexBin}", model_preset "spark", reasoning_effort "low", timeout_ms 180000. Important: intentionally omit project_dir and cwd from this follow-up call.
 4. Verify the continue_codex_session result has agent.ok true, agent.cwd equal to "${root}", session.projectDir equal to "${root}", and finalMessage containing REAL_SESSION_FOLLOW_OK.
 5. Call get_session for the same session id and verify session.projectDir is still "${root}" and turns is at least 2.
-6. Call start_codex_session_async with task "Real async app-server steering validation. Stay read-only. Run the shell command \`sleep 6\`, then reply exactly REAL_SESSION_ASYNC_START_OK unless a later steering instruction changes the exact final reply.", project_dir "${root}", codex_bin "${codexBin}", model_preset "spark", reasoning_effort "low", timeout_ms 180000. Verify it returns a second session.id and a turn.id immediately.
+6. Call start_codex_session_async with task "Real async app-server steering validation. Stay read-only. Run the shell command \`sleep 30\`, then reply exactly REAL_SESSION_ASYNC_START_OK unless a later steering instruction changes the exact final reply.", project_dir "${root}", codex_bin "${codexBin}", model_preset "spark", reasoning_effort "low", timeout_ms 180000. Verify it returns a second session.id and a turn.id immediately.
 7. Poll get_codex_session for that second session id until session.supportsRealSteering is true and session.activeTurn is present.
 8. Call steer_codex_session for that second session id with steering_prompt "Steering validation. Change the exact final reply to REAL_SESSION_STEER_OK.", codex_bin "${codexBin}", model_preset "spark", reasoning_effort "low", timeout_ms 180000, wait_for_completion false. Verify it returns delivery "delivered_to_active_turn" and a completed steer turn.
 9. Call wait_codex_session for the second session id with timeout_ms 300000. Verify completed true, session.protocol is "app-server", session.turns is at least 1, recentTurns contains a completed steer turn, and lastResult.finalMessage contains REAL_SESSION_STEER_OK.

@@ -2,6 +2,7 @@ import { spawnSync } from "node:child_process";
 import { mkdir, readFile, readdir, rm, stat } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
+import { extractJsonResult } from "./json-result.mjs";
 
 const root = process.cwd();
 const fakeCodex = path.join(root, "test/fixtures/fake-codex.mjs");
@@ -59,12 +60,6 @@ async function resolveClaudeCodeBinary() {
   return resolved;
 }
 
-function extractJsonResult(rawResult) {
-  const trimmed = rawResult.trim();
-  const fenced = trimmed.match(/^```(?:json)?\s*([\s\S]*?)\s*```$/);
-  return JSON.parse(fenced ? fenced[1] : trimmed);
-}
-
 function assert(condition, message, details) {
   if (!condition) {
     throw new Error(`${message}${details ? `\n${JSON.stringify(details, null, 2)}` : ""}`);
@@ -76,7 +71,7 @@ await mkdir(recordDir, { recursive: true });
 try {
   const prompt = `Validate the codex-subagents plugin's long-running session flow from inside Claude Code. Use only the codex-subagents MCP tools. Use this exact fake Codex binary: ${fakeCodex}. Use this exact project_dir: ${projectDir}.
 
-Start a Codex Spark session in the background with task "CLAUDE_STEERING_START DELAY_MS=2000". Poll get_codex_session until the session reports supportsRealSteering true and has an activeTurn. While it is running, first steer the session with steering prompt "CLAUDE_STEERING_STEER" without waiting for steering to complete. Then add a normal follow-up prompt "CLAUDE_STEERING_FOLLOW" without waiting for that prompt to complete. Then wait until the session is idle.
+Start a Codex Spark session in the background with task "CLAUDE_STEERING_START DELAY_MS=10000". Poll get_codex_session until the session reports supportsRealSteering true and has an activeTurn. While it is running, first steer the session with steering prompt "CLAUDE_STEERING_STEER" without waiting for steering to complete. Then add a normal follow-up prompt "CLAUDE_STEERING_FOLLOW" without waiting for that prompt to complete. Then wait until the session is idle.
 
 Return exactly one compact JSON object and no markdown. Shape: {"ok": boolean, "turns": number, "steerCompleted": boolean, "completed": boolean}.`;
 

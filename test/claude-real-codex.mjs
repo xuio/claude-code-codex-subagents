@@ -2,6 +2,7 @@ import { spawnSync } from "node:child_process";
 import { readdir, stat } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
+import { extractJsonResult } from "./json-result.mjs";
 
 const root = process.cwd();
 const codexBin =
@@ -56,12 +57,6 @@ async function resolveClaudeCodeBinary() {
     throw new Error(`No Claude Code desktop CLI found under ${claudeCodeRoot}`);
   }
   return resolved;
-}
-
-function extractJsonResult(rawResult) {
-  const trimmed = rawResult.trim();
-  const fenced = trimmed.match(/^```(?:json)?\s*([\s\S]*?)\s*```$/);
-  return JSON.parse(fenced ? fenced[1] : trimmed);
 }
 
 function assert(condition, message, details) {

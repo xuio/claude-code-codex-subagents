@@ -280,35 +280,42 @@ export class CodexSessionManager {
     }
     const wasActive = Boolean(session.controller);
     if (session.protocol === "app-server" && session.appServer && session.activeTurn && !options.interruptCurrent) {
-      const turn = this.recordSteerDelivery(session, prompt);
-      try {
-        const delivered = await session.appServer.steer(prompt);
-        turn.status = delivered.delivered ? "completed" : "failed";
-        turn.resultOk = delivered.delivered;
-        turn.resultStatus = delivered.delivered ? "completed" : "failed";
-        turn.error = delivered.delivered ? undefined : "No active Codex app-server turn accepted steering.";
-        turn.updatedAt = new Date().toISOString();
-        this.notifyTurn(turn);
-        this.notifySession(session);
-        if (options.wait && session.activeTurn) await this.waitForTurn(session, session.activeTurn);
-        return {
-          session: snapshot(session),
-          turn: turnSnapshot(turn),
-          delivery: delivered.delivered ? "delivered_to_active_turn" : "queued_after_current",
-          error: turn.error,
-        };
-      } catch (error) {
-        logger.error("session.steer_app_server_failed", {
+      const activeCodexTurnId = await this.waitForAppServerActiveTurn(session, 1_000);
+      if (!activeCodexTurnId) {
+        logger.warn("session.steer_app_server_not_ready", {
           sessionId: id,
-          error: errorForLog(error),
+          activeTurnId: session.activeTurn.id,
         });
-        turn.status = "failed";
-        turn.error = error instanceof Error ? error.message : String(error);
-        turn.resultOk = false;
-        turn.resultStatus = "failed";
-        turn.updatedAt = new Date().toISOString();
-        this.notifyTurn(turn);
-        this.notifySession(session);
+      } else {
+        try {
+          const delivered = await session.appServer.steer(prompt);
+          if (!delivered.delivered) {
+            logger.warn("session.steer_app_server_rejected", {
+              sessionId: id,
+              activeTurnId: session.activeTurn.id,
+              activeCodexTurnId,
+            });
+          } else {
+            const turn = this.recordSteerDelivery(session, prompt);
+            turn.status = "completed";
+            turn.resultOk = true;
+            turn.resultStatus = "completed";
+            turn.updatedAt = new Date().toISOString();
+            this.notifyTurn(turn);
+            this.notifySession(session);
+            if (options.wait && session.activeTurn) await this.waitForTurn(session, session.activeTurn);
+            return {
+              session: snapshot(session),
+              turn: turnSnapshot(turn),
+              delivery: "delivered_to_active_turn",
+            };
+          }
+        } catch (error) {
+          logger.error("session.steer_app_server_failed", {
+            sessionId: id,
+            error: errorForLog(error),
+          });
+        }
       }
     }
     const response = await this.send(id, prompt, overrides, {
@@ -650,6 +657,19 @@ export class CodexSessionManager {
         session.waiters.add(resolve);
       });
     }
+  }
+
+  private async waitForAppServerActiveTurn(
+    session: CodexSessionRecord,
+    timeoutMs: number,
+  ): Promise<string | undefined> {
+    const deadline = Date.now() + timeoutMs;
+    while (session.controller && session.activeTurn && session.appServer && Date.now() < deadline) {
+      const activeTurnId = session.appServer.activeTurnId;
+      if (activeTurnId) return activeTurnId;
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+    return session.appServer?.activeTurnId;
   }
 
   private notifyTurn(turn: CodexSessionTurnRecord): void {
