@@ -23,6 +23,7 @@ import {
 } from "./subagents.js";
 import { OutputArtifactWriter } from "./artifacts.js";
 import { recordDiagnosticEvent } from "./diagnostics.js";
+import { packageVersion } from "./version.js";
 
 type JsonObject = Record<string, unknown>;
 
@@ -363,7 +364,7 @@ export class CodexAppServerSession {
 
   private async initialize(timeoutMs: number): Promise<void> {
     const initialized = await this.request("initialize", {
-      clientInfo: { name: "claude-code-codex-subagents", version: "0.1.1" },
+      clientInfo: { name: "claude-code-codex-subagents", version: packageVersion },
       capabilities: null,
     }, timeoutMs) as JsonObject | undefined;
     this.capabilities.initialize = true;

@@ -1,10 +1,11 @@
-import { lstat, mkdir, readFile, realpath, rename, symlink, writeFile } from "node:fs/promises";
+import { lstat, mkdir, readFile, realpath, rename, rm, symlink, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
-const claudeHome = process.env.CLAUDE_HOME ?? path.join(os.homedir(), ".claude");
+const dryRun = process.argv.includes("--dry-run") || process.env.CLAUDE_DEV_LINK_DRY_RUN === "1";
+const claudeHome = path.resolve(process.env.CLAUDE_HOME ?? path.join(os.homedir(), ".claude"));
 const manifestPath = path.join(root, ".claude-plugin", "plugin.json");
 const manifest = JSON.parse(await readFile(manifestPath, "utf8"));
 const marketplace = "codex-subagents-local";
@@ -20,6 +21,13 @@ const marketplacePluginPath = path.join(
   pluginName,
 );
 const installPath = path.join(claudeHome, "plugins", "cache", marketplace, pluginName, version);
+
+function assertSafePath(targetPath) {
+  const resolved = path.resolve(targetPath);
+  if (resolved === claudeHome || !resolved.startsWith(`${claudeHome}${path.sep}`)) {
+    throw new Error(`Refusing to modify path outside CLAUDE_HOME: ${targetPath}`);
+  }
+}
 
 async function pathExists(targetPath) {
   try {
@@ -45,22 +53,36 @@ function backupPath(targetPath) {
 }
 
 async function replaceWithSymlink(linkPath, targetPath) {
-  await mkdir(path.dirname(linkPath), { recursive: true });
+  assertSafePath(linkPath);
   const currentTarget = await resolvedPath(linkPath);
   if (currentTarget === targetPath) return { path: linkPath, changed: false };
 
+  if (dryRun) {
+    return { path: linkPath, changed: true, dryRun: true };
+  }
+
+  await mkdir(path.dirname(linkPath), { recursive: true });
+  const tempLink = `${linkPath}.tmp-${process.pid}-${Date.now()}`;
+  let backup = null;
   if (await pathExists(linkPath)) {
-    const backup = backupPath(linkPath);
+    backup = backupPath(linkPath);
     await rename(linkPath, backup);
     console.log(`Moved existing ${linkPath} to ${backup}`);
   }
 
-  await symlink(targetPath, linkPath, "dir");
-  return { path: linkPath, changed: true };
+  try {
+    await symlink(targetPath, tempLink, "dir");
+    await rename(tempLink, linkPath);
+    return { path: linkPath, changed: true };
+  } catch (error) {
+    await rm(tempLink, { recursive: true, force: true }).catch(() => {});
+    if (backup) await rename(backup, linkPath).catch(() => {});
+    throw error;
+  }
 }
 
 async function ensureInstalledPluginsEntry() {
-  await mkdir(path.dirname(installedPluginsPath), { recursive: true });
+  assertSafePath(installedPluginsPath);
   let data = { version: 2, plugins: {} };
   if (await pathExists(installedPluginsPath)) {
     data = JSON.parse(await readFile(installedPluginsPath, "utf8"));
@@ -83,7 +105,10 @@ async function ensureInstalledPluginsEntry() {
   };
 
   data.plugins[key] = [entry, ...entries.filter((candidate) => candidate !== existing)];
-  await writeFile(installedPluginsPath, `${JSON.stringify(data, null, 2)}\n`);
+  if (!dryRun) {
+    await mkdir(path.dirname(installedPluginsPath), { recursive: true });
+    await writeFile(installedPluginsPath, `${JSON.stringify(data, null, 2)}\n`);
+  }
   return entry;
 }
 
@@ -94,4 +119,5 @@ const entry = await ensureInstalledPluginsEntry();
 console.log(`Marketplace plugin path: ${marketplaceLink.path} -> ${root}`);
 console.log(`Installed plugin path: ${cacheLink.path} -> ${root}`);
 console.log(`Installed plugin entry: ${entry.installPath}`);
+if (dryRun) console.log("Dry run only; no Claude plugin files were modified.");
 console.log("Claude Code CLI and Claude Desktop CLI share this ~/.claude plugin install.");

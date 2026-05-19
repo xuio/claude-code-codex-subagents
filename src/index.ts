@@ -37,6 +37,7 @@ import {
 } from "./response.js";
 import { sessionManager } from "./sessions.js";
 import { modelPresets } from "./subagents.js";
+import { packageVersion } from "./version.js";
 
 const usageGuide = [
   "Claude Code integration guide for codex-subagents:",
@@ -88,7 +89,7 @@ const usageGuide = [
 const server = new McpServer(
   {
     name: "codex-subagents",
-    version: "0.1.0",
+    version: packageVersion,
   },
   {
     instructions: usageGuide,

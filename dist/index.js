@@ -23621,6 +23621,14 @@ function isParallelResult(value) {
 // src/app-server.ts
 import { spawn as spawn2 } from "node:child_process";
 import { stat as stat2 } from "node:fs/promises";
+
+// src/version.ts
+import { createRequire } from "node:module";
+var require2 = createRequire(import.meta.url);
+var packageJson = require2("../package.json");
+var packageVersion = packageJson.version ?? "0.0.0";
+
+// src/app-server.ts
 var maxPendingJsonLineChars2 = 1e6;
 var AppServerUnavailableError = class extends Error {
   constructor(message) {
@@ -23884,7 +23892,7 @@ var CodexAppServerSession = class _CodexAppServerSession {
   }
   async initialize(timeoutMs) {
     const initialized = await this.request("initialize", {
-      clientInfo: { name: "claude-code-codex-subagents", version: "0.1.1" },
+      clientInfo: { name: "claude-code-codex-subagents", version: packageVersion },
       capabilities: null
     }, timeoutMs);
     this.capabilities.initialize = true;
@@ -25521,7 +25529,7 @@ var usageGuide = [
 var server = new McpServer(
   {
     name: "codex-subagents",
-    version: "0.1.0"
+    version: packageVersion
   },
   {
     instructions: usageGuide

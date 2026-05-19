@@ -1,5 +1,5 @@
 import { spawnSync } from "node:child_process";
-import { mkdtemp, readFile, realpath, rm } from "node:fs/promises";
+import { lstat, mkdtemp, readFile, realpath, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 
@@ -21,7 +21,31 @@ const marketplacePath = path.join(
   "plugins/marketplaces/codex-subagents-local/plugins/codex-subagents",
 );
 
+async function pathExists(targetPath) {
+  try {
+    await lstat(targetPath);
+    return true;
+  } catch (error) {
+    if (error?.code === "ENOENT") return false;
+    throw error;
+  }
+}
+
 try {
+  const dryRun = spawnSync("node", ["scripts/link-claude-dev-plugin.mjs", "--dry-run"], {
+    cwd: root,
+    encoding: "utf8",
+    shell: false,
+    env: {
+      ...process.env,
+      CLAUDE_HOME: claudeHome,
+    },
+  });
+  const dryRunOutput = [dryRun.stdout, dryRun.stderr].filter(Boolean).join("");
+  assert(dryRun.status === 0, "dev link dry run should succeed", dryRunOutput);
+  assert(dryRunOutput.includes("Dry run only"), "dry run should be explicit", dryRunOutput);
+  assert(!(await pathExists(path.join(claudeHome, "plugins"))), "dry run should not create plugin directories", dryRunOutput);
+
   for (const pass of [1, 2]) {
     const result = spawnSync("node", ["scripts/link-claude-dev-plugin.mjs"], {
       cwd: root,

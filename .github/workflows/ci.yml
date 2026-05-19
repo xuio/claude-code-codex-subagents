@@ -34,3 +34,6 @@ jobs:
 
       - name: Test
         run: npm run test:ci
+
+      - name: Verify committed dist
+        run: git diff --exit-code -- dist/index.js
