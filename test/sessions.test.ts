@@ -20,19 +20,34 @@ async function recordedCalls(recordDir: string): Promise<Array<{ args: string[];
     .map((line) => JSON.parse(line));
 }
 
-async function waitFor<T>(read: () => T | undefined, timeoutMs = 2_000): Promise<T> {
+async function waitFor<T>(read: () => T | undefined | Promise<T | undefined>, timeoutMs = 2_000): Promise<T> {
   const started = Date.now();
   while (Date.now() - started < timeoutMs) {
-    const value = read();
+    const value = await read();
     if (value) return value;
     await new Promise((resolve) => setTimeout(resolve, 10));
   }
   throw new Error("Timed out waiting for condition");
 }
 
+async function removeTempDir(dir: string): Promise<void> {
+  for (let attempt = 0; attempt < 5; attempt += 1) {
+    try {
+      await rm(dir, { recursive: true, force: true });
+      return;
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException).code;
+      if (code !== "ENOTEMPTY" && code !== "EBUSY" && code !== "EPERM") throw error;
+      await new Promise((resolve) => setTimeout(resolve, 25 * (attempt + 1)));
+    }
+  }
+  await rm(dir, { recursive: true, force: true });
+}
+
 afterEach(async () => {
   delete process.env.CODEX_SUBAGENTS_SESSION_PROTOCOL;
-  await Promise.all(tempDirs.splice(0).map((dir) => rm(dir, { recursive: true, force: true })));
+  delete process.env.CODEX_SUBAGENTS_MAX_SESSIONS;
+  await Promise.all(tempDirs.splice(0).map(removeTempDir));
 });
 
 describe("CodexSessionManager", () => {
@@ -104,6 +119,71 @@ describe("CodexSessionManager", () => {
       true,
     );
     manager.cancel(started.session.id);
+  });
+
+  it("archives completed app-server desktop threads when explicitly cancelled", async () => {
+    const manager = new CodexSessionManager();
+    const projectDir = await tempDir("codex-subagents-session-project-");
+    const recordDir = await tempDir("codex-subagents-session-record-");
+
+    const started = await manager.start({
+      prompt: "archive completed session",
+      projectDir,
+      codexBin: fakeCodex,
+      env: {
+        FAKE_CODEX_RECORD_DIR: recordDir,
+      },
+    });
+
+    expect(started.result.ok).toBe(true);
+    const cancelled = manager.cancel(started.session.id, "done with session");
+    expect(cancelled?.status).toBe("cancelled");
+
+    const calls = await waitFor(async () => {
+      const current = await recordedCalls(recordDir);
+      return current.some((call) => call.method === "thread/archive" && call.threadId === started.session.codexThreadId) &&
+        current.some((call) => call.method === "process/sigterm")
+        ? current
+        : undefined;
+    });
+    const archiveIndex = calls.findIndex((call) => call.method === "thread/archive");
+    const sigtermIndex = calls.findIndex((call) => call.method === "process/sigterm");
+    expect(archiveIndex).toBeGreaterThanOrEqual(0);
+    expect(sigtermIndex).toBeGreaterThan(archiveIndex);
+  });
+
+  it("archives app-server desktop threads when retention pruning removes them", async () => {
+    process.env.CODEX_SUBAGENTS_MAX_SESSIONS = "1";
+    const manager = new CodexSessionManager();
+    const projectDir = await tempDir("codex-subagents-session-project-");
+    const recordDir = await tempDir("codex-subagents-session-record-");
+
+    const first = await manager.start({
+      prompt: "archive pruned session one",
+      projectDir,
+      codexBin: fakeCodex,
+      env: {
+        FAKE_CODEX_RECORD_DIR: recordDir,
+      },
+    });
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    const second = await manager.start({
+      prompt: "archive pruned session two",
+      projectDir,
+      codexBin: fakeCodex,
+      env: {
+        FAKE_CODEX_RECORD_DIR: recordDir,
+      },
+    });
+
+    expect(manager.list().map((session) => session.id)).toEqual([second.session.id]);
+    await waitFor(async () => {
+      const calls = await recordedCalls(recordDir);
+      return calls.some((call) => call.method === "thread/archive" && call.threadId === first.session.codexThreadId)
+        ? true
+        : undefined;
+    });
+    manager.cancel(second.session.id);
   });
 
   it("delivers steering to the active app-server turn", async () => {

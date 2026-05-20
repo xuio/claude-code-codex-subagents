@@ -59,6 +59,7 @@ if (args[0] === "app-server") {
   let activePrompt = "";
   let activeSteers = [];
   let threadName = null;
+  let threadArchived = false;
   let activeTimer = undefined;
 
   function modeText() {
@@ -217,6 +218,7 @@ if (args[0] === "app-server") {
       }
       threadId = `fake-thread-${process.pid}-${Math.random().toString(36).slice(2, 8)}`;
       threadName = null;
+      threadArchived = false;
       recordCall({
         protocol: "app-server",
         method,
@@ -272,6 +274,16 @@ if (args[0] === "app-server") {
       recordCall({ protocol: "app-server", method, threadId: params?.threadId ?? threadId, name: threadName });
       if (hasMode("THREAD_NAME_SET_ERROR")) {
         send({ id, error: { code: -32000, message: "fake thread name set error" } });
+        return;
+      }
+      send({ id, result: {} });
+      return;
+    }
+    if (method === "thread/archive") {
+      threadArchived = true;
+      recordCall({ protocol: "app-server", method, threadId: params?.threadId ?? threadId });
+      if (hasMode("THREAD_ARCHIVE_ERROR")) {
+        send({ id, error: { code: -32000, message: "fake thread archive error" } });
         return;
       }
       send({ id, result: {} });
@@ -461,7 +473,7 @@ if (args[0] === "app-server") {
         send({ id, error: { code: -32000, message: "fake thread read error" } });
         return;
       }
-      send({ id, result: { thread: { id: threadId, name: threadName, turns: [] } } });
+      send({ id, result: { thread: { id: threadId, name: threadName, archived: threadArchived, turns: [] } } });
       return;
     }
     send({ id, error: { code: -32601, message: `unknown method ${method}` } });

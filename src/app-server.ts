@@ -33,6 +33,7 @@ type AppServerRequestMethod =
   | "thread/start"
   | "thread/resume"
   | "thread/name/set"
+  | "thread/archive"
   | "turn/start"
   | "turn/steer"
   | "turn/interrupt"
@@ -393,6 +394,27 @@ export class CodexAppServerSession {
         name,
         error: errorForLog(error),
       });
+    }
+  }
+
+  async archiveThread(timeoutMs = 2_000): Promise<boolean> {
+    if (!this.threadId) return false;
+    try {
+      await this.request("thread/archive", { threadId: this.threadId }, timeoutMs);
+      logger.info("codex.app_server.thread_archived", {
+        ...this.logContext,
+        appServerId: this.id,
+        threadId: this.threadId,
+      });
+      return true;
+    } catch (error) {
+      logger.warn("codex.app_server.thread_archive_failed", {
+        ...this.logContext,
+        appServerId: this.id,
+        threadId: this.threadId,
+        error: errorForLog(error),
+      });
+      return false;
     }
   }
 

@@ -87,7 +87,7 @@ const usageGuide = [
   "- Approvals are non-interactive; do not expect Codex to ask permission.",
   "- If codex_followup mode wait returns completed false with timeoutReason \"wait_timeout\", the session is still running unless its status says otherwise.",
   "- Use codex_wait_any after launching several background Codex tasks to harvest whichever one finishes first without busy-polling.",
-  "- Use codex_followup mode cancel to stop a background or actively running Codex session early. The response includes whatever partial output streamed before the interrupt.",
+  "- Use codex_followup mode cancel to stop a background or actively running Codex session early. The response includes whatever partial output streamed before the interrupt, and the matching Codex Desktop thread is archived best-effort when supported.",
   "- If a tool returns error.kind \"backpressure\", reduce max_parallel or wait before retrying. codex://status exposes current queue/session limits.",
   "- If a response mentions outputArtifacts, use the artifact paths for full retained output instead of asking Codex to resend huge stdout/stderr.",
   "- Do not use model_preset \"spark\" by default. Use Spark only when the user asks for Spark or when a quick focused sidecar check is clearly more appropriate than the default Codex model.",
@@ -2619,8 +2619,9 @@ registerTool(
           const activeTurn = sessionBefore.activeTurn;
           const lastResult = sessionBefore.lastResult;
           if (!wasActive && sessionBefore.queuedTurns.length === 0 && lastResult?.status === "completed") {
+            const cancelled = sessionManager.cancel(args.session_id, args.reason ?? "closed after completion");
             await progress.flush();
-            const compactSession = compactSessionSnapshotForMcp(sessionBefore);
+            const compactSession = compactSessionSnapshotForMcp(cancelled ?? sessionBefore);
             const compactResult = compactAgentResultForMcp(lastResult);
             const resultValue = compactResult.structuredOutput ?? compactResult.finalMessage;
             const resultText = stringifyResultValue(resultValue, compactResult.finalMessage);

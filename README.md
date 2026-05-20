@@ -123,7 +123,10 @@ turns, Claude should set `background: true`.
 When app-server sessions use the Codex desktop binary, they are recorded as
 normal top-level Codex threads rather than hidden daemon work. The plugin sets the
 thread name from Claude's task label when the installed Codex app-server supports
-thread naming.
+thread naming. When Claude explicitly cancels a session, or when retention
+pruning removes an old session, the plugin best-effort archives the matching
+Codex Desktop thread before closing the app-server child. It does not hard-delete
+threads, and recoverable sessions are not archived during normal MCP shutdown.
 
 ## Safety Model
 

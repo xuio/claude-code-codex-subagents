@@ -880,12 +880,11 @@ export class CodexSessionManager {
     if (session.controller) {
       session.status = "cancelled";
       session.updatedAt = new Date().toISOString();
-      void session.appServer?.close("cancelled");
       session.controller.abort();
     } else {
       session.status = "cancelled";
       session.updatedAt = new Date().toISOString();
-      void session.appServer?.close("cancelled");
+      this.closeAppServer(session, "cancelled", "cancel");
     }
     this.appendMilestones(session, [
       {
@@ -1195,6 +1194,9 @@ export class CodexSessionManager {
       this.notifyTurn(turn);
       this.notifySession(session);
       this.persist();
+      if (controller.signal.aborted && !session.runtimeShutdownRecoverable) {
+        this.closeAppServer(session, "cancelled", "cancel");
+      }
       throw error;
     } finally {
       session.controller = undefined;
@@ -1355,7 +1357,7 @@ export class CodexSessionManager {
       turn: summarizeRawTrafficForLog(turnSnapshot(turn)),
       result: summarizeRawTrafficForLog(result),
     });
-    if (session.cancelRequested && session.appServer) void session.appServer.close("cancelled");
+    if (session.cancelRequested && session.appServer) this.closeAppServer(session, "cancelled", "cancel");
     this.notifyTurn(turn);
     this.notifySession(session);
     this.persist();
@@ -1570,10 +1572,31 @@ export class CodexSessionManager {
     this.sessions.delete(id);
     if (session.resourceNotifyTimer) clearTimeout(session.resourceNotifyTimer);
     if (session.resourceNotifyMaxTimer) clearTimeout(session.resourceNotifyMaxTimer);
-    void session.appServer?.close("cancelled").catch(() => {});
+    this.closeAppServer(session, "cancelled", `prune_${reason}`);
     this.notifySession(session);
     this.emitSessionChanged(id);
     this.persist();
+  }
+
+  private closeAppServer(
+    session: CodexSessionRecord,
+    status: "failed" | "cancelled",
+    archiveReason?: string,
+  ): void {
+    const appServer = session.appServer;
+    if (!appServer) return;
+    const close = () => appServer.close(status).catch(() => {});
+    if (appServer.status().closed) return;
+    if (!archiveReason || session.protocol !== "app-server" || !session.codexThreadId) {
+      void close();
+      return;
+    }
+    logger.info("session.archive_app_server_thread", {
+      sessionId: session.id,
+      threadId: session.codexThreadId,
+      reason: archiveReason,
+    });
+    void appServer.archiveThread().finally(close);
   }
 
   private loadPersistedSessions(): void {

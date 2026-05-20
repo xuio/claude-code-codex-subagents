@@ -74,6 +74,10 @@ Use this decision path when writing prompts or debugging Claude tool choice:
 | Wait for a background session | `codex_followup` with `mode: "wait"` |
 | Stop a background or running session | `codex_followup` with `mode: "cancel"` |
 
+`mode: "cancel"` also closes the associated app-server session. If Codex Desktop
+supports thread archiving, the plugin best-effort archives that Desktop thread so
+stopped Claude subagent work does not keep cluttering the active thread list.
+
 When in doubt, read `codex://usage` and then choose among the native front-door tools.
 
 ## When To Prefer Codex

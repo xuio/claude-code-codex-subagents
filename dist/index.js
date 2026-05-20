@@ -24375,6 +24375,26 @@ var CodexAppServerSession = class _CodexAppServerSession {
       });
     }
   }
+  async archiveThread(timeoutMs = 2e3) {
+    if (!this.threadId) return false;
+    try {
+      await this.request("thread/archive", { threadId: this.threadId }, timeoutMs);
+      logger.info("codex.app_server.thread_archived", {
+        ...this.logContext,
+        appServerId: this.id,
+        threadId: this.threadId
+      });
+      return true;
+    } catch (error2) {
+      logger.warn("codex.app_server.thread_archive_failed", {
+        ...this.logContext,
+        appServerId: this.id,
+        threadId: this.threadId,
+        error: errorForLog(error2)
+      });
+      return false;
+    }
+  }
   get activeTurnId() {
     return this.activeTurn?.turnId;
   }
@@ -25678,12 +25698,11 @@ var CodexSessionManager = class {
     if (session.controller) {
       session.status = "cancelled";
       session.updatedAt = (/* @__PURE__ */ new Date()).toISOString();
-      void session.appServer?.close("cancelled");
       session.controller.abort();
     } else {
       session.status = "cancelled";
       session.updatedAt = (/* @__PURE__ */ new Date()).toISOString();
-      void session.appServer?.close("cancelled");
+      this.closeAppServer(session, "cancelled", "cancel");
     }
     this.appendMilestones(session, [
       {
@@ -25968,6 +25987,9 @@ var CodexSessionManager = class {
       this.notifyTurn(turn);
       this.notifySession(session);
       this.persist();
+      if (controller.signal.aborted && !session.runtimeShutdownRecoverable) {
+        this.closeAppServer(session, "cancelled", "cancel");
+      }
       throw error2;
     } finally {
       session.controller = void 0;
@@ -26096,7 +26118,7 @@ var CodexSessionManager = class {
       turn: summarizeRawTrafficForLog(turnSnapshot(turn)),
       result: summarizeRawTrafficForLog(result)
     });
-    if (session.cancelRequested && session.appServer) void session.appServer.close("cancelled");
+    if (session.cancelRequested && session.appServer) this.closeAppServer(session, "cancelled", "cancel");
     this.notifyTurn(turn);
     this.notifySession(session);
     this.persist();
@@ -26273,11 +26295,27 @@ var CodexSessionManager = class {
     this.sessions.delete(id);
     if (session.resourceNotifyTimer) clearTimeout(session.resourceNotifyTimer);
     if (session.resourceNotifyMaxTimer) clearTimeout(session.resourceNotifyMaxTimer);
-    void session.appServer?.close("cancelled").catch(() => {
-    });
+    this.closeAppServer(session, "cancelled", `prune_${reason}`);
     this.notifySession(session);
     this.emitSessionChanged(id);
     this.persist();
+  }
+  closeAppServer(session, status, archiveReason) {
+    const appServer = session.appServer;
+    if (!appServer) return;
+    const close = () => appServer.close(status).catch(() => {
+    });
+    if (appServer.status().closed) return;
+    if (!archiveReason || session.protocol !== "app-server" || !session.codexThreadId) {
+      void close();
+      return;
+    }
+    logger.info("session.archive_app_server_thread", {
+      sessionId: session.id,
+      threadId: session.codexThreadId,
+      reason: archiveReason
+    });
+    void appServer.archiveThread().finally(close);
   }
   loadPersistedSessions() {
     const store = this.stateStore;
@@ -26400,7 +26438,7 @@ var usageGuide = [
   "- Approvals are non-interactive; do not expect Codex to ask permission.",
   '- If codex_followup mode wait returns completed false with timeoutReason "wait_timeout", the session is still running unless its status says otherwise.',
   "- Use codex_wait_any after launching several background Codex tasks to harvest whichever one finishes first without busy-polling.",
-  "- Use codex_followup mode cancel to stop a background or actively running Codex session early. The response includes whatever partial output streamed before the interrupt.",
+  "- Use codex_followup mode cancel to stop a background or actively running Codex session early. The response includes whatever partial output streamed before the interrupt, and the matching Codex Desktop thread is archived best-effort when supported.",
   '- If a tool returns error.kind "backpressure", reduce max_parallel or wait before retrying. codex://status exposes current queue/session limits.',
   "- If a response mentions outputArtifacts, use the artifact paths for full retained output instead of asking Codex to resend huge stdout/stderr.",
   '- Do not use model_preset "spark" by default. Use Spark only when the user asks for Spark or when a quick focused sidecar check is clearly more appropriate than the default Codex model.',
@@ -28177,8 +28215,9 @@ registerTool(
           const activeTurn = sessionBefore.activeTurn;
           const lastResult = sessionBefore.lastResult;
           if (!wasActive && sessionBefore.queuedTurns.length === 0 && lastResult?.status === "completed") {
+            const cancelled2 = sessionManager.cancel(args.session_id, args.reason ?? "closed after completion");
             await progress.flush();
-            const compactSession3 = compactSessionSnapshotForMcp(sessionBefore);
+            const compactSession3 = compactSessionSnapshotForMcp(cancelled2 ?? sessionBefore);
             const compactResult = compactAgentResultForMcp(lastResult);
             const resultValue = compactResult.structuredOutput ?? compactResult.finalMessage;
             const resultText = stringifyResultValue(resultValue, compactResult.finalMessage);

@@ -52,11 +52,24 @@ async function readJsonResource(uri) {
 async function waitForCondition(read, timeoutMs = 2_000) {
   const started = Date.now();
   while (Date.now() - started < timeoutMs) {
-    const value = read();
+    const value = await read();
     if (value) return value;
     await new Promise((resolve) => setTimeout(resolve, 10));
   }
   throw new Error("Timed out waiting for condition");
+}
+
+async function recordedCalls() {
+  try {
+    return (await readFile(path.join(recordDir, "calls.jsonl"), "utf8"))
+      .trim()
+      .split("\n")
+      .filter(Boolean)
+      .map((line) => JSON.parse(line));
+  } catch (error) {
+    if (error?.code === "ENOENT") return [];
+    throw error;
+  }
 }
 
 async function listToolsWithEnv(env) {
@@ -313,10 +326,7 @@ try {
     "turn-specific wait diagnostics should not expose the latest session result as partial_result",
     waitedFirstTurn.structuredContent,
   );
-  const calls = (await readFile(path.join(recordDir, "calls.jsonl"), "utf8"))
-    .trim()
-    .split("\n")
-    .map((line) => JSON.parse(line));
+  const calls = await recordedCalls();
   const followupCall = calls.find((call) => call.method === "turn/start" && call.prompt?.includes("single follow-up smoke"));
   assert(followupCall, "expected recorded follow-up turn/start call", calls);
   assert(
@@ -459,6 +469,13 @@ try {
       alreadyCompletedCancel.structuredContent?.was_active === false,
     "cancel on an already-completed session should be idempotent",
     alreadyCompletedCancel.structuredContent,
+  );
+  const singleThreadId = single.structuredContent?.diagnostics?.session?.codexThreadId;
+  assert(singleThreadId, "single keep_session smoke should expose a diagnostic Codex thread id", single.structuredContent);
+  await waitForCondition(async () =>
+    (await recordedCalls()).some((call) => call.method === "thread/archive" && call.threadId === singleThreadId)
+      ? true
+      : undefined,
   );
 
   const cancellable = await callTool("codex_task", {

@@ -38,6 +38,8 @@ try {
     "v2/ThreadStartParams.json",
     "v2/ThreadResumeParams.json",
     "v2/ThreadResumeResponse.json",
+    "v2/ThreadArchiveParams.json",
+    "v2/ThreadArchiveResponse.json",
     "v2/TurnStartParams.json",
     "v2/TurnSteerParams.json",
     "v2/TurnInterruptParams.json",
@@ -67,6 +69,9 @@ try {
   assert(threadResume.properties?.cwd, "thread/resume must keep cwd override support");
   assert(threadResume.properties?.model, "thread/resume must keep model override support");
   assert(threadResume.properties?.sandbox, "thread/resume must keep sandbox override support");
+
+  const threadArchive = await readSchema(out, "v2/ThreadArchiveParams.json");
+  assert(required(threadArchive).has("threadId"), "thread/archive must require threadId", threadArchive.required);
 
   const turnSteer = await readSchema(out, "v2/TurnSteerParams.json");
   assert(required(turnSteer).has("threadId"), "turn/steer must require threadId", turnSteer.required);

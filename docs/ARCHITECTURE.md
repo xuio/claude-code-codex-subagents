@@ -33,7 +33,10 @@ MCP server, there is no background daemon left behind.
 App-server threads are started as normal top-level Codex threads, not as nested
 Codex subagent threads. When the Codex app-server supports `thread/name/set`, the
 plugin best-effort names the thread from Claude's task label so the run is easy
-to find in Codex Desktop history.
+to find in Codex Desktop history. When the app-server supports `thread/archive`,
+explicit session cancellation and retention pruning best-effort archive the
+Desktop thread before the child process is closed. Archive failures are logged and
+do not block cancellation.
 
 ## Binary Resolution
 
@@ -96,7 +99,9 @@ When limits are exceeded, tools return structured recovery hints instead of
 accepting unbounded work.
 
 Completed jobs, idle sessions, and terminal sessions are pruned according to the
-configured retention windows.
+configured retention windows. Pruning an app-server-backed session also
+best-effort archives the Codex Desktop thread. Normal MCP runtime shutdown keeps
+recoverable sessions unarchived so Claude can reattach with the same `session_id`.
 
 ## Logging And Diagnostics
 

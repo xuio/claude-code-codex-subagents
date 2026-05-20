@@ -269,15 +269,49 @@ describe("app-server hardening", () => {
 
     const becameActive = await waitFor(() => Boolean(manager.get(session.id)?.appServer?.activeTurnId));
     expect(becameActive).toBe(true);
+    const codexThreadId = manager.get(session.id)?.codexThreadId;
+    expect(codexThreadId).toBeTruthy();
     const cancelled = manager.cancel(session.id);
     expect(cancelled?.status).toBe("cancelled");
 
-    const sawSigterm = await waitFor(async () => {
-      const calls = await recordedCalls(recordDir);
-      return calls.some((call) => call.method === "process/sigterm");
+    let finalCalls: Array<Record<string, unknown>> = [];
+    const sawCleanup = await waitFor(async () => {
+      finalCalls = await recordedCalls(recordDir);
+      return (
+        finalCalls.some((call) => call.method === "turn/interrupt") &&
+        finalCalls.some((call) => call.method === "thread/archive") &&
+        finalCalls.some((call) => call.method === "process/sigterm")
+      );
     }, 10_000);
-    expect(sawSigterm).toBe(true);
+    expect(sawCleanup).toBe(true);
+    expect(finalCalls.some((call) => call.method === "thread/archive" && call.threadId === codexThreadId)).toBe(true);
   }, 15_000);
+
+  it("still closes app-server sessions when desktop thread archiving is unsupported", async () => {
+    const manager = new CodexSessionManager();
+    const projectDir = await tempDir("codex-subagents-app-archive-unsupported-project-");
+    const recordDir = await tempDir("codex-subagents-app-archive-unsupported-record-");
+
+    const { session, result } = await manager.start({
+      prompt: "archive unsupported session",
+      projectDir,
+      codexBin: fakeCodex,
+      env: {
+        FAKE_CODEX_RECORD_DIR: recordDir,
+        FAKE_CODEX_APP_SERVER_MODE: "THREAD_ARCHIVE_ERROR",
+      },
+    });
+
+    expect(result.ok).toBe(true);
+    const cancelled = manager.cancel(session.id);
+    expect(cancelled?.status).toBe("cancelled");
+
+    const sawCleanup = await waitFor(async () => {
+      const calls = await recordedCalls(recordDir);
+      return calls.some((call) => call.method === "thread/archive") && calls.some((call) => call.method === "process/sigterm");
+    });
+    expect(sawCleanup).toBe(true);
+  });
 
   it("keeps concurrent app-server sessions isolated", async () => {
     const manager = new CodexSessionManager();
