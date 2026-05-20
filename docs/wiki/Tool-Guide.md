@@ -8,7 +8,9 @@ Use the intuitive front-door tools first.
 | Several independent tasks | Multiple `codex_task` calls, or `codex_task_group` for one rollup |
 | Persistent session | `codex_task` with `keep_session: true`, then `codex_followup` |
 | Long-running session | `codex_task` with `background: true`, then `codex_followup` |
+| First completed background task | `codex_wait_any` |
 | Live steering | `codex_followup` with `mode: "steer"` |
+| Session progress | Resource `codex://sessions/{session_id}` |
 | Diagnostics | Resources `codex://status`, `codex://doctor`, `codex://usage` |
 
 ## One Agent

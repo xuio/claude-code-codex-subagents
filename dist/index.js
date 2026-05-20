@@ -20140,6 +20140,228 @@ var McpZodTypeKind;
   McpZodTypeKind2["Completable"] = "McpCompletable";
 })(McpZodTypeKind || (McpZodTypeKind = {}));
 
+// node_modules/@modelcontextprotocol/sdk/dist/esm/shared/uriTemplate.js
+var MAX_TEMPLATE_LENGTH = 1e6;
+var MAX_VARIABLE_LENGTH = 1e6;
+var MAX_TEMPLATE_EXPRESSIONS = 1e4;
+var MAX_REGEX_LENGTH = 1e6;
+var UriTemplate = class _UriTemplate {
+  /**
+   * Returns true if the given string contains any URI template expressions.
+   * A template expression is a sequence of characters enclosed in curly braces,
+   * like {foo} or {?bar}.
+   */
+  static isTemplate(str) {
+    return /\{[^}\s]+\}/.test(str);
+  }
+  static validateLength(str, max, context) {
+    if (str.length > max) {
+      throw new Error(`${context} exceeds maximum length of ${max} characters (got ${str.length})`);
+    }
+  }
+  get variableNames() {
+    return this.parts.flatMap((part) => typeof part === "string" ? [] : part.names);
+  }
+  constructor(template) {
+    _UriTemplate.validateLength(template, MAX_TEMPLATE_LENGTH, "Template");
+    this.template = template;
+    this.parts = this.parse(template);
+  }
+  toString() {
+    return this.template;
+  }
+  parse(template) {
+    const parts = [];
+    let currentText = "";
+    let i = 0;
+    let expressionCount = 0;
+    while (i < template.length) {
+      if (template[i] === "{") {
+        if (currentText) {
+          parts.push(currentText);
+          currentText = "";
+        }
+        const end = template.indexOf("}", i);
+        if (end === -1)
+          throw new Error("Unclosed template expression");
+        expressionCount++;
+        if (expressionCount > MAX_TEMPLATE_EXPRESSIONS) {
+          throw new Error(`Template contains too many expressions (max ${MAX_TEMPLATE_EXPRESSIONS})`);
+        }
+        const expr = template.slice(i + 1, end);
+        const operator = this.getOperator(expr);
+        const exploded = expr.includes("*");
+        const names = this.getNames(expr);
+        const name = names[0];
+        for (const name2 of names) {
+          _UriTemplate.validateLength(name2, MAX_VARIABLE_LENGTH, "Variable name");
+        }
+        parts.push({ name, operator, names, exploded });
+        i = end + 1;
+      } else {
+        currentText += template[i];
+        i++;
+      }
+    }
+    if (currentText) {
+      parts.push(currentText);
+    }
+    return parts;
+  }
+  getOperator(expr) {
+    const operators = ["+", "#", ".", "/", "?", "&"];
+    return operators.find((op) => expr.startsWith(op)) || "";
+  }
+  getNames(expr) {
+    const operator = this.getOperator(expr);
+    return expr.slice(operator.length).split(",").map((name) => name.replace("*", "").trim()).filter((name) => name.length > 0);
+  }
+  encodeValue(value, operator) {
+    _UriTemplate.validateLength(value, MAX_VARIABLE_LENGTH, "Variable value");
+    if (operator === "+" || operator === "#") {
+      return encodeURI(value);
+    }
+    return encodeURIComponent(value);
+  }
+  expandPart(part, variables) {
+    if (part.operator === "?" || part.operator === "&") {
+      const pairs = part.names.map((name) => {
+        const value2 = variables[name];
+        if (value2 === void 0)
+          return "";
+        const encoded2 = Array.isArray(value2) ? value2.map((v) => this.encodeValue(v, part.operator)).join(",") : this.encodeValue(value2.toString(), part.operator);
+        return `${name}=${encoded2}`;
+      }).filter((pair) => pair.length > 0);
+      if (pairs.length === 0)
+        return "";
+      const separator = part.operator === "?" ? "?" : "&";
+      return separator + pairs.join("&");
+    }
+    if (part.names.length > 1) {
+      const values2 = part.names.map((name) => variables[name]).filter((v) => v !== void 0);
+      if (values2.length === 0)
+        return "";
+      return values2.map((v) => Array.isArray(v) ? v[0] : v).join(",");
+    }
+    const value = variables[part.name];
+    if (value === void 0)
+      return "";
+    const values = Array.isArray(value) ? value : [value];
+    const encoded = values.map((v) => this.encodeValue(v, part.operator));
+    switch (part.operator) {
+      case "":
+        return encoded.join(",");
+      case "+":
+        return encoded.join(",");
+      case "#":
+        return "#" + encoded.join(",");
+      case ".":
+        return "." + encoded.join(".");
+      case "/":
+        return "/" + encoded.join("/");
+      default:
+        return encoded.join(",");
+    }
+  }
+  expand(variables) {
+    let result = "";
+    let hasQueryParam = false;
+    for (const part of this.parts) {
+      if (typeof part === "string") {
+        result += part;
+        continue;
+      }
+      const expanded = this.expandPart(part, variables);
+      if (!expanded)
+        continue;
+      if ((part.operator === "?" || part.operator === "&") && hasQueryParam) {
+        result += expanded.replace("?", "&");
+      } else {
+        result += expanded;
+      }
+      if (part.operator === "?" || part.operator === "&") {
+        hasQueryParam = true;
+      }
+    }
+    return result;
+  }
+  escapeRegExp(str) {
+    return str.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  }
+  partToRegExp(part) {
+    const patterns = [];
+    for (const name2 of part.names) {
+      _UriTemplate.validateLength(name2, MAX_VARIABLE_LENGTH, "Variable name");
+    }
+    if (part.operator === "?" || part.operator === "&") {
+      for (let i = 0; i < part.names.length; i++) {
+        const name2 = part.names[i];
+        const prefix = i === 0 ? "\\" + part.operator : "&";
+        patterns.push({
+          pattern: prefix + this.escapeRegExp(name2) + "=([^&]+)",
+          name: name2
+        });
+      }
+      return patterns;
+    }
+    let pattern;
+    const name = part.name;
+    switch (part.operator) {
+      case "":
+        pattern = part.exploded ? "([^/,]+(?:,[^/,]+)*)" : "([^/,]+)";
+        break;
+      case "+":
+      case "#":
+        pattern = "(.+)";
+        break;
+      case ".":
+        pattern = "\\.([^/,]+)";
+        break;
+      case "/":
+        pattern = "/" + (part.exploded ? "([^/,]+(?:,[^/,]+)*)" : "([^/,]+)");
+        break;
+      default:
+        pattern = "([^/]+)";
+    }
+    patterns.push({ pattern, name });
+    return patterns;
+  }
+  match(uri) {
+    _UriTemplate.validateLength(uri, MAX_TEMPLATE_LENGTH, "URI");
+    let pattern = "^";
+    const names = [];
+    for (const part of this.parts) {
+      if (typeof part === "string") {
+        pattern += this.escapeRegExp(part);
+      } else {
+        const patterns = this.partToRegExp(part);
+        for (const { pattern: partPattern, name } of patterns) {
+          pattern += partPattern;
+          names.push({ name, exploded: part.exploded });
+        }
+      }
+    }
+    pattern += "$";
+    _UriTemplate.validateLength(pattern, MAX_REGEX_LENGTH, "Generated regex pattern");
+    const regex = new RegExp(pattern);
+    const match = uri.match(regex);
+    if (!match)
+      return null;
+    const result = {};
+    for (let i = 0; i < names.length; i++) {
+      const { name, exploded } = names[i];
+      const value = match[i + 1];
+      const cleanName = name.replace("*", "");
+      if (exploded && value.includes(",")) {
+        result[cleanName] = value.split(",");
+      } else {
+        result[cleanName] = value;
+      }
+    }
+    return result;
+  }
+};
+
 // node_modules/@modelcontextprotocol/sdk/dist/esm/shared/toolNameValidation.js
 var TOOL_NAME_REGEX = /^[A-Za-z0-9._-]{1,128}$/;
 function validateToolName(name) {
@@ -20927,6 +21149,30 @@ var McpServer = class {
     if (this.isConnected()) {
       this.server.sendPromptListChanged();
     }
+  }
+};
+var ResourceTemplate = class {
+  constructor(uriTemplate, _callbacks) {
+    this._callbacks = _callbacks;
+    this._uriTemplate = typeof uriTemplate === "string" ? new UriTemplate(uriTemplate) : uriTemplate;
+  }
+  /**
+   * Gets the URI template pattern.
+   */
+  get uriTemplate() {
+    return this._uriTemplate;
+  }
+  /**
+   * Gets the list callback, if one was provided.
+   */
+  get listCallback() {
+    return this._callbacks.list;
+  }
+  /**
+   * Gets the callback for completing a specific URI template variable, if one was provided.
+   */
+  completeCallback(variable) {
+    return this._callbacks.complete?.[variable];
   }
 };
 var EMPTY_OBJECT_JSON_SCHEMA = {
@@ -23522,22 +23768,27 @@ function timeoutPromise(ms) {
 async function bounded(promise, timeoutMs) {
   return Promise.race([promise, timeoutPromise(timeoutMs)]);
 }
+function progressMinIntervalMs(env = process.env) {
+  const parsed = Number(env.CODEX_SUBAGENTS_PROGRESS_MIN_INTERVAL_MS);
+  if (!Number.isFinite(parsed) || parsed < 0) return 250;
+  return Math.max(0, Math.min(Math.floor(parsed), 5e3));
+}
 function createProgressReporter(extra, options = {}) {
   const progressToken = extra?._meta?.progressToken;
   const sendTimeoutMs = options.sendTimeoutMs ?? progressSendTimeoutMs();
+  const minIntervalMs = options.minIntervalMs ?? progressMinIntervalMs();
   let progress = 0;
   let pending = Promise.resolve();
   let disabled = false;
   let failures = 0;
-  async function send(message, progressOptions = {}) {
-    logger.rawDebug("mcp.progress", {
-      hasProgressToken: progressToken !== void 0,
-      message,
-      options: progressOptions
-    });
-    if (progressToken === void 0 || !extra || disabled) return;
+  let lastSentAt = 0;
+  let throttleTimer;
+  let pendingThrottled;
+  function queueSend(message, progressOptions = {}) {
+    if (progressToken === void 0 || !extra) return;
     pending = pending.catch(() => {
     }).then(async () => {
+      if (disabled) return;
       const requested = progressOptions.progress ?? progress + 1;
       const unclamped = Math.max(progress + 1, requested);
       const next = progressOptions.total === void 0 ? unclamped : Math.min(
@@ -23546,6 +23797,7 @@ function createProgressReporter(extra, options = {}) {
       );
       if (next <= progress) return;
       progress = next;
+      lastSentAt = Date.now();
       await bounded(
         extra.sendNotification({
           method: "notifications/progress",
@@ -23573,11 +23825,52 @@ function createProgressReporter(extra, options = {}) {
       if (failures >= 2) disabled = true;
       logger.error("mcp.notification.failed", { disabled, error: errorForLog(error2) });
     });
+  }
+  function scheduleThrottledSend() {
+    if (throttleTimer || !pendingThrottled) return;
+    const elapsed = Date.now() - lastSentAt;
+    const delay = Math.max(0, minIntervalMs - elapsed);
+    throttleTimer = setTimeout(() => {
+      throttleTimer = void 0;
+      const next = pendingThrottled;
+      pendingThrottled = void 0;
+      if (next) queueSend(next.message, next.progressOptions);
+    }, delay);
+    throttleTimer.unref();
+  }
+  async function send(message, progressOptions = {}) {
+    logger.rawDebug("mcp.progress", {
+      hasProgressToken: progressToken !== void 0,
+      message,
+      options: progressOptions
+    });
+    if (progressToken === void 0 || !extra || disabled) return;
+    const elapsed = Date.now() - lastSentAt;
+    if (progressOptions.force || minIntervalMs === 0 || lastSentAt === 0 || elapsed >= minIntervalMs) {
+      if (progressOptions.force && throttleTimer) {
+        clearTimeout(throttleTimer);
+        throttleTimer = void 0;
+        pendingThrottled = void 0;
+      }
+      queueSend(message, progressOptions);
+    } else {
+      pendingThrottled = { message, progressOptions };
+      scheduleThrottledSend();
+    }
     await bounded(pending, sendTimeoutMs + 25).catch(() => {
     });
   }
   async function flush() {
     if (progressToken === void 0 || !extra) return;
+    if (throttleTimer) {
+      clearTimeout(throttleTimer);
+      throttleTimer = void 0;
+    }
+    if (pendingThrottled) {
+      const next = pendingThrottled;
+      pendingThrottled = void 0;
+      queueSend(next.message, next.progressOptions);
+    }
     await bounded(pending, sendTimeoutMs + 25).catch(() => {
     });
     await new Promise((resolve) => setTimeout(resolve, 0));
@@ -24824,12 +25117,15 @@ function snapshot2(session) {
       stateFile: session.stateFile
     } : void 0,
     turns: session.turns,
+    lastMilestoneSeq: session.milestoneSeq,
+    milestones: session.milestones.map((milestone) => ({ ...milestone })),
     active: Boolean(session.controller),
     activeTurn: session.activeTurn ? turnSnapshot(session.activeTurn) : void 0,
     queuedTurns: session.queuedTurns.map(turnSnapshot),
     recentTurns: session.recentTurns.slice(-20).map(turnSnapshot),
     partial: session.partial,
     lastResult: session.lastResult,
+    lastResultTurnId: session.lastResultTurnId,
     error: session.error
   };
 }
@@ -24849,10 +25145,97 @@ function readPositiveInt2(value, fallback, max) {
   if (!Number.isInteger(parsed) || parsed < 1) return fallback;
   return Math.min(parsed, max);
 }
+function readBoundedInt(value, fallback, min, max) {
+  const parsed = Number(value);
+  if (!Number.isInteger(parsed) || parsed < 1) return fallback;
+  return Math.max(min, Math.min(parsed, max));
+}
+function maxSessionMilestones(env = process.env) {
+  return readBoundedInt(env.CODEX_SUBAGENTS_MAX_SESSION_MILESTONES, 50, 10, 500);
+}
+function truncateText(text, maxChars) {
+  return text.length <= maxChars ? text : text.slice(0, maxChars);
+}
+function firstUsefulLine(text, fallback = "") {
+  const line = text?.split(/\r?\n/).map((part) => part.trim()).find(Boolean);
+  return line ?? fallback;
+}
+function sanitizeMilestone(milestone) {
+  return {
+    ...milestone,
+    command: milestone.command ? truncateText(redactSensitiveText(milestone.command), 200) : void 0,
+    text: milestone.text ? truncateText(redactSensitiveText(firstUsefulLine(milestone.text)), 500) : void 0,
+    error: milestone.error ? truncateText(redactSensitiveText(firstUsefulLine(milestone.error)), 500) : void 0
+  };
+}
+function defaultMilestoneDetectionState() {
+  return {
+    commandCount: 0,
+    commandStatuses: [],
+    completedItemCount: 0,
+    errorCount: 0
+  };
+}
+function detectMilestones(partial2, prevState = defaultMilestoneDetectionState(), turnId) {
+  const milestones = [];
+  const commands = partial2.eventSummary.commands ?? [];
+  for (let index = prevState.commandCount; index < commands.length; index += 1) {
+    const command = commands[index]?.command;
+    if (!command) continue;
+    milestones.push({
+      kind: "command_started",
+      command,
+      turn_id: turnId
+    });
+  }
+  for (let index = 0; index < Math.min(prevState.commandStatuses.length, commands.length); index += 1) {
+    const before = prevState.commandStatuses[index];
+    const now = commands[index]?.status;
+    if (before !== now && (now === "completed" || now === "failed")) {
+      milestones.push({
+        kind: "command_completed",
+        command: commands[index]?.command,
+        turn_id: turnId
+      });
+    }
+  }
+  const completedItemCount = partial2.eventSummary.counts?.["item/completed"] ?? 0;
+  const lastAgentMessage = partial2.lastAgentMessage ?? partial2.eventSummary.lastAgentMessage;
+  if (completedItemCount > prevState.completedItemCount && lastAgentMessage && lastAgentMessage !== prevState.lastAgentMessage) {
+    milestones.push({
+      kind: "agent_message",
+      text: lastAgentMessage,
+      turn_id: turnId
+    });
+  }
+  const errors = partial2.eventSummary.errors ?? [];
+  for (let index = prevState.errorCount; index < errors.length; index += 1) {
+    const error2 = errors[index];
+    if (!error2) continue;
+    milestones.push({
+      kind: "error",
+      error: error2,
+      turn_id: turnId
+    });
+  }
+  return {
+    milestones,
+    nextState: {
+      commandCount: commands.length,
+      commandStatuses: commands.map((command) => command.status),
+      completedItemCount,
+      errorCount: errors.length,
+      lastAgentMessage
+    }
+  };
+}
 var CodexSessionManager = class {
   sessions = /* @__PURE__ */ new Map();
   stateStore;
   persistedSessionIds = /* @__PURE__ */ new Set();
+  onSessionChanged;
+  resourceDebounceMs;
+  resourceMaxDelayMs;
   completedTtlSeconds = readPositiveInt2(
     process.env.CODEX_SUBAGENTS_SESSION_COMPLETED_TTL_SECONDS,
     3600,
@@ -24865,11 +25248,19 @@ var CodexSessionManager = class {
   );
   maxSessions = readPositiveInt2(process.env.CODEX_SUBAGENTS_MAX_SESSIONS, 100, 1e3);
   maxQueuedTurns = readPositiveInt2(process.env.CODEX_SUBAGENTS_MAX_SESSION_QUEUED_TURNS, 32, 1e3);
+  maxMilestonesPerSession;
   constructor(options = {}) {
+    this.onSessionChanged = options.onSessionChanged;
+    this.resourceDebounceMs = options.resourceDebounceMs ?? 250;
+    this.resourceMaxDelayMs = options.resourceMaxDelayMs ?? 2e3;
+    this.maxMilestonesPerSession = options.maxMilestonesPerSession ?? maxSessionMilestones();
     if (options.persist) {
       this.stateStore = new SessionStateStore(options.stateFile);
       this.loadPersistedSessions();
     }
+  }
+  setSessionChangedHandler(handler) {
+    this.onSessionChanged = handler;
   }
   list() {
     this.prune();
@@ -24879,6 +25270,21 @@ var CodexSessionManager = class {
     this.prune();
     const session = this.sessions.get(id);
     return session ? snapshot2(session) : void 0;
+  }
+  getMilestonesSince(id, sinceSeq) {
+    this.prune();
+    const session = this.sessions.get(id);
+    if (!session) return [];
+    return session.milestones.filter((milestone) => milestone.seq > sinceSeq).map((milestone) => ({ ...milestone }));
+  }
+  subscribeMilestones(id, callback) {
+    const session = this.sessions.get(id);
+    if (!session) return () => {
+    };
+    session.milestoneSubscribers.add(callback);
+    return () => {
+      session.milestoneSubscribers.delete(callback);
+    };
   }
   stats() {
     this.prune();
@@ -24897,11 +25303,15 @@ var CodexSessionManager = class {
       maxQueuedTurns: this.maxQueuedTurns,
       completedTtlSeconds: this.completedTtlSeconds,
       idleTtlSeconds: this.idleTtlSeconds,
+      maxMilestonesPerSession: this.maxMilestonesPerSession,
+      resourceDebounceMs: this.resourceDebounceMs,
+      resourceMaxDelayMs: this.resourceMaxDelayMs,
       durableStateFile: this.stateStore?.file
     };
   }
   async start(options, metadata = {}) {
     const { session, turn } = this.createSession(options, metadata);
+    const unsubscribeMilestones = metadata.onMilestone ? this.subscribeMilestones(session.id, metadata.onMilestone) : void 0;
     const abortHandler = () => {
       logger.warn("session.start_request_cancelled", { sessionId: session.id, turnId: turn.id });
       this.cancel(session.id);
@@ -24916,6 +25326,7 @@ var CodexSessionManager = class {
       }
       return { session: snapshot2(session), result: turn.result };
     } finally {
+      unsubscribeMilestones?.();
       options.abortSignal?.removeEventListener("abort", abortHandler);
     }
   }
@@ -24953,6 +25364,10 @@ var CodexSessionManager = class {
       cancelRequested: false,
       runtimeShutdownRecoverable: false,
       waiters: /* @__PURE__ */ new Set(),
+      milestones: [],
+      milestoneSeq: 0,
+      milestoneSubscribers: /* @__PURE__ */ new Set(),
+      milestonesPrevState: defaultMilestoneDetectionState(),
       persisted: Boolean(this.stateStore),
       recovered: false,
       stateFile: this.stateStore?.file
@@ -25162,6 +25577,68 @@ var CodexSessionManager = class {
       timeoutReason: "wait_timeout"
     };
   }
+  async waitAny(ids, timeoutMs, abortSignal) {
+    this.prune();
+    const uniqueIds = [...new Set(ids)];
+    for (const id of uniqueIds) {
+      if (!this.sessions.has(id)) return { completed: false, error: `Unknown session_id: ${id}` };
+    }
+    const winner = () => {
+      this.prune();
+      for (const id of uniqueIds) {
+        const session = this.sessions.get(id);
+        if (!session) return void 0;
+        const done = !session.controller && session.queuedTurns.length === 0 && (Boolean(session.lastResult) || session.status === "failed" || session.status === "cancelled");
+        if (done) return session;
+      }
+      return void 0;
+    };
+    if (abortSignal?.aborted) {
+      return { completed: false, timeoutReason: "wait_cancelled" };
+    }
+    const deadline = Date.now() + timeoutMs;
+    while (Date.now() < deadline) {
+      const completed = winner();
+      if (completed) {
+        return {
+          session: snapshot2(completed),
+          result: completed.lastResult,
+          completed: true,
+          remainingSessionIds: uniqueIds.filter((id) => id !== completed.id)
+        };
+      }
+      await new Promise((resolve) => {
+        const remaining = Math.max(1, deadline - Date.now());
+        let finished = false;
+        const unsubscribers = [];
+        let abortHandler;
+        const finish = () => {
+          if (finished) return;
+          finished = true;
+          clearTimeout(timeout);
+          for (const unsubscribe of unsubscribers) unsubscribe();
+          if (abortHandler) abortSignal?.removeEventListener("abort", abortHandler);
+          resolve();
+        };
+        const timeout = setTimeout(finish, remaining);
+        abortHandler = finish;
+        for (const id of uniqueIds) {
+          const unsubscribe = this.subscribeMilestones(id, finish);
+          unsubscribers.push(unsubscribe);
+        }
+        abortSignal?.addEventListener("abort", abortHandler, { once: true });
+        if (abortSignal?.aborted || winner()) finish();
+      });
+      if (abortSignal?.aborted) {
+        return { completed: false, timeoutReason: "wait_cancelled" };
+      }
+    }
+    return {
+      completed: false,
+      timeoutReason: "wait_timeout",
+      remainingSessionIds: uniqueIds
+    };
+  }
   cancel(id, reason) {
     const session = this.sessions.get(id);
     if (!session) {
@@ -25187,6 +25664,13 @@ var CodexSessionManager = class {
       session.updatedAt = (/* @__PURE__ */ new Date()).toISOString();
       void session.appServer?.close("cancelled");
     }
+    this.appendMilestones(session, [
+      {
+        kind: "cancelled",
+        turn_id: session.activeTurn?.id,
+        text: reason
+      }
+    ], { immediate: true });
     this.notifySession(session);
     this.persist();
     return snapshot2(session);
@@ -25279,6 +25763,15 @@ var CodexSessionManager = class {
       if (session.controller) session.controller.abort();
       if (session.appServer) closePromises.push(session.appServer.close("cancelled").catch(() => {
       }));
+      if (!recoverable) {
+        this.appendMilestones(session, [
+          {
+            kind: "cancelled",
+            turn_id: session.activeTurn?.id,
+            text: `Session was cancelled during ${reason}.`
+          }
+        ], { immediate: true });
+      }
       this.notifySession(session);
       snapshots.push(snapshot2(session));
     }
@@ -25318,6 +25811,13 @@ var CodexSessionManager = class {
       turn: summarizeRawTrafficForLog(turnSnapshot(turn)),
       queuedTurns: session.queuedTurns.length
     });
+    this.appendMilestones(session, [
+      {
+        kind: "queued_turn_added",
+        turn_id: turn.id,
+        text: turn.kind === "steer" ? "Steering prompt queued." : "Prompt queued."
+      }
+    ]);
     this.notifySession(session);
     this.persist();
     return turn;
@@ -25372,6 +25872,13 @@ var CodexSessionManager = class {
       session.status = "failed";
       session.error = turn.error;
       session.updatedAt = turn.updatedAt;
+      this.appendMilestones(session, [
+        {
+          kind: "error",
+          turn_id: turn.id,
+          error: turn.error
+        }
+      ], { immediate: true });
       this.notifyTurn(turn);
       this.notifySession(session);
       return void 0;
@@ -25392,6 +25899,14 @@ var CodexSessionManager = class {
     session.partial = void 0;
     turn.status = "running";
     turn.updatedAt = session.updatedAt;
+    session.milestonesPrevState = defaultMilestoneDetectionState();
+    this.appendMilestones(session, [
+      {
+        kind: "turn_started",
+        turn_id: turn.id,
+        text: turn.kind === "steer" ? "Steering turn started." : "Codex turn started."
+      }
+    ]);
     logger.rawDebug("session.turn.start", {
       session: summarizeRawTrafficForLog(snapshot2(session)),
       prompt: options.prompt,
@@ -25409,6 +25924,13 @@ var CodexSessionManager = class {
       turn.status = controller.signal.aborted ? "cancelled" : "failed";
       turn.error = session.error;
       turn.updatedAt = session.updatedAt;
+      this.appendMilestones(session, [
+        {
+          kind: controller.signal.aborted ? "cancelled" : "error",
+          turn_id: turn.id,
+          error: session.error
+        }
+      ], { immediate: true });
       logger.error("session.turn.failed", {
         sessionId: session.id,
         turnId: turn.id,
@@ -25429,6 +25951,7 @@ var CodexSessionManager = class {
     } finally {
       session.controller = void 0;
       session.activeTurn = void 0;
+      this.scheduleSessionChanged(session, true);
       this.notifySession(session);
     }
   }
@@ -25442,6 +25965,7 @@ var CodexSessionManager = class {
         onSnapshot: (partial2) => {
           session.partial = partial2;
           session.updatedAt = (/* @__PURE__ */ new Date()).toISOString();
+          this.recordPartialMilestones(session, partial2);
           logger.rawDebug("session.turn.partial", {
             sessionId: session.id,
             partial: summarizeRawTrafficForLog(partial2)
@@ -25461,6 +25985,7 @@ var CodexSessionManager = class {
         (partial2) => {
           session.partial = partial2;
           session.updatedAt = (/* @__PURE__ */ new Date()).toISOString();
+          this.recordPartialMilestones(session, partial2);
           logger.rawDebug("session.turn.partial", {
             sessionId: session.id,
             partial: summarizeRawTrafficForLog(partial2)
@@ -25517,6 +26042,7 @@ var CodexSessionManager = class {
   completeTurn(session, turn, result) {
     session.turns += 1;
     session.lastResult = result;
+    session.lastResultTurnId = turn.id;
     session.partial = void 0;
     session.codexThreadId = result.eventSummary.threadId ?? session.codexThreadId;
     session.projectDir = result.cwd;
@@ -25533,6 +26059,17 @@ var CodexSessionManager = class {
     turn.updatedAt = (/* @__PURE__ */ new Date()).toISOString();
     session.status = result.ok ? "active" : result.status === "cancelled" && session.runtimeShutdownRecoverable && session.codexThreadId ? "active" : result.status === "cancelled" && session.queuedTurns.length > 0 && !session.cancelRequested ? "running" : result.status === "cancelled" ? "cancelled" : "failed";
     session.updatedAt = (/* @__PURE__ */ new Date()).toISOString();
+    this.appendMilestones(session, [
+      result.ok ? {
+        kind: "turn_completed",
+        turn_id: turn.id,
+        text: result.finalMessage
+      } : {
+        kind: result.status === "cancelled" ? "cancelled" : "error",
+        turn_id: turn.id,
+        error: result.finalMessage || `Codex turn ${result.status}`
+      }
+    ], { immediate: true });
     logger.rawInfo("session.turn.finish", {
       session: summarizeRawTrafficForLog(snapshot2(session)),
       turn: summarizeRawTrafficForLog(turnSnapshot(turn)),
@@ -25607,6 +26144,81 @@ var CodexSessionManager = class {
     }
     return session.appServer;
   }
+  recordPartialMilestones(session, partial2) {
+    const detected = detectMilestones(partial2, session.milestonesPrevState, session.activeTurn?.id);
+    session.milestonesPrevState = detected.nextState;
+    if (detected.milestones.length > 0) this.appendMilestones(session, detected.milestones);
+  }
+  appendMilestones(session, milestones, options = {}) {
+    if (milestones.length === 0) return;
+    const appended = [];
+    for (const pendingMilestone of milestones) {
+      const sanitized = sanitizeMilestone(pendingMilestone);
+      session.milestoneSeq += 1;
+      const milestone = {
+        seq: session.milestoneSeq,
+        at: (/* @__PURE__ */ new Date()).toISOString(),
+        ...sanitized
+      };
+      session.milestones.push(milestone);
+      appended.push(milestone);
+    }
+    if (session.milestones.length > this.maxMilestonesPerSession) {
+      session.milestones.splice(0, session.milestones.length - this.maxMilestonesPerSession);
+    }
+    for (const milestone of appended) {
+      for (const subscriber of session.milestoneSubscribers) {
+        try {
+          subscriber({ ...milestone });
+        } catch (error2) {
+          logger.error("session.milestone_subscriber_failed", {
+            sessionId: session.id,
+            error: errorForLog(error2)
+          });
+        }
+      }
+    }
+    this.scheduleSessionChanged(session, Boolean(options.immediate));
+  }
+  scheduleSessionChanged(session, immediate = false) {
+    if (!this.onSessionChanged) return;
+    if (immediate) {
+      this.flushSessionChanged(session);
+      return;
+    }
+    const now = Date.now();
+    session.firstUnsentMilestoneAt ??= now;
+    if (!session.resourceNotifyTimer) {
+      session.resourceNotifyTimer = setTimeout(() => this.flushSessionChanged(session), this.resourceDebounceMs);
+      session.resourceNotifyTimer.unref();
+    }
+    if (!session.resourceNotifyMaxTimer) {
+      const maxDelay = Math.max(1, this.resourceMaxDelayMs - (now - session.firstUnsentMilestoneAt));
+      session.resourceNotifyMaxTimer = setTimeout(() => this.flushSessionChanged(session), maxDelay);
+      session.resourceNotifyMaxTimer.unref();
+    }
+  }
+  flushSessionChanged(session) {
+    if (session.resourceNotifyTimer) {
+      clearTimeout(session.resourceNotifyTimer);
+      session.resourceNotifyTimer = void 0;
+    }
+    if (session.resourceNotifyMaxTimer) {
+      clearTimeout(session.resourceNotifyMaxTimer);
+      session.resourceNotifyMaxTimer = void 0;
+    }
+    session.firstUnsentMilestoneAt = void 0;
+    this.emitSessionChanged(session.id);
+  }
+  emitSessionChanged(sessionId) {
+    if (!this.onSessionChanged) return;
+    Promise.resolve(this.onSessionChanged(sessionId)).catch((error2) => {
+      logger.error("session.resource_update_failed", {
+        sessionId,
+        error: errorForLog(error2)
+      });
+    });
+  }
   notifyTurn(turn) {
     for (const waiter of turn.waiters) waiter();
     turn.waiters.clear();
@@ -25638,9 +26250,12 @@ var CodexSessionManager = class {
   pruneSession(id, session, reason) {
     logger.warn("session.pruned", { sessionId: id, reason, status: session.status });
     this.sessions.delete(id);
+    if (session.resourceNotifyTimer) clearTimeout(session.resourceNotifyTimer);
+    if (session.resourceNotifyMaxTimer) clearTimeout(session.resourceNotifyMaxTimer);
     void session.appServer?.close("cancelled").catch(() => {
     });
     this.notifySession(session);
+    this.emitSessionChanged(id);
     this.persist();
   }
   loadPersistedSessions() {
@@ -25687,6 +26302,10 @@ var CodexSessionManager = class {
       cancelRequested: state.status === "cancelled",
       runtimeShutdownRecoverable: false,
       waiters: /* @__PURE__ */ new Set(),
+      milestones: [],
+      milestoneSeq: 0,
+      milestoneSubscribers: /* @__PURE__ */ new Set(),
+      milestonesPrevState: defaultMilestoneDetectionState(),
       persisted: true,
       recovered: true,
       stateFile: this.stateStore?.file
@@ -25737,7 +26356,8 @@ var usageGuide = [
   "- Use codex_task for one delegated Codex task. It is the native Claude-like front door: description plus prompt, read-only by default, and answer-first result. Call codex_task multiple times in one assistant turn when independent investigations can run in parallel.",
   "- Use codex_task_group when the work can be split into independent concurrent tasks and Claude wants one combined response with rolled-up per-task findings.",
   "- Use codex_followup when Claude already has a session_id from codex_task or codex_task_group and wants to continue, steer, wait on, or cancel that same Codex context.",
-  "- Set codex_task background true for long-running work so Claude gets a session_id immediately, then use codex_followup mode wait, steer, or cancel.",
+  "- Set codex_task background true for long-running work so Claude gets a session_id immediately, then use codex_wait_any for several sessions or codex_followup mode wait, steer, or cancel for one session.",
+  "- Subscribe to or read codex://sessions/{session_id} for background progress milestones and completion state. The server emits notifications/resources/updated when meaningful Codex output changes.",
   "- Diagnostics are resources by default: read codex://status, codex://doctor, or codex://usage when a prior call failed or availability is uncertain.",
   "- Debug tools such as codex_status, codex_doctor, codex_usage_guide, codex_choose_tool, and codex_export_debug_bundle are hidden unless CODEX_SUBAGENTS_ENABLE_DEBUG_TOOLS=1.",
   "- Legacy/manual tools such as ask_codex, run_agent, run_agents, and old session names are hidden unless CODEX_SUBAGENTS_ENABLE_LEGACY_TOOLS=1.",
@@ -25748,6 +26368,7 @@ var usageGuide = [
   "- If the user explicitly asks for non-sandbox/full local capabilities, set full_access true. This maps to Codex's --dangerously-bypass-approvals-and-sandbox flag and allows DNS/network plus unrestricted file and git writes.",
   "- Approvals are non-interactive; do not expect Codex to ask permission.",
   '- If codex_followup mode wait returns completed false with timeoutReason "wait_timeout", the session is still running unless its status says otherwise.',
+  "- Use codex_wait_any after launching several background Codex tasks to harvest whichever one finishes first without busy-polling.",
   "- Use codex_followup mode cancel to stop a background or actively running Codex session early. The response includes whatever partial output streamed before the interrupt.",
   '- If a tool returns error.kind "backpressure", reduce max_parallel or wait before retrying. codex://status exposes current queue/session limits.',
   "- If a response mentions outputArtifacts, use the artifact paths for full retained output instead of asking Codex to resend huge stdout/stderr.",
@@ -25774,6 +26395,15 @@ var server = new McpServer(
   {
     instructions: usageGuide
   }
+);
+server.server.registerCapabilities({ resources: { subscribe: true } });
+server.server.setRequestHandler(SubscribeRequestSchema, async () => ({}));
+server.server.setRequestHandler(UnsubscribeRequestSchema, async () => ({}));
+function sessionResourceUri(sessionId) {
+  return `codex://sessions/${encodeURIComponent(sessionId)}`;
+}
+sessionManager.setSessionChangedHandler(
+  (sessionId) => server.server.sendResourceUpdated({ uri: sessionResourceUri(sessionId) })
 );
 var legacyToolsEnabled = process.env.CODEX_SUBAGENTS_ENABLE_LEGACY_TOOLS === "1";
 var debugToolsEnabled = process.env.CODEX_SUBAGENTS_ENABLE_DEBUG_TOOLS === "1";
@@ -26104,7 +26734,7 @@ function agentResultResponse(result) {
     !result.ok
   );
 }
-function firstUsefulLine(text, fallback) {
+function firstUsefulLine2(text, fallback) {
   const line = String(text ?? "").split(/\r?\n/).map((part) => part.trim()).find(Boolean);
   if (!line) return fallback;
   return line.length <= 500 ? line : `${line.slice(0, 500)}...`;
@@ -26121,12 +26751,12 @@ function stringifyResultValue(value, fallback = "") {
 function summarizeResultValue(value, fallbackText, fallback) {
   if (value && typeof value === "object" && !Array.isArray(value)) {
     const summary = value.summary;
-    if (typeof summary === "string" && summary.trim()) return firstUsefulLine(summary, fallback);
+    if (typeof summary === "string" && summary.trim()) return firstUsefulLine2(summary, fallback);
   }
   if (typeof value === "string" && !value.trim() && fallbackText.trim()) {
-    return firstUsefulLine(fallbackText, fallback);
+    return firstUsefulLine2(fallbackText, fallback);
   }
-  return firstUsefulLine(stringifyResultValue(value, fallbackText), fallback);
+  return firstUsefulLine2(stringifyResultValue(value, fallbackText), fallback);
 }
 function agentFallbackErrorText(agent, recovery) {
   const validationError = typeof agent.validationError === "string" ? agent.validationError.trim() : "";
@@ -26183,7 +26813,7 @@ function nativeErrorPayload(error2, context = "tool_call") {
 Next: ${recovery.recommendedAction}` : message;
   return {
     ok: false,
-    summary: `Codex task failed: ${firstUsefulLine(message, "unknown error")}`,
+    summary: `Codex task failed: ${firstUsefulLine2(message, "unknown error")}`,
     result,
     error: {
       message,
@@ -26293,7 +26923,7 @@ Next: ${recovery.recommendedAction}` : message;
       name: run.task.name ?? run.task.description ?? `codex-task-${index + 1}`,
       ok: false,
       status: "failed",
-      summary: firstUsefulLine(message, "Codex task failed before producing a result."),
+      summary: firstUsefulLine2(message, "Codex task failed before producing a result."),
       result,
       session_id: run.session?.id,
       error: {
@@ -26487,16 +27117,52 @@ async function withProgressHeartbeat(progress, message, operation, progressOptio
     clearInterval(interval);
   }
 }
+function formatMilestoneProgress(milestone) {
+  switch (milestone.kind) {
+    case "turn_started":
+      return "Codex turn started";
+    case "turn_completed":
+      return milestone.text ? firstUsefulLine2(`Codex completed: ${milestone.text}`, "Codex turn completed") : "Codex turn completed";
+    case "command_started":
+      return milestone.command ? firstUsefulLine2(`Codex command: ${milestone.command}`, "Codex command started") : "Codex command started";
+    case "command_completed":
+      return milestone.command ? firstUsefulLine2(`Codex command completed: ${milestone.command}`, "Codex command completed") : "Codex command completed";
+    case "agent_message":
+      return milestone.text ? firstUsefulLine2(`Codex: ${milestone.text}`, "Codex produced output") : "Codex produced output";
+    case "error":
+      return milestone.error ? firstUsefulLine2(`Codex error: ${milestone.error}`, "Codex error") : "Codex error";
+    case "cancelled":
+      return "Codex session cancelled";
+    case "queued_turn_added":
+      return "Codex turn queued";
+  }
+}
+async function withSessionMilestoneProgress(progress, sessionId, operation) {
+  const unsubscribe = sessionManager.subscribeMilestones(sessionId, (milestone) => {
+    const message = formatMilestoneProgress(milestone);
+    if (message) void progress.send(message);
+  });
+  try {
+    return await operation();
+  } finally {
+    unsubscribe();
+  }
+}
 function codexLiveProgressMessage(sessionId, fallback) {
   const session = sessionManager.get(sessionId);
+  const milestone = session?.milestones.at(-1);
+  if (milestone) {
+    const message = formatMilestoneProgress(milestone);
+    if (message) return message;
+  }
   const partial2 = session?.partial;
   const lastCommand = partial2?.eventSummary.commands.at(-1);
   if (lastCommand?.command) {
     const suffix = lastCommand.status ? ` (${lastCommand.status})` : "";
-    return firstUsefulLine(`Codex running: ${lastCommand.command}${suffix}`, fallback);
+    return firstUsefulLine2(`Codex running: ${lastCommand.command}${suffix}`, fallback);
   }
   if (partial2?.lastAgentMessage) {
-    return firstUsefulLine(`Codex: ${partial2.lastAgentMessage}`, fallback);
+    return firstUsefulLine2(`Codex: ${partial2.lastAgentMessage}`, fallback);
   }
   const activeStatus = session?.activeTurn?.status ?? session?.status;
   return activeStatus ? `Codex session ${sessionId} ${activeStatus}` : fallback;
@@ -26710,7 +27376,7 @@ async function codexStatusPayload(codexBin) {
     version: status.version,
     error: status.error,
     cwd: process.cwd(),
-    defaultTools: ["codex_task", "codex_task_group", "codex_followup"],
+    defaultTools: ["codex_task", "codex_task_group", "codex_followup", "codex_wait_any"],
     hiddenDebugTools: !debugToolsEnabled,
     hiddenLegacyTools: !legacyToolsEnabled,
     defaultModel: defaultModel(),
@@ -26741,6 +27407,12 @@ async function codexStatusPayload(codexBin) {
     claudeProjectDir: cleanOption(process.env.CLAUDE_PROJECT_DIR),
     queue: jobManager.stats(),
     sessions: sessionManager.stats(),
+    notifications: {
+      resource_updates_enabled: true,
+      debounce_ms: 250,
+      max_delay_ms: 2e3,
+      max_milestones_per_session: maxSessionMilestones()
+    },
     logging: loggingDiagnostics(),
     artifacts: outputArtifactDiagnostics(),
     processes,
@@ -26834,6 +27506,61 @@ function jsonResource(uri, value) {
     ]
   };
 }
+function sessionResourceStatus(session) {
+  if (session.status === "failed" || session.status === "cancelled") return session.status;
+  return session.active ? "running" : "idle";
+}
+function sessionResourceMilestone(milestone) {
+  return redactJsonValue({
+    seq: milestone.seq,
+    at: milestone.at,
+    kind: milestone.kind,
+    turn_id: milestone.turn_id,
+    command: milestone.command,
+    text: milestone.text,
+    error: milestone.error
+  });
+}
+function sessionResourceBody(session) {
+  const lastResult = session.lastResult ? compactAgentResultForMcp(session.lastResult) : void 0;
+  return redactJsonValue({
+    id: session.id,
+    name: session.name,
+    status: sessionResourceStatus(session),
+    active: session.active,
+    completed: Boolean(
+      !session.active && session.queuedTurns.length === 0 && (session.lastResult || session.status === "failed" || session.status === "cancelled")
+    ),
+    created_at: session.createdAt,
+    updated_at: session.updatedAt,
+    project_dir: session.projectDir ?? session.cwd,
+    turns: session.turns,
+    queued_turns: session.queuedTurns.length,
+    last_milestone_seq: session.lastMilestoneSeq,
+    milestones: session.milestones.map(sessionResourceMilestone),
+    last_result: lastResult ? {
+      ok: lastResult.ok,
+      status: lastResult.status,
+      final_message: redactSensitiveText(lastResult.finalMessage),
+      duration_ms: lastResult.durationMs,
+      turn_id: session.lastResultTurnId
+    } : null
+  });
+}
+function sessionResourceList() {
+  return {
+    resources: sessionManager.list().slice(0, 100).map((session) => ({
+      uri: sessionResourceUri(session.id),
+      name: session.name ?? session.id,
+      mimeType: "application/json",
+      description: `Codex session ${sessionResourceStatus(session)} - ${session.turns} turn${session.turns === 1 ? "" : "s"}`
+    }))
+  };
+}
+function templateVariable(value) {
+  if (Array.isArray(value)) return String(value[0] ?? "");
+  return String(value ?? "");
+}
 server.registerResource(
   "codex-usage",
   "codex://usage",
@@ -26872,6 +27599,23 @@ server.registerResource(
   },
   async (uri) => jsonResource(uri, await codexDoctorPayload())
 );
+server.registerResource(
+  "codex-session",
+  new ResourceTemplate("codex://sessions/{session_id}", {
+    list: () => sessionResourceList()
+  }),
+  {
+    title: "Codex Session",
+    description: "Per-session Codex progress milestones and completion state for background tasks.",
+    mimeType: "application/json"
+  },
+  async (uri, variables) => {
+    const sessionId = templateVariable(variables.session_id);
+    const session = sessionManager.get(sessionId);
+    if (!session) throw new Error(`Unknown session_id: ${sessionId}`);
+    return jsonResource(uri, sessionResourceBody(session));
+  }
+);
 registerDebugTool(
   "codex_usage_guide",
   {
@@ -26890,6 +27634,7 @@ registerDebugTool(
         parallelTasks: "codex_task_group",
         followUpOrSteer: "codex_followup",
         longRunningTask: "codex_task with background true",
+        harvestParallelBackgroundTasks: "codex_wait_any",
         inspectStatus: "Read codex://status",
         inspectDoctor: "Read codex://doctor",
         exportDiagnostics: "codex_export_debug_bundle",
@@ -27011,7 +27756,7 @@ registerTool(
             result: `Codex task started in the background. Session: ${session2.id}`,
             session_id: session2.id,
             turn,
-            hint: "Use codex_followup mode wait, steer, or cancel with this session_id."
+            hint: "Use codex_wait_any for parallel background tasks, or codex_followup mode wait, steer, or cancel with this session_id."
           };
           if (args.advanced?.include_diagnostics) {
             payload.diagnostics = {
@@ -27024,7 +27769,13 @@ registerTool(
         const { session, result } = await withProgressHeartbeat(
           progress,
           `Still running Codex task: ${args.description}`,
-          () => sessionManager.start(withRequestAbort(runOptions, extra), { sessionName: args.session_name })
+          () => sessionManager.start(withRequestAbort(runOptions, extra), {
+            sessionName: args.session_name,
+            onMilestone: (milestone) => {
+              const message = formatMilestoneProgress(milestone);
+              if (message) void progress.send(message);
+            }
+          })
         );
         await reportAgentResult(progress, result);
         await progress.flush();
@@ -27331,7 +28082,11 @@ registerTool(
           const waited = await withProgressHeartbeat(
             progress,
             () => codexLiveProgressMessage(args.session_id, `Still waiting for Codex session ${args.session_id}`),
-            () => sessionManager.wait(args.session_id, args.wait_timeout_ms ?? 6e5, args.turn_id, extra?.signal)
+            () => withSessionMilestoneProgress(
+              progress,
+              args.session_id,
+              () => sessionManager.wait(args.session_id, args.wait_timeout_ms ?? 6e5, args.turn_id, extra?.signal)
+            )
           );
           await progress.flush();
           if (waited.error || !waited.session) {
@@ -27351,6 +28106,7 @@ registerTool(
             status: completed ? "completed" : "running",
             result: resultText || (completed ? "Codex session is idle." : "Codex session is still running."),
             session_id: args.session_id,
+            last_milestone_seq: waited.session.lastMilestoneSeq,
             elapsed_ms: progressPayload.elapsed_ms,
             summary: completed ? summarizeResultValue(waitValue, resultText, "Codex session is ready.") : waited.timeoutReason === "wait_timeout" ? "Codex session is still running." : "Codex session wait was cancelled."
           };
@@ -27449,7 +28205,7 @@ registerTool(
         const response = wait ? await withProgressHeartbeat(
           progress,
           () => codexLiveProgressMessage(args.session_id, `Still waiting for Codex session ${args.session_id}`),
-          run
+          () => withSessionMilestoneProgress(progress, args.session_id, run)
         ) : await run();
         if (response.error || !response.session) {
           await progress.flush();
@@ -27478,7 +28234,7 @@ registerTool(
           session_id: args.session_id,
           turn: response.turn,
           delivery,
-          hint: "Use codex_followup mode wait, steer, or cancel with this session_id."
+          hint: "Use codex_wait_any for parallel background tasks, or codex_followup mode wait, steer, or cancel with this session_id."
         };
         if (args.advanced?.include_diagnostics) {
           payload.diagnostics = {
@@ -27491,6 +28247,85 @@ registerTool(
         await progress.flush();
         logger.error("codex_followup.failed", { error: errorForLog(error2) });
         return nativeErrorResult(error2, "codex_followup");
+      }
+    });
+  }
+);
+registerTool(
+  "codex_wait_any",
+  {
+    title: "Wait For Any Task",
+    description: "Block until any listed Codex background session reaches a terminal state, then return that session's result. Use after firing multiple codex_task background: true calls to collect results one at a time without busy-polling.",
+    inputSchema: {
+      session_ids: external_exports.array(external_exports.string().trim().min(1)).min(1).max(32).describe("Session ids returned by previous codex_task or codex_task_group calls."),
+      wait_timeout_ms: external_exports.number().int().positive().max(864e5).default(6e5).describe("Maximum total wait. If no session finishes in this window, returns completed=false.")
+    }
+  },
+  async (args, extra) => {
+    return loggedToolCall("codex_wait_any", args, extra, async () => {
+      const progress = createProgressReporter(extra);
+      const startedAt = Date.now();
+      const sessionIds = [...new Set(args.session_ids)];
+      const unsubscribers = [];
+      try {
+        await progress.send(`Waiting for ${sessionIds.length} Codex session${sessionIds.length === 1 ? "" : "s"}`);
+        for (const sessionId of sessionIds) {
+          unsubscribers.push(
+            sessionManager.subscribeMilestones(sessionId, (milestone) => {
+              const message = formatMilestoneProgress(milestone);
+              if (message) void progress.send(`${sessionId}: ${message}`);
+            })
+          );
+        }
+        const waited = await withProgressHeartbeat(
+          progress,
+          () => {
+            const active = sessionIds.map((sessionId) => codexLiveProgressMessage(sessionId, "")).filter(Boolean).slice(0, 2);
+            return active.length > 0 ? active.join(" | ") : `Still waiting for ${sessionIds.length} Codex session${sessionIds.length === 1 ? "" : "s"}`;
+          },
+          () => sessionManager.waitAny(sessionIds, args.wait_timeout_ms ?? 6e5, extra?.signal)
+        );
+        for (const unsubscribe of unsubscribers.splice(0)) unsubscribe();
+        await progress.flush();
+        if (waited.error) return nativeErrorResult(new Error(waited.error), "codex_wait_any");
+        if (waited.timeoutReason === "wait_cancelled") {
+          return nativeErrorResult(new Error("MCP request was cancelled by the client."), "codex_wait_any");
+        }
+        const elapsedMs = Date.now() - startedAt;
+        if (!waited.completed || !waited.session) {
+          return nativeTextResult({
+            ok: true,
+            status: "running",
+            completed: false,
+            timeoutReason: "wait_timeout",
+            session_ids: waited.remainingSessionIds ?? sessionIds,
+            elapsed_ms: elapsedMs,
+            hint: "No session completed within the wait window. Retry with a larger timeout or inspect codex://sessions/<id>."
+          });
+        }
+        const compactResult = waited.result ? compactAgentResultForMcp(waited.result) : void 0;
+        const resultValue = compactResult?.structuredOutput ?? compactResult?.finalMessage;
+        const resultText = compactResult ? stringifyResultValue(resultValue, compactResult.finalMessage) : waited.session.error ?? `Codex session ${sessionResourceStatus(waited.session)}`;
+        const status = compactResult?.status ?? (waited.session.status === "cancelled" ? "cancelled" : waited.session.status === "failed" ? "failed" : "completed");
+        await progress.send(`Codex session ${waited.session.id} finished`, { force: true });
+        await progress.flush();
+        return nativeTextResult({
+          ok: status === "completed",
+          status,
+          completed: true,
+          session_id: waited.session.id,
+          result: resultText || `Codex session ${status}.`,
+          remaining_session_ids: waited.remainingSessionIds ?? sessionIds.filter((id) => id !== waited.session?.id),
+          elapsed_ms: elapsedMs,
+          last_milestone_seq: waited.session.lastMilestoneSeq,
+          hint: "Call codex_wait_any again with remaining_session_ids to collect the next finisher."
+        });
+      } catch (error2) {
+        await progress.flush();
+        logger.error("codex_wait_any.failed", { error: errorForLog(error2) });
+        return nativeErrorResult(error2, "codex_wait_any");
+      } finally {
+        for (const unsubscribe of unsubscribers) unsubscribe();
       }
     });
   }
@@ -27888,7 +28723,7 @@ registerDebugTool(
             ok: result ? result.ok : true,
             status: result?.status ?? "queued",
             result: result ? stringifyResultValue(result.structuredOutput ?? result.finalMessage, result.finalMessage) : "Prompt queued.",
-            summary: result ? firstUsefulLine(result.finalMessage, `Codex turn ${result.status}`) : "Queued Codex session prompt.",
+            summary: result ? firstUsefulLine2(result.finalMessage, `Codex turn ${result.status}`) : "Queued Codex session prompt.",
             confidence: result?.ok === false ? "low" : "high",
             session: compactSession,
             ...sessionProgressPayload(compactSession),
@@ -27945,7 +28780,7 @@ registerDebugTool(
             ok: result ? result.ok : true,
             status: result?.status ?? "queued",
             result: result ? stringifyResultValue(result.structuredOutput ?? result.finalMessage, result.finalMessage) : "Steering delivered.",
-            summary: result ? firstUsefulLine(result.finalMessage, `Codex steering ${result.status}`) : `Steering ${delivery}.`,
+            summary: result ? firstUsefulLine2(result.finalMessage, `Codex steering ${result.status}`) : `Steering ${delivery}.`,
             confidence: result?.ok === false ? "low" : "high",
             session: compactSession,
             ...sessionProgressPayload(compactSession),

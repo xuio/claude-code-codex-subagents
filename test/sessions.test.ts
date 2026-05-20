@@ -197,6 +197,73 @@ describe("CodexSessionManager", () => {
     manager.cancel(started.session.id);
   });
 
+  it("publishes milestones to subscribers, caps the ring buffer, and waits for any session", async () => {
+    const updates: string[] = [];
+    const manager = new CodexSessionManager({
+      maxMilestonesPerSession: 3,
+      resourceDebounceMs: 5,
+      resourceMaxDelayMs: 20,
+      onSessionChanged: (sessionId) => {
+        updates.push(sessionId);
+      },
+    });
+    const projectDir = await tempDir("codex-subagents-session-project-");
+
+    const { session } = manager.startAsync({
+      prompt: "session wait any RUN_COMMAND_EVENT DELAY_MS=30",
+      projectDir,
+      codexBin: fakeCodex,
+    });
+    const seen: string[] = [];
+    const unsubscribe = manager.subscribeMilestones(session.id, (milestone) => seen.push(milestone.kind));
+
+    const waited = await manager.waitAny([session.id], 2_000);
+    unsubscribe();
+
+    expect(waited.completed).toBe(true);
+    expect(waited.session?.id).toBe(session.id);
+    expect(waited.result?.finalMessage).toContain("session wait any");
+    expect(waited.remainingSessionIds).toEqual([]);
+    expect(seen).toContain("turn_completed");
+    expect(manager.get(session.id)?.milestones.length).toBeLessThanOrEqual(3);
+    await waitFor(() => (updates.includes(session.id) ? true : undefined));
+    manager.cancel(session.id);
+  });
+
+  it("reports unknown ids from waitAny without registering waiters", async () => {
+    const manager = new CodexSessionManager();
+    const waited = await manager.waitAny(["session-missing"], 10);
+
+    expect(waited.completed).toBe(false);
+    expect(waited.error).toBe("Unknown session_id: session-missing");
+    expect(manager.stats().waiters).toBe(0);
+  });
+
+  it("redacts milestone text and does not persist milestones", async () => {
+    process.env.CODEX_SUBAGENTS_SESSION_PROTOCOL = "exec";
+    const stateFile = path.join(await tempDir("codex-subagents-session-state-"), "sessions.json");
+    const manager = new CodexSessionManager({ persist: true, stateFile });
+    const projectDir = await tempDir("codex-subagents-session-project-");
+
+    const started = await manager.start({
+      prompt: "LEAK_SECRET",
+      projectDir,
+      codexBin: fakeCodex,
+    });
+    const milestoneJson = JSON.stringify(started.session.milestones);
+    const stateJson = await readFile(stateFile, "utf8");
+
+    expect(milestoneJson).not.toContain("sk-test1234567890abcdefghijklmnop");
+    expect(milestoneJson).not.toContain("abc123secret");
+    expect(stateJson).not.toContain("milestones");
+    expect(stateJson).not.toContain("sk-test1234567890abcdefghijklmnop");
+
+    const recovered = new CodexSessionManager({ persist: true, stateFile });
+    expect(recovered.get(started.session.id)?.milestones).toEqual([]);
+    expect(recovered.get(started.session.id)?.lastMilestoneSeq).toBe(0);
+    manager.cancel(started.session.id);
+  });
+
   it("does not fall back to exec for invalid app-server run configuration", async () => {
     const manager = new CodexSessionManager();
     const projectDir = await tempDir("codex-subagents-session-project-");

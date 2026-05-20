@@ -29,6 +29,8 @@ Prefer these tools in normal Claude usage:
 - `codex_followup` - continue, steer, wait on, or cancel the `session_id`
   returned by `codex_task` or `codex_task_group` when `background` or
   `keep_session` is used.
+- `codex_wait_any` - wait until any one of several background sessions finishes,
+  then call it again with `remaining_session_ids` to collect the rest.
 
 Legacy compatibility tools are hidden by default. Set
 `CODEX_SUBAGENTS_ENABLE_LEGACY_TOOLS=1` only for older clients that still call
@@ -39,6 +41,7 @@ Diagnostic resources are available without cluttering the tool picker:
 - `codex://usage`
 - `codex://status`
 - `codex://doctor`
+- `codex://sessions/{session_id}`
 
 Native tool responses are intentionally lean by default. For a single debugging
 call, set `advanced.include_diagnostics: true` to include cwd/model/sandbox,
@@ -63,12 +66,13 @@ Use this decision path when writing prompts or debugging Claude tool choice:
 | Two or more independent workstreams | Multiple parallel `codex_task` calls, or `codex_task_group` for one rolled-up response |
 | Same Codex agent should keep context | `codex_task` with `keep_session: true`, then `codex_followup` |
 | Long first turn, user wants to keep working | `codex_task` with `background: true` |
+| Several background sessions are running | `codex_wait_any` |
 | Add a normal follow-up to a running session | `codex_followup` with `mode: "queue"` |
 | Redirect the active app-server turn | `codex_followup` with `mode: "steer"` |
 | Wait for a background session | `codex_followup` with `mode: "wait"` |
 | Stop a background or running session | `codex_followup` with `mode: "cancel"` |
 
-When in doubt, read `codex://usage` and then choose among the three native tools.
+When in doubt, read `codex://usage` and then choose among the native front-door tools.
 
 ## Example: One Agent
 
@@ -162,6 +166,23 @@ To steer an active app-server turn:
 
 If `session.supportsRealSteering` is false, the session fell back to the exec
 protocol and steering becomes a high-priority queued turn.
+
+For background sessions, `codex://sessions/{session_id}` exposes a compact JSON
+resource with `status`, `completed`, `last_milestone_seq`, recent milestones,
+and the latest result. MCP clients that support resource subscriptions receive
+`notifications/resources/updated` when Codex starts a turn, queues work, emits a
+meaningful milestone, completes, fails, or is cancelled.
+
+To collect whichever background session finishes first:
+
+```json
+{
+  "session_ids": ["session-a", "session-b"],
+  "wait_timeout_ms": 600000
+}
+```
+
+Use the returned `remaining_session_ids` in the next `codex_wait_any` call.
 
 To stop a background or actively running session:
 
@@ -273,6 +294,7 @@ servers should not be loaded for the run.
 | `CODEX_SUBAGENTS_JOB_TTL_SECONDS` | Completed async job retention window |
 | `CODEX_SUBAGENTS_MAX_SESSIONS` | Maximum retained persistent sessions |
 | `CODEX_SUBAGENTS_MAX_SESSION_QUEUED_TURNS` | Maximum queued turns per session |
+| `CODEX_SUBAGENTS_MAX_SESSION_MILESTONES` | Recent milestone ring size per session, clamped to 10-500 |
 | `CODEX_SUBAGENTS_SESSION_COMPLETED_TTL_SECONDS` | Retention for failed/cancelled sessions |
 | `CODEX_SUBAGENTS_SESSION_IDLE_TTL_SECONDS` | Retention for idle resumable sessions |
 | `CODEX_SUBAGENTS_SESSION_STATE_FILE` | Durable session metadata path |
@@ -285,6 +307,7 @@ servers should not be loaded for the run.
 | `CODEX_SUBAGENTS_LOG_FILE_MAX_BYTES` | Rotate the log file after this size |
 | `CODEX_SUBAGENTS_LOG_MAX_STRING_CHARS` | Maximum retained string payload per log field |
 | `CODEX_SUBAGENTS_PROGRESS_HEARTBEAT_MS` | Progress heartbeat interval |
+| `CODEX_SUBAGENTS_PROGRESS_MIN_INTERVAL_MS` | Minimum delay between progress notifications; rapid updates are coalesced |
 | `CODEX_SUBAGENTS_ENABLE_DEBUG_TOOLS` | Set `1` to expose tool-callable diagnostics |
 | `CODEX_SUBAGENTS_ENABLE_LEGACY_TOOLS` | Set `1` to expose pre-refactor compatibility tools |
 | `CODEX_SUBAGENTS_OUTPUT_ARTIFACTS` | Set `0` to disable output artifact files |

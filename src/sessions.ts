@@ -3,6 +3,7 @@ import { BackpressureError, runQueuedAgent } from "./jobs.js";
 import { errorForLog, logger, summarizeRawTrafficForLog } from "./logging.js";
 import { RunValidationError, type AgentRunOptions, type AgentRunPartial, type AgentRunResult } from "./runner.js";
 import { recordDiagnosticEvent } from "./diagnostics.js";
+import { redactSensitiveText } from "./redaction.js";
 import {
   durableRunOptions,
   type DurableSessionState,
@@ -14,6 +15,38 @@ type SessionTurnKind = "prompt" | "steer";
 type SessionTurnStatus = "queued" | "running" | "completed" | "failed" | "cancelled";
 type SessionProtocol = "app-server" | "exec";
 type SessionWaitTimeoutReason = "wait_timeout" | "wait_cancelled";
+export type SessionMilestoneKind =
+  | "turn_started"
+  | "turn_completed"
+  | "command_started"
+  | "command_completed"
+  | "agent_message"
+  | "error"
+  | "cancelled"
+  | "queued_turn_added";
+
+export interface SessionMilestone {
+  seq: number;
+  at: string;
+  kind: SessionMilestoneKind;
+  turn_id?: string;
+  command?: string;
+  text?: string;
+  error?: string;
+}
+
+export type PendingSessionMilestone = Omit<SessionMilestone, "seq" | "at">;
+
+export interface MilestoneDetectionState {
+  commandCount: number;
+  commandStatuses: Array<string | undefined>;
+  completedItemCount: number;
+  errorCount: number;
+  lastAgentMessage?: string;
+}
+
+type MilestoneSubscriber = (milestone: SessionMilestone) => void;
+type SessionChangedHandler = (sessionId: string) => void | Promise<void>;
 
 export interface CodexSessionTurnSnapshot {
   id: string;
@@ -47,12 +80,15 @@ export interface CodexSessionSnapshot {
     stateFile?: string;
   };
   turns: number;
+  lastMilestoneSeq: number;
+  milestones: SessionMilestone[];
   active: boolean;
   activeTurn?: CodexSessionTurnSnapshot;
   queuedTurns: CodexSessionTurnSnapshot[];
   recentTurns: CodexSessionTurnSnapshot[];
   partial?: AgentRunPartial;
   lastResult?: AgentRunResult;
+  lastResultTurnId?: string;
   error?: string;
 }
 
@@ -65,6 +101,9 @@ export interface CodexSessionStats {
   maxQueuedTurns: number;
   completedTtlSeconds: number;
   idleTtlSeconds: number;
+  maxMilestonesPerSession: number;
+  resourceDebounceMs: number;
+  resourceMaxDelayMs: number;
   durableStateFile?: string;
 }
 
@@ -90,6 +129,7 @@ interface CodexSessionRecord {
   turns: number;
   partial?: AgentRunPartial;
   lastResult?: AgentRunResult;
+  lastResultTurnId?: string;
   error?: string;
   baseOptions: Omit<AgentRunOptions, "prompt" | "abortSignal" | "onSnapshot">;
   controller?: AbortController;
@@ -100,6 +140,13 @@ interface CodexSessionRecord {
   cancelRequested: boolean;
   runtimeShutdownRecoverable: boolean;
   waiters: Set<() => void>;
+  milestones: SessionMilestone[];
+  milestoneSeq: number;
+  milestoneSubscribers: Set<MilestoneSubscriber>;
+  milestonesPrevState?: MilestoneDetectionState;
+  firstUnsentMilestoneAt?: number;
+  resourceNotifyTimer?: NodeJS.Timeout;
+  resourceNotifyMaxTimer?: NodeJS.Timeout;
   persisted: boolean;
   recovered: boolean;
   stateFile?: string;
@@ -160,12 +207,15 @@ function snapshot(session: CodexSessionRecord): CodexSessionSnapshot {
         }
       : undefined,
     turns: session.turns,
+    lastMilestoneSeq: session.milestoneSeq,
+    milestones: session.milestones.map((milestone) => ({ ...milestone })),
     active: Boolean(session.controller),
     activeTurn: session.activeTurn ? turnSnapshot(session.activeTurn) : undefined,
     queuedTurns: session.queuedTurns.map(turnSnapshot),
     recentTurns: session.recentTurns.slice(-20).map(turnSnapshot),
     partial: session.partial,
     lastResult: session.lastResult,
+    lastResultTurnId: session.lastResultTurnId,
     error: session.error,
   };
 }
@@ -190,10 +240,120 @@ function readPositiveInt(value: string | undefined, fallback: number, max: numbe
   return Math.min(parsed, max);
 }
 
+function readBoundedInt(value: string | undefined, fallback: number, min: number, max: number): number {
+  const parsed = Number(value);
+  if (!Number.isInteger(parsed) || parsed < 1) return fallback;
+  return Math.max(min, Math.min(parsed, max));
+}
+
+export function maxSessionMilestones(env: NodeJS.ProcessEnv = process.env): number {
+  return readBoundedInt(env.CODEX_SUBAGENTS_MAX_SESSION_MILESTONES, 50, 10, 500);
+}
+
+function truncateText(text: string, maxChars: number): string {
+  return text.length <= maxChars ? text : text.slice(0, maxChars);
+}
+
+function firstUsefulLine(text: string | undefined, fallback = ""): string {
+  const line = text
+    ?.split(/\r?\n/)
+    .map((part) => part.trim())
+    .find(Boolean);
+  return line ?? fallback;
+}
+
+function sanitizeMilestone(milestone: PendingSessionMilestone): PendingSessionMilestone {
+  return {
+    ...milestone,
+    command: milestone.command ? truncateText(redactSensitiveText(milestone.command), 200) : undefined,
+    text: milestone.text ? truncateText(redactSensitiveText(firstUsefulLine(milestone.text)), 500) : undefined,
+    error: milestone.error ? truncateText(redactSensitiveText(firstUsefulLine(milestone.error)), 500) : undefined,
+  };
+}
+
+export function defaultMilestoneDetectionState(): MilestoneDetectionState {
+  return {
+    commandCount: 0,
+    commandStatuses: [],
+    completedItemCount: 0,
+    errorCount: 0,
+  };
+}
+
+export function detectMilestones(
+  partial: AgentRunPartial,
+  prevState: MilestoneDetectionState = defaultMilestoneDetectionState(),
+  turnId?: string,
+): { milestones: PendingSessionMilestone[]; nextState: MilestoneDetectionState } {
+  const milestones: PendingSessionMilestone[] = [];
+  const commands = partial.eventSummary.commands ?? [];
+
+  for (let index = prevState.commandCount; index < commands.length; index += 1) {
+    const command = commands[index]?.command;
+    if (!command) continue;
+    milestones.push({
+      kind: "command_started",
+      command,
+      turn_id: turnId,
+    });
+  }
+
+  for (let index = 0; index < Math.min(prevState.commandStatuses.length, commands.length); index += 1) {
+    const before = prevState.commandStatuses[index];
+    const now = commands[index]?.status;
+    if (before !== now && (now === "completed" || now === "failed")) {
+      milestones.push({
+        kind: "command_completed",
+        command: commands[index]?.command,
+        turn_id: turnId,
+      });
+    }
+  }
+
+  const completedItemCount = partial.eventSummary.counts?.["item/completed"] ?? 0;
+  const lastAgentMessage = partial.lastAgentMessage ?? partial.eventSummary.lastAgentMessage;
+  if (
+    completedItemCount > prevState.completedItemCount &&
+    lastAgentMessage &&
+    lastAgentMessage !== prevState.lastAgentMessage
+  ) {
+    milestones.push({
+      kind: "agent_message",
+      text: lastAgentMessage,
+      turn_id: turnId,
+    });
+  }
+
+  const errors = partial.eventSummary.errors ?? [];
+  for (let index = prevState.errorCount; index < errors.length; index += 1) {
+    const error = errors[index];
+    if (!error) continue;
+    milestones.push({
+      kind: "error",
+      error,
+      turn_id: turnId,
+    });
+  }
+
+  return {
+    milestones,
+    nextState: {
+      commandCount: commands.length,
+      commandStatuses: commands.map((command) => command.status),
+      completedItemCount,
+      errorCount: errors.length,
+      lastAgentMessage,
+    },
+  };
+}
+
 export class CodexSessionManager {
   private readonly sessions = new Map<string, CodexSessionRecord>();
   private readonly stateStore: SessionStateStore | undefined;
   private readonly persistedSessionIds = new Set<string>();
+  private onSessionChanged?: SessionChangedHandler;
+  private readonly resourceDebounceMs: number;
+  private readonly resourceMaxDelayMs: number;
   private readonly completedTtlSeconds = readPositiveInt(
     process.env.CODEX_SUBAGENTS_SESSION_COMPLETED_TTL_SECONDS,
     3600,
@@ -206,12 +366,28 @@ export class CodexSessionManager {
   );
   private readonly maxSessions = readPositiveInt(process.env.CODEX_SUBAGENTS_MAX_SESSIONS, 100, 1_000);
   private readonly maxQueuedTurns = readPositiveInt(process.env.CODEX_SUBAGENTS_MAX_SESSION_QUEUED_TURNS, 32, 1_000);
+  private readonly maxMilestonesPerSession: number;
 
-  constructor(options: { persist?: boolean; stateFile?: string } = {}) {
+  constructor(options: {
+    persist?: boolean;
+    stateFile?: string;
+    onSessionChanged?: SessionChangedHandler;
+    resourceDebounceMs?: number;
+    resourceMaxDelayMs?: number;
+    maxMilestonesPerSession?: number;
+  } = {}) {
+    this.onSessionChanged = options.onSessionChanged;
+    this.resourceDebounceMs = options.resourceDebounceMs ?? 250;
+    this.resourceMaxDelayMs = options.resourceMaxDelayMs ?? 2_000;
+    this.maxMilestonesPerSession = options.maxMilestonesPerSession ?? maxSessionMilestones();
     if (options.persist) {
       this.stateStore = new SessionStateStore(options.stateFile);
       this.loadPersistedSessions();
     }
+  }
+
+  setSessionChangedHandler(handler: SessionChangedHandler | undefined): void {
+    this.onSessionChanged = handler;
   }
 
   list(): CodexSessionSnapshot[] {
@@ -223,6 +399,24 @@ export class CodexSessionManager {
     this.prune();
     const session = this.sessions.get(id);
     return session ? snapshot(session) : undefined;
+  }
+
+  getMilestonesSince(id: string, sinceSeq: number): SessionMilestone[] {
+    this.prune();
+    const session = this.sessions.get(id);
+    if (!session) return [];
+    return session.milestones
+      .filter((milestone) => milestone.seq > sinceSeq)
+      .map((milestone) => ({ ...milestone }));
+  }
+
+  subscribeMilestones(id: string, callback: MilestoneSubscriber): () => void {
+    const session = this.sessions.get(id);
+    if (!session) return () => {};
+    session.milestoneSubscribers.add(callback);
+    return () => {
+      session.milestoneSubscribers.delete(callback);
+    };
   }
 
   stats(): CodexSessionStats {
@@ -246,15 +440,21 @@ export class CodexSessionManager {
       maxQueuedTurns: this.maxQueuedTurns,
       completedTtlSeconds: this.completedTtlSeconds,
       idleTtlSeconds: this.idleTtlSeconds,
+      maxMilestonesPerSession: this.maxMilestonesPerSession,
+      resourceDebounceMs: this.resourceDebounceMs,
+      resourceMaxDelayMs: this.resourceMaxDelayMs,
       durableStateFile: this.stateStore?.file,
     };
   }
 
   async start(
     options: AgentRunOptions,
-    metadata: { sessionName?: string } = {},
+    metadata: { sessionName?: string; onMilestone?: MilestoneSubscriber } = {},
   ): Promise<{ session: CodexSessionSnapshot; result: AgentRunResult }> {
     const { session, turn } = this.createSession(options, metadata);
+    const unsubscribeMilestones = metadata.onMilestone
+      ? this.subscribeMilestones(session.id, metadata.onMilestone)
+      : undefined;
     const abortHandler = () => {
       logger.warn("session.start_request_cancelled", { sessionId: session.id, turnId: turn.id });
       this.cancel(session.id);
@@ -269,6 +469,7 @@ export class CodexSessionManager {
       }
       return { session: snapshot(session), result: turn.result };
     } finally {
+      unsubscribeMilestones?.();
       options.abortSignal?.removeEventListener("abort", abortHandler);
     }
   }
@@ -314,6 +515,10 @@ export class CodexSessionManager {
       cancelRequested: false,
       runtimeShutdownRecoverable: false,
       waiters: new Set(),
+      milestones: [],
+      milestoneSeq: 0,
+      milestoneSubscribers: new Set(),
+      milestonesPrevState: defaultMilestoneDetectionState(),
       persisted: Boolean(this.stateStore),
       recovered: false,
       stateFile: this.stateStore?.file,
@@ -572,6 +777,89 @@ export class CodexSessionManager {
     };
   }
 
+  async waitAny(
+    ids: string[],
+    timeoutMs: number,
+    abortSignal?: AbortSignal,
+  ): Promise<{
+    session?: CodexSessionSnapshot;
+    result?: AgentRunResult;
+    completed: boolean;
+    timeoutReason?: SessionWaitTimeoutReason;
+    remainingSessionIds?: string[];
+    error?: string;
+  }> {
+    this.prune();
+    const uniqueIds = [...new Set(ids)];
+    for (const id of uniqueIds) {
+      if (!this.sessions.has(id)) return { completed: false, error: `Unknown session_id: ${id}` };
+    }
+
+    const winner = (): CodexSessionRecord | undefined => {
+      this.prune();
+      for (const id of uniqueIds) {
+        const session = this.sessions.get(id);
+        if (!session) return undefined;
+        const done =
+          !session.controller &&
+          session.queuedTurns.length === 0 &&
+          (Boolean(session.lastResult) || session.status === "failed" || session.status === "cancelled");
+        if (done) return session;
+      }
+      return undefined;
+    };
+
+    if (abortSignal?.aborted) {
+      return { completed: false, timeoutReason: "wait_cancelled" };
+    }
+
+    const deadline = Date.now() + timeoutMs;
+    while (Date.now() < deadline) {
+      const completed = winner();
+      if (completed) {
+        return {
+          session: snapshot(completed),
+          result: completed.lastResult,
+          completed: true,
+          remainingSessionIds: uniqueIds.filter((id) => id !== completed.id),
+        };
+      }
+
+      await new Promise<void>((resolve) => {
+        const remaining = Math.max(1, deadline - Date.now());
+        let finished = false;
+        const unsubscribers: Array<() => void> = [];
+        let abortHandler: (() => void) | undefined;
+        const finish = () => {
+          if (finished) return;
+          finished = true;
+          clearTimeout(timeout);
+          for (const unsubscribe of unsubscribers) unsubscribe();
+          if (abortHandler) abortSignal?.removeEventListener("abort", abortHandler);
+          resolve();
+        };
+        const timeout = setTimeout(finish, remaining);
+        abortHandler = finish;
+        for (const id of uniqueIds) {
+          const unsubscribe = this.subscribeMilestones(id, finish);
+          unsubscribers.push(unsubscribe);
+        }
+        abortSignal?.addEventListener("abort", abortHandler, { once: true });
+        if (abortSignal?.aborted || winner()) finish();
+      });
+
+      if (abortSignal?.aborted) {
+        return { completed: false, timeoutReason: "wait_cancelled" };
+      }
+    }
+
+    return {
+      completed: false,
+      timeoutReason: "wait_timeout",
+      remainingSessionIds: uniqueIds,
+    };
+  }
+
   cancel(id: string, reason?: string): CodexSessionSnapshot | undefined {
     const session = this.sessions.get(id);
     if (!session) {
@@ -599,6 +887,13 @@ export class CodexSessionManager {
       session.updatedAt = new Date().toISOString();
       void session.appServer?.close("cancelled");
     }
+    this.appendMilestones(session, [
+      {
+        kind: "cancelled",
+        turn_id: session.activeTurn?.id,
+        text: reason,
+      },
+    ], { immediate: true });
     this.notifySession(session);
     this.persist();
     return snapshot(session);
@@ -693,6 +988,15 @@ export class CodexSessionManager {
       session.updatedAt = now;
       if (session.controller) session.controller.abort();
       if (session.appServer) closePromises.push(session.appServer.close("cancelled").catch(() => {}));
+      if (!recoverable) {
+        this.appendMilestones(session, [
+          {
+            kind: "cancelled",
+            turn_id: session.activeTurn?.id,
+            text: `Session was cancelled during ${reason}.`,
+          },
+        ], { immediate: true });
+      }
       this.notifySession(session);
       snapshots.push(snapshot(session));
     }
@@ -742,6 +1046,13 @@ export class CodexSessionManager {
       turn: summarizeRawTrafficForLog(turnSnapshot(turn)),
       queuedTurns: session.queuedTurns.length,
     });
+    this.appendMilestones(session, [
+      {
+        kind: "queued_turn_added",
+        turn_id: turn.id,
+        text: turn.kind === "steer" ? "Steering prompt queued." : "Prompt queued.",
+      },
+    ]);
     this.notifySession(session);
     this.persist();
     return turn;
@@ -800,6 +1111,13 @@ export class CodexSessionManager {
       session.status = "failed";
       session.error = turn.error;
       session.updatedAt = turn.updatedAt;
+      this.appendMilestones(session, [
+        {
+          kind: "error",
+          turn_id: turn.id,
+          error: turn.error,
+        },
+      ], { immediate: true });
       this.notifyTurn(turn);
       this.notifySession(session);
       return undefined;
@@ -821,6 +1139,14 @@ export class CodexSessionManager {
     session.partial = undefined;
     turn.status = "running";
     turn.updatedAt = session.updatedAt;
+    session.milestonesPrevState = defaultMilestoneDetectionState();
+    this.appendMilestones(session, [
+      {
+        kind: "turn_started",
+        turn_id: turn.id,
+        text: turn.kind === "steer" ? "Steering turn started." : "Codex turn started.",
+      },
+    ]);
     logger.rawDebug("session.turn.start", {
       session: summarizeRawTrafficForLog(snapshot(session)),
       prompt: options.prompt,
@@ -846,6 +1172,13 @@ export class CodexSessionManager {
       turn.status = controller.signal.aborted ? "cancelled" : "failed";
       turn.error = session.error;
       turn.updatedAt = session.updatedAt;
+      this.appendMilestones(session, [
+        {
+          kind: controller.signal.aborted ? "cancelled" : "error",
+          turn_id: turn.id,
+          error: session.error,
+        },
+      ], { immediate: true });
       logger.error("session.turn.failed", {
         sessionId: session.id,
         turnId: turn.id,
@@ -866,6 +1199,7 @@ export class CodexSessionManager {
     } finally {
       session.controller = undefined;
       session.activeTurn = undefined;
+      this.scheduleSessionChanged(session, true);
       this.notifySession(session);
     }
   }
@@ -884,6 +1218,7 @@ export class CodexSessionManager {
           onSnapshot: (partial) => {
             session.partial = partial;
             session.updatedAt = new Date().toISOString();
+            this.recordPartialMilestones(session, partial);
             logger.rawDebug("session.turn.partial", {
               sessionId: session.id,
               partial: summarizeRawTrafficForLog(partial),
@@ -908,6 +1243,7 @@ export class CodexSessionManager {
         (partial) => {
           session.partial = partial;
           session.updatedAt = new Date().toISOString();
+          this.recordPartialMilestones(session, partial);
           logger.rawDebug("session.turn.partial", {
             sessionId: session.id,
             partial: summarizeRawTrafficForLog(partial),
@@ -976,6 +1312,7 @@ export class CodexSessionManager {
   ): void {
     session.turns += 1;
     session.lastResult = result;
+    session.lastResultTurnId = turn.id;
     session.partial = undefined;
     session.codexThreadId = result.eventSummary.threadId ?? session.codexThreadId;
     session.projectDir = result.cwd;
@@ -1000,6 +1337,19 @@ export class CodexSessionManager {
           ? "cancelled"
           : "failed";
     session.updatedAt = new Date().toISOString();
+    this.appendMilestones(session, [
+      result.ok
+        ? {
+            kind: "turn_completed",
+            turn_id: turn.id,
+            text: result.finalMessage,
+          }
+        : {
+            kind: result.status === "cancelled" ? "cancelled" : "error",
+            turn_id: turn.id,
+            error: result.finalMessage || `Codex turn ${result.status}`,
+          },
+    ], { immediate: true });
     logger.rawInfo("session.turn.finish", {
       session: summarizeRawTrafficForLog(snapshot(session)),
       turn: summarizeRawTrafficForLog(turnSnapshot(turn)),
@@ -1090,6 +1440,91 @@ export class CodexSessionManager {
     return session.appServer;
   }
 
+  private recordPartialMilestones(session: CodexSessionRecord, partial: AgentRunPartial): void {
+    const detected = detectMilestones(partial, session.milestonesPrevState, session.activeTurn?.id);
+    session.milestonesPrevState = detected.nextState;
+    if (detected.milestones.length > 0) this.appendMilestones(session, detected.milestones);
+  }
+
+  private appendMilestones(
+    session: CodexSessionRecord,
+    milestones: PendingSessionMilestone[],
+    options: { immediate?: boolean } = {},
+  ): void {
+    if (milestones.length === 0) return;
+    const appended: SessionMilestone[] = [];
+    for (const pendingMilestone of milestones) {
+      const sanitized = sanitizeMilestone(pendingMilestone);
+      session.milestoneSeq += 1;
+      const milestone: SessionMilestone = {
+        seq: session.milestoneSeq,
+        at: new Date().toISOString(),
+        ...sanitized,
+      };
+      session.milestones.push(milestone);
+      appended.push(milestone);
+    }
+    if (session.milestones.length > this.maxMilestonesPerSession) {
+      session.milestones.splice(0, session.milestones.length - this.maxMilestonesPerSession);
+    }
+    for (const milestone of appended) {
+      for (const subscriber of session.milestoneSubscribers) {
+        try {
+          subscriber({ ...milestone });
+        } catch (error) {
+          logger.error("session.milestone_subscriber_failed", {
+            sessionId: session.id,
+            error: errorForLog(error),
+          });
+        }
+      }
+    }
+    this.scheduleSessionChanged(session, Boolean(options.immediate));
+  }
+
+  private scheduleSessionChanged(session: CodexSessionRecord, immediate = false): void {
+    if (!this.onSessionChanged) return;
+    if (immediate) {
+      this.flushSessionChanged(session);
+      return;
+    }
+
+    const now = Date.now();
+    session.firstUnsentMilestoneAt ??= now;
+    if (!session.resourceNotifyTimer) {
+      session.resourceNotifyTimer = setTimeout(() => this.flushSessionChanged(session), this.resourceDebounceMs);
+      session.resourceNotifyTimer.unref();
+    }
+    if (!session.resourceNotifyMaxTimer) {
+      const maxDelay = Math.max(1, this.resourceMaxDelayMs - (now - session.firstUnsentMilestoneAt));
+      session.resourceNotifyMaxTimer = setTimeout(() => this.flushSessionChanged(session), maxDelay);
+      session.resourceNotifyMaxTimer.unref();
+    }
+  }
+
+  private flushSessionChanged(session: CodexSessionRecord): void {
+    if (session.resourceNotifyTimer) {
+      clearTimeout(session.resourceNotifyTimer);
+      session.resourceNotifyTimer = undefined;
+    }
+    if (session.resourceNotifyMaxTimer) {
+      clearTimeout(session.resourceNotifyMaxTimer);
+      session.resourceNotifyMaxTimer = undefined;
+    }
+    session.firstUnsentMilestoneAt = undefined;
+    this.emitSessionChanged(session.id);
+  }
+
+  private emitSessionChanged(sessionId: string): void {
+    if (!this.onSessionChanged) return;
+    Promise.resolve(this.onSessionChanged(sessionId)).catch((error) => {
+      logger.error("session.resource_update_failed", {
+        sessionId,
+        error: errorForLog(error),
+      });
+    });
+  }
+
   private notifyTurn(turn: CodexSessionTurnRecord): void {
     for (const waiter of turn.waiters) waiter();
     turn.waiters.clear();
@@ -1133,8 +1568,11 @@ export class CodexSessionManager {
   private pruneSession(id: string, session: CodexSessionRecord, reason: "ttl" | "max_sessions"): void {
     logger.warn("session.pruned", { sessionId: id, reason, status: session.status });
     this.sessions.delete(id);
+    if (session.resourceNotifyTimer) clearTimeout(session.resourceNotifyTimer);
+    if (session.resourceNotifyMaxTimer) clearTimeout(session.resourceNotifyMaxTimer);
     void session.appServer?.close("cancelled").catch(() => {});
     this.notifySession(session);
+    this.emitSessionChanged(id);
     this.persist();
   }
 
@@ -1183,6 +1621,10 @@ export class CodexSessionManager {
       cancelRequested: state.status === "cancelled",
       runtimeShutdownRecoverable: false,
       waiters: new Set(),
+      milestones: [],
+      milestoneSeq: 0,
+      milestoneSubscribers: new Set(),
+      milestonesPrevState: defaultMilestoneDetectionState(),
       persisted: true,
       recovered: true,
       stateFile: this.stateStore?.file,

@@ -79,6 +79,13 @@ The server emits MCP progress notifications when the client supplies a progress
 token. Long waits include heartbeat progress so Claude Code can keep the request
 alive.
 
+Background Codex sessions also expose `codex://sessions/{session_id}` resources.
+Each resource carries a small in-memory milestone ring buffer and a compact
+`last_result`; milestones are deliberately not persisted to durable session
+state. The server sends `notifications/resources/updated` for queued turns, turn
+starts, meaningful Codex output, terminal changes, and resource pruning. Updates
+are debounced per session, while terminal changes flush immediately.
+
 Global and per-project queue limits prevent Claude from flooding the MCP process.
 When limits are exceeded, tools return structured recovery hints instead of
 accepting unbounded work.

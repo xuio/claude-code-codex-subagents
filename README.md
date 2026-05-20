@@ -14,13 +14,13 @@ explicit full-access Codex work when the user asks for it.
 
 ## Why Use It?
 
-- **Native Claude Code workflow:** Claude gets a small Task-like MCP surface: `codex_task`, `codex_task_group`, and `codex_followup`.
+- **Native Claude Code workflow:** Claude gets a small Task-like MCP surface: `codex_task`, `codex_task_group`, `codex_followup`, and `codex_wait_any`.
 - **Read-only by default:** Codex starts with `--sandbox read-only` and non-interactive approvals.
 - **No daemon:** Claude launches the MCP server over stdio for the active session.
 - **Fast parallel review:** Claude can launch several independent Codex agents with bounded concurrency.
 - **Persistent sessions:** App-server sessions keep Codex context across prompts and support live steering.
 - **Codex desktop friendly:** The plugin prefers the Codex binary shipped inside `Codex.app` when it exists.
-- **Debuggable:** Verbose JSONL logging, diagnostics bundles, progress events, and recovery hints are built in.
+- **Debuggable:** Verbose JSONL logging, diagnostics bundles, progress events, per-session resources, and recovery hints are built in.
 
 ## Quick Start
 
@@ -89,8 +89,11 @@ Start a long-running Codex session on this repo, then let me send follow-up prom
 
 Claude should use `codex_task` for the initial prompt, preserve the returned
 `session_id`, and use `codex_followup` to continue, steer, wait on, or cancel
-that same Codex context. For a completed first turn, Claude should set
-`keep_session: true`; for long first turns, Claude should set `background: true`.
+that same Codex context. For multiple background sessions, Claude should use
+`codex_wait_any` to harvest whichever finishes first. Clients can also subscribe
+to `codex://sessions/{session_id}` for milestone and completion updates. For a
+completed first turn, Claude should set `keep_session: true`; for long first
+turns, Claude should set `background: true`.
 
 ## Safety Model
 
@@ -137,8 +140,10 @@ writes and DNS/network remain disabled unless `full_access: true` is set.
 | Several independent tasks | `codex_task_group` |
 | Persistent context | `codex_task` with `keep_session: true`, then `codex_followup` |
 | Long-running sessions | `codex_task` with `background: true`, then `codex_followup` |
+| First completed background task | `codex_wait_any` |
 | Live steering | `codex_followup` with `mode: "steer"` |
 | Stop running work | `codex_followup` with `mode: "cancel"` |
+| Session progress | MCP resource `codex://sessions/{session_id}` |
 | Diagnostics | MCP resources `codex://status`, `codex://doctor`, `codex://usage` |
 
 Legacy tools such as `ask_codex`, `run_agent`, `run_agents`, `start_session`, and

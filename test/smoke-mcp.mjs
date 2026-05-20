@@ -1,6 +1,6 @@
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
-import { CallToolResultSchema } from "@modelcontextprotocol/sdk/types.js";
+import { CallToolResultSchema, ResourceUpdatedNotificationSchema } from "@modelcontextprotocol/sdk/types.js";
 import { mkdtemp, readFile, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -10,6 +10,10 @@ const projectDir = await mkdtemp(path.join(os.tmpdir(), "codex-subagents-smoke-p
 const recordDir = path.join(projectDir, "records");
 const fakeCodex = path.join(root, "test/fixtures/fake-codex.mjs");
 const client = new Client({ name: "codex-subagents-smoke", version: "0.1.0" });
+const resourceUpdates = [];
+client.setNotificationHandler(ResourceUpdatedNotificationSchema, (notification) => {
+  resourceUpdates.push(notification.params.uri);
+});
 const transport = new StdioClientTransport({
   command: path.join(root, "dist/index.js"),
   cwd: root,
@@ -45,6 +49,16 @@ async function readJsonResource(uri) {
   return JSON.parse(resource.contents[0].text);
 }
 
+async function waitForCondition(read, timeoutMs = 2_000) {
+  const started = Date.now();
+  while (Date.now() - started < timeoutMs) {
+    const value = read();
+    if (value) return value;
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  throw new Error("Timed out waiting for condition");
+}
+
 async function listToolsWithEnv(env) {
   const debugClient = new Client({ name: "codex-subagents-smoke-debug", version: "0.1.0" });
   const debugTransport = new StdioClientTransport({
@@ -70,6 +84,7 @@ try {
   assert(toolNames.has("codex_task"), "default tool surface should expose codex_task", toolList.tools);
   assert(toolNames.has("codex_task_group"), "default tool surface should expose codex_task_group", toolList.tools);
   assert(toolNames.has("codex_followup"), "default tool surface should expose codex_followup", toolList.tools);
+  assert(toolNames.has("codex_wait_any"), "default tool surface should expose codex_wait_any", toolList.tools);
   for (const name of [
     "codex_session_start",
     "codex_session_prompt",
@@ -107,10 +122,22 @@ try {
   assert(resourceUris.has("codex://usage"), "usage resource should be listed", resources.resources);
   assert(resourceUris.has("codex://status"), "status resource should be listed", resources.resources);
   assert(resourceUris.has("codex://doctor"), "doctor resource should be listed", resources.resources);
+  const resourceTemplates = await client.listResourceTemplates();
+  assert(
+    resourceTemplates.resourceTemplates.some((template) => template.uriTemplate === "codex://sessions/{session_id}"),
+    "session resource template should be listed",
+    resourceTemplates.resourceTemplates,
+  );
 
   const status = await readJsonResource("codex://status");
   assert(status.ok, "codex://status failed", status);
-  assert(status.defaultTools?.includes("codex_followup"), "codex://status should advertise native tools", status);
+  assert(status.defaultTools?.includes("codex_wait_any"), "codex://status should advertise wait-any as a native tool", status);
+  assert(
+    status.notifications?.resource_updates_enabled === true &&
+      status.notifications?.max_milestones_per_session === 50,
+    "codex://status should advertise notification settings",
+    status,
+  );
   assert(
     status.processes?.pluginProcesses?.some((process) => process.pid === status.processes.currentPid),
     "codex://status should include plugin process diagnostics",
@@ -314,6 +341,16 @@ try {
   });
   assert(background.structuredContent?.status === "running", "background codex_task should return immediately", background.structuredContent);
   assert(background.structuredContent?.session_id, "background codex_task should return session_id", background.structuredContent);
+  const backgroundResourceUri = `codex://sessions/${background.structuredContent.session_id}`;
+  await client.subscribeResource({ uri: backgroundResourceUri });
+  const backgroundResource = await readJsonResource(backgroundResourceUri);
+  assert(
+    backgroundResource.id === background.structuredContent.session_id &&
+      backgroundResource.status === "running" &&
+      Array.isArray(backgroundResource.milestones),
+    "background session resource should expose running state and milestones",
+    backgroundResource,
+  );
   const steered = await callTool("codex_followup", {
     session_id: background.structuredContent.session_id,
     mode: "steer",
@@ -333,10 +370,21 @@ try {
   });
   assert(waited.structuredContent?.completed === true, "codex_followup mode wait should collect completion", waited.structuredContent);
   assert(
+    typeof waited.structuredContent?.last_milestone_seq === "number" &&
     !waited.structuredContent?.diagnostics && typeof waited.structuredContent?.elapsed_ms === "number",
     "codex_followup mode wait should default to a lean poll-shaped payload",
     waited.structuredContent,
   );
+  await waitForCondition(() => resourceUpdates.includes(backgroundResourceUri));
+  const completedBackgroundResource = await readJsonResource(backgroundResourceUri);
+  assert(
+    completedBackgroundResource.completed === true &&
+      completedBackgroundResource.last_result?.status === "completed" &&
+      completedBackgroundResource.last_milestone_seq >= backgroundResource.last_milestone_seq,
+    "session resource should expose completion state after background task finishes",
+    completedBackgroundResource,
+  );
+  await client.unsubscribeResource({ uri: backgroundResourceUri });
   const waitedWithDiagnostics = await callTool("codex_followup", {
     session_id: background.structuredContent.session_id,
     mode: "wait",
@@ -352,6 +400,52 @@ try {
     waitedWithDiagnostics.structuredContent?.diagnostics?.session?.status === "idle",
     "completed session diagnostics should use idle status when no turn is running",
     waitedWithDiagnostics.structuredContent,
+  );
+
+  const waitAnySlow = await callTool("codex_task", {
+    description: "Wait any slow",
+    prompt: "wait-any-slow DELAY_MS=300",
+    project_dir: projectDir,
+    background: true,
+  });
+  const waitAnyFast = await callTool("codex_task", {
+    description: "Wait any fast",
+    prompt: "wait-any-fast DELAY_MS=30",
+    project_dir: projectDir,
+    background: true,
+  });
+  const waitAny = await callTool("codex_wait_any", {
+    session_ids: [waitAnySlow.structuredContent.session_id, waitAnyFast.structuredContent.session_id],
+    wait_timeout_ms: 5_000,
+  });
+  assert(waitAny.structuredContent?.completed === true, "codex_wait_any should complete when one session finishes", waitAny);
+  assert(
+    waitAny.structuredContent?.session_id === waitAnyFast.structuredContent.session_id &&
+      waitAny.structuredContent?.remaining_session_ids?.includes(waitAnySlow.structuredContent.session_id) &&
+      String(waitAny.structuredContent?.result ?? "").includes("wait-any-fast"),
+    "codex_wait_any should return the first finished session and remaining ids",
+    waitAny.structuredContent,
+  );
+  const waitAnyRemaining = await callTool("codex_wait_any", {
+    session_ids: waitAny.structuredContent.remaining_session_ids,
+    wait_timeout_ms: 5_000,
+  });
+  assert(
+    waitAnyRemaining.structuredContent?.completed === true &&
+      waitAnyRemaining.structuredContent?.session_id === waitAnySlow.structuredContent.session_id,
+    "codex_wait_any should collect the remaining finisher on the next call",
+    waitAnyRemaining.structuredContent,
+  );
+
+  const waitAnyUnknown = await callTool("codex_wait_any", {
+    session_ids: ["session-does-not-exist-smoke"],
+    wait_timeout_ms: 10,
+  });
+  assert(waitAnyUnknown.isError, "codex_wait_any should error for unknown session ids", waitAnyUnknown);
+  assert(
+    waitAnyUnknown.content?.[0]?.text?.includes("Unknown session_id: session-does-not-exist-smoke"),
+    "codex_wait_any unknown-id error should be visible",
+    waitAnyUnknown,
   );
 
   const alreadyCompletedCancel = await callTool("codex_followup", {

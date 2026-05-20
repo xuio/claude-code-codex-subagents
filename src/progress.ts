@@ -21,27 +21,40 @@ async function bounded<T>(promise: Promise<T>, timeoutMs: number): Promise<T> {
   return Promise.race([promise, timeoutPromise(timeoutMs)]);
 }
 
-export type ProgressOptions = { progress?: number; total?: number; reserveFinal?: boolean };
+export type ProgressOptions = { progress?: number; total?: number; reserveFinal?: boolean; force?: boolean };
 
-export function createProgressReporter(extra: ToolExtra | undefined, options: { sendTimeoutMs?: number } = {}) {
+function progressMinIntervalMs(env: NodeJS.ProcessEnv = process.env): number {
+  const parsed = Number(env.CODEX_SUBAGENTS_PROGRESS_MIN_INTERVAL_MS);
+  if (!Number.isFinite(parsed) || parsed < 0) return 250;
+  return Math.max(0, Math.min(Math.floor(parsed), 5_000));
+}
+
+export function createProgressReporter(
+  extra: ToolExtra | undefined,
+  options: { sendTimeoutMs?: number; minIntervalMs?: number } = {},
+) {
   const progressToken = extra?._meta?.progressToken;
   const sendTimeoutMs = options.sendTimeoutMs ?? progressSendTimeoutMs();
+  const minIntervalMs = options.minIntervalMs ?? progressMinIntervalMs();
   let progress = 0;
   let pending = Promise.resolve();
   let disabled = false;
   let failures = 0;
+  let lastSentAt = 0;
+  let throttleTimer: NodeJS.Timeout | undefined;
+  let pendingThrottled:
+    | {
+        message: string;
+        progressOptions: ProgressOptions;
+      }
+    | undefined;
 
-  async function send(message: string, progressOptions: ProgressOptions = {}) {
-    logger.rawDebug("mcp.progress", {
-      hasProgressToken: progressToken !== undefined,
-      message,
-      options: progressOptions,
-    });
-    if (progressToken === undefined || !extra || disabled) return;
-
+  function queueSend(message: string, progressOptions: ProgressOptions = {}) {
+    if (progressToken === undefined || !extra) return;
     pending = pending
       .catch(() => {})
       .then(async () => {
+        if (disabled) return;
         const requested = progressOptions.progress ?? progress + 1;
         const unclamped = Math.max(progress + 1, requested);
         const next =
@@ -55,6 +68,7 @@ export function createProgressReporter(extra: ToolExtra | undefined, options: { 
               );
         if (next <= progress) return;
         progress = next;
+        lastSentAt = Date.now();
         await bounded(
           extra.sendNotification({
             method: "notifications/progress",
@@ -83,12 +97,56 @@ export function createProgressReporter(extra: ToolExtra | undefined, options: { 
         if (failures >= 2) disabled = true;
         logger.error("mcp.notification.failed", { disabled, error: errorForLog(error) });
       });
+  }
+
+  function scheduleThrottledSend(): void {
+    if (throttleTimer || !pendingThrottled) return;
+    const elapsed = Date.now() - lastSentAt;
+    const delay = Math.max(0, minIntervalMs - elapsed);
+    throttleTimer = setTimeout(() => {
+      throttleTimer = undefined;
+      const next = pendingThrottled;
+      pendingThrottled = undefined;
+      if (next) queueSend(next.message, next.progressOptions);
+    }, delay);
+    throttleTimer.unref();
+  }
+
+  async function send(message: string, progressOptions: ProgressOptions = {}) {
+    logger.rawDebug("mcp.progress", {
+      hasProgressToken: progressToken !== undefined,
+      message,
+      options: progressOptions,
+    });
+    if (progressToken === undefined || !extra || disabled) return;
+
+    const elapsed = Date.now() - lastSentAt;
+    if (progressOptions.force || minIntervalMs === 0 || lastSentAt === 0 || elapsed >= minIntervalMs) {
+      if (progressOptions.force && throttleTimer) {
+        clearTimeout(throttleTimer);
+        throttleTimer = undefined;
+        pendingThrottled = undefined;
+      }
+      queueSend(message, progressOptions);
+    } else {
+      pendingThrottled = { message, progressOptions };
+      scheduleThrottledSend();
+    }
 
     await bounded(pending, sendTimeoutMs + 25).catch(() => {});
   }
 
   async function flush() {
     if (progressToken === undefined || !extra) return;
+    if (throttleTimer) {
+      clearTimeout(throttleTimer);
+      throttleTimer = undefined;
+    }
+    if (pendingThrottled) {
+      const next = pendingThrottled;
+      pendingThrottled = undefined;
+      queueSend(next.message, next.progressOptions);
+    }
     await bounded(pending, sendTimeoutMs + 25).catch(() => {});
     await new Promise((resolve) => setTimeout(resolve, 0));
   }

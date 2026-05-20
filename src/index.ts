@@ -1,6 +1,11 @@
-import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import { McpServer, ResourceTemplate } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
-import type { CallToolResult, JSONRPCMessage } from "@modelcontextprotocol/sdk/types.js";
+import {
+  SubscribeRequestSchema,
+  UnsubscribeRequestSchema,
+  type CallToolResult,
+  type JSONRPCMessage,
+} from "@modelcontextprotocol/sdk/types.js";
 import { z } from "zod";
 import {
   defaultModel,
@@ -46,7 +51,7 @@ import {
   compactJobSnapshotForMcp,
   compactSessionSnapshotForMcp,
 } from "./response.js";
-import { sessionManager } from "./sessions.js";
+import { maxSessionMilestones, sessionManager, type CodexSessionSnapshot, type SessionMilestone } from "./sessions.js";
 import { modelPresets } from "./subagents.js";
 import { packageVersion } from "./version.js";
 
@@ -59,7 +64,8 @@ const usageGuide = [
   "- Use codex_task for one delegated Codex task. It is the native Claude-like front door: description plus prompt, read-only by default, and answer-first result. Call codex_task multiple times in one assistant turn when independent investigations can run in parallel.",
   "- Use codex_task_group when the work can be split into independent concurrent tasks and Claude wants one combined response with rolled-up per-task findings.",
   "- Use codex_followup when Claude already has a session_id from codex_task or codex_task_group and wants to continue, steer, wait on, or cancel that same Codex context.",
-  "- Set codex_task background true for long-running work so Claude gets a session_id immediately, then use codex_followup mode wait, steer, or cancel.",
+  "- Set codex_task background true for long-running work so Claude gets a session_id immediately, then use codex_wait_any for several sessions or codex_followup mode wait, steer, or cancel for one session.",
+  "- Subscribe to or read codex://sessions/{session_id} for background progress milestones and completion state. The server emits notifications/resources/updated when meaningful Codex output changes.",
   "- Diagnostics are resources by default: read codex://status, codex://doctor, or codex://usage when a prior call failed or availability is uncertain.",
   "- Debug tools such as codex_status, codex_doctor, codex_usage_guide, codex_choose_tool, and codex_export_debug_bundle are hidden unless CODEX_SUBAGENTS_ENABLE_DEBUG_TOOLS=1.",
   "- Legacy/manual tools such as ask_codex, run_agent, run_agents, and old session names are hidden unless CODEX_SUBAGENTS_ENABLE_LEGACY_TOOLS=1.",
@@ -70,6 +76,7 @@ const usageGuide = [
   "- If the user explicitly asks for non-sandbox/full local capabilities, set full_access true. This maps to Codex's --dangerously-bypass-approvals-and-sandbox flag and allows DNS/network plus unrestricted file and git writes.",
   "- Approvals are non-interactive; do not expect Codex to ask permission.",
   "- If codex_followup mode wait returns completed false with timeoutReason \"wait_timeout\", the session is still running unless its status says otherwise.",
+  "- Use codex_wait_any after launching several background Codex tasks to harvest whichever one finishes first without busy-polling.",
   "- Use codex_followup mode cancel to stop a background or actively running Codex session early. The response includes whatever partial output streamed before the interrupt.",
   "- If a tool returns error.kind \"backpressure\", reduce max_parallel or wait before retrying. codex://status exposes current queue/session limits.",
   "- If a response mentions outputArtifacts, use the artifact paths for full retained output instead of asking Codex to resend huge stdout/stderr.",
@@ -97,6 +104,18 @@ const server = new McpServer(
   {
     instructions: usageGuide,
   },
+);
+
+server.server.registerCapabilities({ resources: { subscribe: true } });
+server.server.setRequestHandler(SubscribeRequestSchema, async () => ({}));
+server.server.setRequestHandler(UnsubscribeRequestSchema, async () => ({}));
+
+function sessionResourceUri(sessionId: string): string {
+  return `codex://sessions/${encodeURIComponent(sessionId)}`;
+}
+
+sessionManager.setSessionChangedHandler((sessionId) =>
+  server.server.sendResourceUpdated({ uri: sessionResourceUri(sessionId) }),
 );
 
 const legacyToolsEnabled = process.env.CODEX_SUBAGENTS_ENABLE_LEGACY_TOOLS === "1";
@@ -1202,8 +1221,52 @@ async function withProgressHeartbeat<T>(
   }
 }
 
+function formatMilestoneProgress(milestone: SessionMilestone): string | undefined {
+  switch (milestone.kind) {
+    case "turn_started":
+      return "Codex turn started";
+    case "turn_completed":
+      return milestone.text ? firstUsefulLine(`Codex completed: ${milestone.text}`, "Codex turn completed") : "Codex turn completed";
+    case "command_started":
+      return milestone.command ? firstUsefulLine(`Codex command: ${milestone.command}`, "Codex command started") : "Codex command started";
+    case "command_completed":
+      return milestone.command
+        ? firstUsefulLine(`Codex command completed: ${milestone.command}`, "Codex command completed")
+        : "Codex command completed";
+    case "agent_message":
+      return milestone.text ? firstUsefulLine(`Codex: ${milestone.text}`, "Codex produced output") : "Codex produced output";
+    case "error":
+      return milestone.error ? firstUsefulLine(`Codex error: ${milestone.error}`, "Codex error") : "Codex error";
+    case "cancelled":
+      return "Codex session cancelled";
+    case "queued_turn_added":
+      return "Codex turn queued";
+  }
+}
+
+async function withSessionMilestoneProgress<T>(
+  progress: ProgressReporter,
+  sessionId: string,
+  operation: () => Promise<T>,
+): Promise<T> {
+  const unsubscribe = sessionManager.subscribeMilestones(sessionId, (milestone) => {
+    const message = formatMilestoneProgress(milestone);
+    if (message) void progress.send(message);
+  });
+  try {
+    return await operation();
+  } finally {
+    unsubscribe();
+  }
+}
+
 function codexLiveProgressMessage(sessionId: string, fallback: string): string {
   const session = sessionManager.get(sessionId);
+  const milestone = session?.milestones.at(-1);
+  if (milestone) {
+    const message = formatMilestoneProgress(milestone);
+    if (message) return message;
+  }
   const partial = session?.partial;
   const lastCommand = partial?.eventSummary.commands.at(-1);
   if (lastCommand?.command) {
@@ -1527,6 +1590,10 @@ type NativeFollowupInput = NativeBaseInput & {
   turn_id?: string;
   wait_timeout_ms?: number;
 };
+type NativeWaitAnyInput = {
+  session_ids: string[];
+  wait_timeout_ms?: number;
+};
 
 function publicModel(model: string | undefined): string | undefined {
   const value = model?.trim();
@@ -1628,7 +1695,7 @@ async function codexStatusPayload(codexBin?: string) {
     version: status.version,
     error: status.error,
     cwd: process.cwd(),
-    defaultTools: ["codex_task", "codex_task_group", "codex_followup"],
+    defaultTools: ["codex_task", "codex_task_group", "codex_followup", "codex_wait_any"],
     hiddenDebugTools: !debugToolsEnabled,
     hiddenLegacyTools: !legacyToolsEnabled,
     defaultModel: defaultModel(),
@@ -1659,6 +1726,12 @@ async function codexStatusPayload(codexBin?: string) {
     claudeProjectDir: cleanOption(process.env.CLAUDE_PROJECT_DIR),
     queue: jobManager.stats(),
     sessions: sessionManager.stats(),
+    notifications: {
+      resource_updates_enabled: true,
+      debounce_ms: 250,
+      max_delay_ms: 2_000,
+      max_milestones_per_session: maxSessionMilestones(),
+    },
     logging: loggingDiagnostics(),
     artifacts: outputArtifactDiagnostics(),
     processes,
@@ -1759,6 +1832,70 @@ function jsonResource(uri: URL, value: unknown) {
   };
 }
 
+function sessionResourceStatus(session: CodexSessionSnapshot): "running" | "idle" | "failed" | "cancelled" {
+  if (session.status === "failed" || session.status === "cancelled") return session.status;
+  return session.active ? "running" : "idle";
+}
+
+function sessionResourceMilestone(milestone: SessionMilestone): Record<string, unknown> {
+  return redactJsonValue({
+    seq: milestone.seq,
+    at: milestone.at,
+    kind: milestone.kind,
+    turn_id: milestone.turn_id,
+    command: milestone.command,
+    text: milestone.text,
+    error: milestone.error,
+  });
+}
+
+function sessionResourceBody(session: CodexSessionSnapshot): Record<string, unknown> {
+  const lastResult = session.lastResult ? compactAgentResultForMcp(session.lastResult) : undefined;
+  return redactJsonValue({
+    id: session.id,
+    name: session.name,
+    status: sessionResourceStatus(session),
+    active: session.active,
+    completed: Boolean(
+      !session.active &&
+        session.queuedTurns.length === 0 &&
+        (session.lastResult || session.status === "failed" || session.status === "cancelled"),
+    ),
+    created_at: session.createdAt,
+    updated_at: session.updatedAt,
+    project_dir: session.projectDir ?? session.cwd,
+    turns: session.turns,
+    queued_turns: session.queuedTurns.length,
+    last_milestone_seq: session.lastMilestoneSeq,
+    milestones: session.milestones.map(sessionResourceMilestone),
+    last_result: lastResult
+      ? {
+          ok: lastResult.ok,
+          status: lastResult.status,
+          final_message: redactSensitiveText(lastResult.finalMessage),
+          duration_ms: lastResult.durationMs,
+          turn_id: session.lastResultTurnId,
+        }
+      : null,
+  });
+}
+
+function sessionResourceList() {
+  return {
+    resources: sessionManager.list().slice(0, 100).map((session) => ({
+      uri: sessionResourceUri(session.id),
+      name: session.name ?? session.id,
+      mimeType: "application/json",
+      description: `Codex session ${sessionResourceStatus(session)} - ${session.turns} turn${session.turns === 1 ? "" : "s"}`,
+    })),
+  };
+}
+
+function templateVariable(value: unknown): string {
+  if (Array.isArray(value)) return String(value[0] ?? "");
+  return String(value ?? "");
+}
+
 server.registerResource(
   "codex-usage",
   "codex://usage",
@@ -1800,6 +1937,24 @@ server.registerResource(
   async (uri) => jsonResource(uri, await codexDoctorPayload()),
 );
 
+server.registerResource(
+  "codex-session",
+  new ResourceTemplate("codex://sessions/{session_id}", {
+    list: () => sessionResourceList(),
+  }),
+  {
+    title: "Codex Session",
+    description: "Per-session Codex progress milestones and completion state for background tasks.",
+    mimeType: "application/json",
+  },
+  async (uri, variables) => {
+    const sessionId = templateVariable(variables.session_id);
+    const session = sessionManager.get(sessionId);
+    if (!session) throw new Error(`Unknown session_id: ${sessionId}`);
+    return jsonResource(uri, sessionResourceBody(session));
+  },
+);
+
 registerDebugTool(
   "codex_usage_guide",
   {
@@ -1817,6 +1972,7 @@ registerDebugTool(
           parallelTasks: "codex_task_group",
           followUpOrSteer: "codex_followup",
           longRunningTask: "codex_task with background true",
+          harvestParallelBackgroundTasks: "codex_wait_any",
           inspectStatus: "Read codex://status",
           inspectDoctor: "Read codex://doctor",
           exportDiagnostics: "codex_export_debug_bundle",
@@ -1964,7 +2120,7 @@ registerTool(
             result: `Codex task started in the background. Session: ${session.id}`,
             session_id: session.id,
             turn,
-            hint: "Use codex_followup mode wait, steer, or cancel with this session_id.",
+            hint: "Use codex_wait_any for parallel background tasks, or codex_followup mode wait, steer, or cancel with this session_id.",
           };
           if (args.advanced?.include_diagnostics) {
             payload.diagnostics = {
@@ -1977,7 +2133,14 @@ registerTool(
         const { session, result } = await withProgressHeartbeat(
           progress,
           `Still running Codex task: ${args.description}`,
-          () => sessionManager.start(withRequestAbort(runOptions, extra), { sessionName: args.session_name }),
+          () =>
+            sessionManager.start(withRequestAbort(runOptions, extra), {
+              sessionName: args.session_name,
+              onMilestone: (milestone) => {
+                const message = formatMilestoneProgress(milestone);
+                if (message) void progress.send(message);
+              },
+            }),
         );
         await reportAgentResult(progress, result);
         await progress.flush();
@@ -2366,7 +2529,10 @@ registerTool(
           const waited = await withProgressHeartbeat(
             progress,
             () => codexLiveProgressMessage(args.session_id, `Still waiting for Codex session ${args.session_id}`),
-            () => sessionManager.wait(args.session_id, args.wait_timeout_ms ?? 600_000, args.turn_id, extra?.signal),
+            () =>
+              withSessionMilestoneProgress(progress, args.session_id, () =>
+                sessionManager.wait(args.session_id, args.wait_timeout_ms ?? 600_000, args.turn_id, extra?.signal),
+              ),
           );
           await progress.flush();
           if (waited.error || !waited.session) {
@@ -2398,6 +2564,7 @@ registerTool(
             status: completed ? "completed" : "running",
             result: resultText || (completed ? "Codex session is idle." : "Codex session is still running."),
             session_id: args.session_id,
+            last_milestone_seq: waited.session.lastMilestoneSeq,
             elapsed_ms: progressPayload.elapsed_ms,
             summary: completed
               ? summarizeResultValue(waitValue, resultText, "Codex session is ready.")
@@ -2520,7 +2687,7 @@ registerTool(
           ? await withProgressHeartbeat(
               progress,
               () => codexLiveProgressMessage(args.session_id, `Still waiting for Codex session ${args.session_id}`),
-              run,
+              () => withSessionMilestoneProgress(progress, args.session_id, run),
             )
           : await run();
         if (response.error || !response.session) {
@@ -2556,7 +2723,7 @@ registerTool(
           session_id: args.session_id,
           turn: response.turn,
           delivery,
-          hint: "Use codex_followup mode wait, steer, or cancel with this session_id.",
+          hint: "Use codex_wait_any for parallel background tasks, or codex_followup mode wait, steer, or cancel with this session_id.",
         };
         if (args.advanced?.include_diagnostics) {
           payload.diagnostics = {
@@ -2569,6 +2736,113 @@ registerTool(
         await progress.flush();
         logger.error("codex_followup.failed", { error: errorForLog(error) });
         return nativeErrorResult(error, "codex_followup");
+      }
+    });
+  },
+);
+
+registerTool(
+  "codex_wait_any",
+  {
+    title: "Wait For Any Task",
+    description:
+      "Block until any listed Codex background session reaches a terminal state, then return that session's result. Use after firing multiple codex_task background: true calls to collect results one at a time without busy-polling.",
+    inputSchema: {
+      session_ids: z
+        .array(z.string().trim().min(1))
+        .min(1)
+        .max(32)
+        .describe("Session ids returned by previous codex_task or codex_task_group calls."),
+      wait_timeout_ms: z
+        .number()
+        .int()
+        .positive()
+        .max(86_400_000)
+        .default(600_000)
+        .describe("Maximum total wait. If no session finishes in this window, returns completed=false."),
+    },
+  },
+  async (args: NativeWaitAnyInput, extra) => {
+    return loggedToolCall("codex_wait_any", args, extra, async () => {
+      const progress = createProgressReporter(extra);
+      const startedAt = Date.now();
+      const sessionIds = [...new Set(args.session_ids)];
+      const unsubscribers: Array<() => void> = [];
+      try {
+        await progress.send(`Waiting for ${sessionIds.length} Codex session${sessionIds.length === 1 ? "" : "s"}`);
+        for (const sessionId of sessionIds) {
+          unsubscribers.push(
+            sessionManager.subscribeMilestones(sessionId, (milestone) => {
+              const message = formatMilestoneProgress(milestone);
+              if (message) void progress.send(`${sessionId}: ${message}`);
+            }),
+          );
+        }
+        const waited = await withProgressHeartbeat(
+          progress,
+          () => {
+            const active = sessionIds
+              .map((sessionId) => codexLiveProgressMessage(sessionId, ""))
+              .filter(Boolean)
+              .slice(0, 2);
+            return active.length > 0
+              ? active.join(" | ")
+              : `Still waiting for ${sessionIds.length} Codex session${sessionIds.length === 1 ? "" : "s"}`;
+          },
+          () => sessionManager.waitAny(sessionIds, args.wait_timeout_ms ?? 600_000, extra?.signal),
+        );
+        for (const unsubscribe of unsubscribers.splice(0)) unsubscribe();
+        await progress.flush();
+
+        if (waited.error) return nativeErrorResult(new Error(waited.error), "codex_wait_any");
+        if (waited.timeoutReason === "wait_cancelled") {
+          return nativeErrorResult(new Error("MCP request was cancelled by the client."), "codex_wait_any");
+        }
+
+        const elapsedMs = Date.now() - startedAt;
+        if (!waited.completed || !waited.session) {
+          return nativeTextResult({
+            ok: true,
+            status: "running",
+            completed: false,
+            timeoutReason: "wait_timeout",
+            session_ids: waited.remainingSessionIds ?? sessionIds,
+            elapsed_ms: elapsedMs,
+            hint: "No session completed within the wait window. Retry with a larger timeout or inspect codex://sessions/<id>.",
+          });
+        }
+
+        const compactResult = waited.result ? compactAgentResultForMcp(waited.result) : undefined;
+        const resultValue = compactResult?.structuredOutput ?? compactResult?.finalMessage;
+        const resultText = compactResult
+          ? stringifyResultValue(resultValue, compactResult.finalMessage)
+          : waited.session.error ?? `Codex session ${sessionResourceStatus(waited.session)}`;
+        const status =
+          compactResult?.status ??
+          (waited.session.status === "cancelled"
+            ? "cancelled"
+            : waited.session.status === "failed"
+              ? "failed"
+              : "completed");
+        await progress.send(`Codex session ${waited.session.id} finished`, { force: true });
+        await progress.flush();
+        return nativeTextResult({
+          ok: status === "completed",
+          status,
+          completed: true,
+          session_id: waited.session.id,
+          result: resultText || `Codex session ${status}.`,
+          remaining_session_ids: waited.remainingSessionIds ?? sessionIds.filter((id) => id !== waited.session?.id),
+          elapsed_ms: elapsedMs,
+          last_milestone_seq: waited.session.lastMilestoneSeq,
+          hint: "Call codex_wait_any again with remaining_session_ids to collect the next finisher.",
+        });
+      } catch (error) {
+        await progress.flush();
+        logger.error("codex_wait_any.failed", { error: errorForLog(error) });
+        return nativeErrorResult(error, "codex_wait_any");
+      } finally {
+        for (const unsubscribe of unsubscribers) unsubscribe();
       }
     });
   },

@@ -38,4 +38,24 @@ describe("progress reporter", () => {
     expect(events.map((event) => event.progress)).toEqual([1, 2]);
     expect(events.every((event) => event.total === undefined || event.progress <= event.total)).toBe(true);
   });
+
+  it("coalesces rapid progress messages and flushes the latest pending one", async () => {
+    const events: Array<{ progress: number; message?: string }> = [];
+    const reporter = createProgressReporter(
+      {
+        _meta: { progressToken: "p" },
+        sendNotification: async (message: { params: { progress: number; message?: string } }) => {
+          events.push(message.params);
+        },
+      } as never,
+      { sendTimeoutMs: 50, minIntervalMs: 1_000 },
+    );
+
+    await reporter.send("first");
+    await reporter.send("second");
+    await reporter.send("third");
+    await reporter.flush();
+
+    expect(events.map((event) => event.message)).toEqual(["first", "third"]);
+  });
 });
