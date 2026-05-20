@@ -21332,17 +21332,37 @@ var privateKeyPattern = new RegExp(
 var SECRET_PATTERNS = [
   /\bAuthorization\s*:\s*Bearer\s+([A-Za-z0-9._~+/=-]{12,})\b/gi,
   /\bBearer\s+([A-Za-z0-9._~+/=-]{12,})\b/g,
-  /\bsk-[A-Za-z0-9_-]{16,}\b/g,
   /\bsk-proj-[A-Za-z0-9_-]{16,}\b/g,
+  /\bsk-[A-Za-z0-9_-]{16,}\b/g,
   /\bghp_[A-Za-z0-9_]{20,}\b/g,
   /\bgithub_pat_[A-Za-z0-9_]{20,}\b/g,
   /\bglpat-[A-Za-z0-9_-]{16,}\b/g,
   /\bxox[baprs]-[A-Za-z0-9-]{16,}\b/g,
+  /\b(?:AKIA|ASIA)[A-Z0-9]{16}\b/g,
+  /\b[a-z][a-z0-9+.-]*:\/\/[^\s/@:]+:[^\s/@]+@[^\s]+/gi,
   /\b[A-Za-z_][A-Za-z0-9_]*(?:API_KEY|TOKEN|SECRET|PASSWORD|PRIVATE_KEY)=([^\s"'`]+)\b/gi,
   /\b(?:api[_-]?key|token|secret|password|private[_-]?key|authorization)\s*[:=]\s*([^\s"'`]+)\b/gi,
   privateKeyPattern
 ];
-var SENSITIVE_ENV_KEY = /(API[_-]?KEY|SECRET|PASSWORD|PRIVATE[_-]?KEY|COOKIE|CREDENTIAL|AUTH|BEARER|(^|[_-])TOKEN$|ACCESS[_-]?TOKEN|REFRESH[_-]?TOKEN|OAUTH[_-]?TOKEN|SESSION[_-]?(KEY|TOKEN|SECRET|COOKIE))/i;
+var SENSITIVE_ENV_KEY = /(API[_-]?KEY|ACCESS[_-]?KEY|SECRET|PASSWORD|PRIVATE[_-]?KEY|COOKIE|CREDENTIAL|AUTH|BEARER|WEBHOOK|(^|[_-])TOKEN$|ACCESS[_-]?TOKEN|REFRESH[_-]?TOKEN|OAUTH[_-]?TOKEN|SESSION[_-]?(KEY|TOKEN|SECRET|COOKIE)|DATABASE[_-]?(URL|URI)|APPLICATION[_-]?CREDENTIALS|KUBECONFIG)/i;
+var SENSITIVE_ENV_DENYLIST = /* @__PURE__ */ new Set([
+  "AWS_ACCESS_KEY_ID",
+  "AWS_SESSION_TOKEN",
+  "AWS_WEB_IDENTITY_TOKEN_FILE",
+  "DATABASE_URL",
+  "DATABASE_URI",
+  "POSTGRES_URL",
+  "POSTGRESQL_URL",
+  "MYSQL_URL",
+  "REDIS_URL",
+  "MONGODB_URI",
+  "MONGO_URL",
+  "SLACK_WEBHOOK",
+  "SLACK_WEBHOOK_URL",
+  "KUBECONFIG",
+  "GOOGLE_APPLICATION_CREDENTIALS",
+  "AZURE_CLIENT_SECRET"
+]);
 var SAFE_ENV_KEYS = /* @__PURE__ */ new Set([
   "CODEX_HOME",
   "CODEX_DESKTOP_APP_PATH",
@@ -21371,7 +21391,10 @@ function redactSensitiveText(text) {
   return redacted;
 }
 function isSensitiveKey(key) {
-  return SENSITIVE_ENV_KEY.test(key);
+  return SENSITIVE_ENV_DENYLIST.has(key.toUpperCase()) || SENSITIVE_ENV_KEY.test(key);
+}
+function hasSensitiveEnvValue(value) {
+  return /\b[a-z][a-z0-9+.-]*:\/\/[^\s/@:]+:[^\s/@]+@[^\s]+/i.test(value);
 }
 function redactJsonValue(value, key = "") {
   if (key && isSensitiveKey(key)) return "[REDACTED]";
@@ -21390,7 +21413,7 @@ function sanitizeChildEnv(env, forwardSensitiveEnv = false) {
   const sanitized = {};
   for (const [key, value] of Object.entries(env)) {
     if (value === void 0) continue;
-    if (SAFE_ENV_KEYS.has(key) || !SENSITIVE_ENV_KEY.test(key)) {
+    if (SAFE_ENV_KEYS.has(key) || !isSensitiveKey(key) && !hasSensitiveEnvValue(value)) {
       sanitized[key] = value;
     }
   }
@@ -21608,7 +21631,7 @@ async function cleanupRuntime(reason, graceMs = 2500) {
       logger.warn("lifecycle.child.terminate", { reason, signal: "SIGTERM", ...meta, pid: child.pid });
       killChildProcess(child, "SIGTERM");
     }
-    const waitMs = Math.max(50, Math.min(graceMs, 1e3));
+    const waitMs = Math.max(50, Math.min(graceMs, 6e4));
     await new Promise((resolve) => setTimeout(resolve, waitMs));
     for (const [child, meta] of trackedChildren) {
       logger.warn("lifecycle.child.force_terminate", { reason, signal: "SIGKILL", ...meta, pid: child.pid });
@@ -23315,6 +23338,13 @@ function recoveryForError(error2, context = "tool_call") {
       retryAfterMs: 2e3
     };
   }
+  if (lower.includes("enoent") || lower.includes("enotdir") || lower.includes("eisdir") || lower.includes("no such file or directory") || lower.includes("not a directory") || lower.includes("not executable")) {
+    return {
+      recoverable: false,
+      reason: "invalid_path",
+      recommendedAction: "Fix the configured path or working directory before retrying."
+    };
+  }
   if (lower.includes("timed out") || lower.includes("timeout")) {
     return {
       recoverable: true,
@@ -23589,7 +23619,7 @@ function compactSessionTurn(value) {
   if (!value || typeof value !== "object") return value;
   const turn = value;
   if (typeof turn.prompt !== "string") return value;
-  const prompt = truncateString(turn.prompt, 2e3);
+  const prompt = truncateString(redactSensitiveText(turn.prompt), 2e3);
   return {
     ...turn,
     prompt: prompt.text,
@@ -24565,11 +24595,11 @@ var SessionStateStore = class {
   constructor(file = defaultSessionStateFile()) {
     this.file = file;
   }
-  load() {
+  load(options = {}) {
     try {
       const parsed = JSON.parse(readFileSync(this.file, "utf8"));
       if (parsed.version !== 1 || !Array.isArray(parsed.sessions)) return [];
-      return parsed.sessions.filter(isDurableSessionState);
+      return parsed.sessions.filter(isDurableSessionState).filter((session) => keepDurableSessionState(session, options));
     } catch {
       return [];
     }
@@ -24579,7 +24609,7 @@ var SessionStateStore = class {
     const temp = `${this.file}.${process.pid}.tmp`;
     const replaceIds = new Set(options.replaceIds ?? sessions.map((session) => session.id));
     const merged = [
-      ...this.load().filter((session) => !replaceIds.has(session.id)),
+      ...this.load(options).filter((session) => !replaceIds.has(session.id)),
       ...sessions
     ];
     const payload = {
@@ -24597,6 +24627,15 @@ function isDurableSessionState(value) {
   if (!value || typeof value !== "object") return false;
   const session = value;
   return typeof session.id === "string" && typeof session.createdAt === "string" && typeof session.updatedAt === "string" && (session.protocol === "app-server" || session.protocol === "exec") && Number.isInteger(session.turns) && typeof session.baseOptions === "object" && session.baseOptions !== null;
+}
+function keepDurableSessionState(session, options) {
+  if (options.dropUnresumable && session.status === "active" && !session.codexThreadId) return false;
+  if (options.maxAgeMs !== void 0) {
+    const updatedAt = Date.parse(session.updatedAt);
+    if (!Number.isFinite(updatedAt)) return false;
+    if (Date.now() - updatedAt > options.maxAgeMs) return false;
+  }
+  return true;
 }
 function durableRunOptions(options) {
   return {
@@ -24692,6 +24731,7 @@ function defaultSessionProtocol(env = process.env) {
 }
 function shouldFallbackToExec(error2, env = process.env) {
   if (env.CODEX_SUBAGENTS_DISABLE_EXEC_FALLBACK === "1") return false;
+  if (error2 instanceof RunValidationError) return false;
   return error2 instanceof AppServerUnavailableError || error2 instanceof Error;
 }
 function readPositiveInt2(value, fallback, max) {
@@ -25496,7 +25536,10 @@ var CodexSessionManager = class {
   loadPersistedSessions() {
     const store = this.stateStore;
     if (!store) return;
-    for (const persisted of store.load()) {
+    for (const persisted of store.load({
+      maxAgeMs: this.idleTtlSeconds * 1e3,
+      dropUnresumable: true
+    })) {
       const record2 = this.recordFromState(persisted);
       if (!record2) continue;
       this.sessions.set(record2.id, record2);
@@ -25562,7 +25605,11 @@ var CodexSessionManager = class {
       error: session.error
     }));
     try {
-      store.save(states, { replaceIds: this.persistedSessionIds });
+      store.save(states, {
+        replaceIds: this.persistedSessionIds,
+        maxAgeMs: this.idleTtlSeconds * 1e3,
+        dropUnresumable: true
+      });
     } catch (error2) {
       logger.error("session.state.save_failed", { stateFile: store.file, error: errorForLog(error2) });
     }
@@ -25891,7 +25938,45 @@ function summarizeResultValue(value, fallbackText, fallback) {
     const summary = value.summary;
     if (typeof summary === "string" && summary.trim()) return firstUsefulLine(summary, fallback);
   }
+  if (typeof value === "string" && !value.trim() && fallbackText.trim()) {
+    return firstUsefulLine(fallbackText, fallback);
+  }
   return firstUsefulLine(stringifyResultValue(value, fallbackText), fallback);
+}
+function agentFallbackErrorText(agent, recovery) {
+  const validationError = typeof agent.validationError === "string" ? agent.validationError.trim() : "";
+  if (validationError) return validationError;
+  const eventError = agent.eventSummary?.errors?.find(
+    (error2) => typeof error2 === "string" && error2.trim().length > 0
+  );
+  if (eventError) return eventError.trim();
+  const stderr = typeof agent.stderr === "string" ? agent.stderr.trim() : "";
+  if (stderr) return stderr;
+  const recoveryAction = recovery?.recommendedAction?.trim();
+  return recoveryAction || void 0;
+}
+function visibleAgentAnswer(agent, recovery) {
+  const resultValue = agent.structuredOutput ?? agent.finalMessage;
+  const answer = stringifyResultValue(resultValue, agent.finalMessage);
+  const structuredOutputError = typeof agent.structuredOutputError === "string" ? agent.structuredOutputError : void 0;
+  if (!agent.ok && structuredOutputError) {
+    return answer ? `${answer}
+
+Structured output parse failed: ${structuredOutputError}` : `Codex task ${agent.status}: Structured output parse failed: ${structuredOutputError}`;
+  }
+  const fallbackReason = !agent.ok && !answer ? agentFallbackErrorText(agent, recovery) : void 0;
+  if (fallbackReason) return `Codex task ${agent.status}: ${fallbackReason}`;
+  return answer;
+}
+function agentSafety(agent) {
+  return {
+    sandbox: agent.sandbox,
+    full_access: Boolean(agent.dangerouslyBypassApprovalsAndSandbox),
+    warning: agent.dangerouslyBypassApprovalsAndSandbox ? "Codex ran with full non-sandbox access." : agent.sandbox === "workspace-write" ? "Codex could write inside the configured workspace." : void 0
+  };
+}
+function agentCommands(agent) {
+  return agent.eventSummary.commands.map((command) => ({ ...command }));
 }
 function suggestedActionForAgent(result, recovery) {
   if (recovery?.recommendedAction) return recovery.recommendedAction;
@@ -25940,19 +26025,20 @@ function diagnosticsForAgent(agent) {
     event_summary: agent.eventSummary,
     stderr_tail: agent.stderr || void 0,
     stdout_tail: agent.stdoutTail || void 0,
-    structured_output_error: agent.structuredOutputError || void 0
+    structured_output_error: agent.structuredOutputError || void 0,
+    validation_error: agent.validationError || void 0,
+    timeout_reason: agent.timeoutReason || void 0,
+    commands: agentCommands(agent)
   };
 }
 function nativeAgentPayload(result, context) {
   const agent = compactAgentResultForMcp(result);
   const recovery = recoveryForAgentResult(result);
   const resultValue = agent.structuredOutput ?? agent.finalMessage;
-  const answer = stringifyResultValue(resultValue, agent.finalMessage);
   const structuredOutputError = typeof agent.structuredOutputError === "string" ? agent.structuredOutputError : void 0;
-  const visibleAnswer = !agent.ok && structuredOutputError ? `${answer}
-
-Structured output parse failed: ${structuredOutputError}` : answer;
+  const visibleAnswer = visibleAgentAnswer(agent, recovery);
   const sessionId = context.session && typeof context.session === "object" ? context.session.id : void 0;
+  const sessionFallbackReason = context.session && typeof context.session === "object" ? context.session.appServerFallbackReason : void 0;
   return {
     ok: agent.ok,
     status: agent.status,
@@ -25961,14 +26047,19 @@ Structured output parse failed: ${structuredOutputError}` : answer;
     session_id: sessionId,
     turn: context.turn,
     structured: agent.structuredOutput,
+    commands: agentCommands(agent),
+    safety: agentSafety(agent),
     hint: recovery?.recommendedAction ?? suggestedActionForAgent(agent, recovery),
     error: recovery ? {
-      message: structuredOutputError ? `Structured output parse failed: ${structuredOutputError}` : agent.eventSummary.errors[0] ?? agent.stderr ?? `Codex task ${agent.status}`,
+      message: structuredOutputError ? `Structured output parse failed: ${structuredOutputError}` : agentFallbackErrorText(agent, recovery) ?? `Codex task ${agent.status}`,
       recoverable: recovery.recoverable,
       kind: recovery.reason,
       retry_after_ms: recovery.retryAfterMs
     } : void 0,
-    diagnostics: diagnosticsForAgent(agent)
+    diagnostics: {
+      ...diagnosticsForAgent(agent),
+      app_server_fallback_reason: sessionFallbackReason || void 0
+    }
   };
 }
 function nativeAgentResponse(result, context) {
@@ -25979,17 +26070,20 @@ function nativeTaskGroupResponse(runs) {
     if (run.result) {
       const agent = compactAgentResultForMcp(run.result);
       const recovery2 = recoveryForAgentResult(run.result);
-      const answer = stringifyResultValue(agent.structuredOutput ?? agent.finalMessage, agent.finalMessage);
+      const resultValue = agent.structuredOutput ?? agent.finalMessage;
+      const answer = visibleAgentAnswer(agent, recovery2);
       return {
         name: agent.name ?? run.task.name ?? run.task.description ?? `codex-task-${index + 1}`,
         ok: agent.ok,
         status: agent.status,
-        summary: summarizeResultValue(agent.structuredOutput ?? agent.finalMessage, answer, `Codex task ${agent.status}`),
+        summary: summarizeResultValue(resultValue, answer, `Codex task ${agent.status}`),
         result: answer,
         session_id: run.session?.id,
         structured: agent.structuredOutput,
+        commands: agentCommands(agent),
+        safety: agentSafety(agent),
         error: recovery2 ? {
-          message: agent.eventSummary.errors[0] ?? agent.stderr ?? `Codex task ${agent.status}`,
+          message: agentFallbackErrorText(agent, recovery2) ?? `Codex task ${agent.status}`,
           recoverable: recovery2.recoverable,
           kind: recovery2.reason,
           retry_after_ms: recovery2.retryAfterMs
@@ -25998,15 +26092,19 @@ function nativeTaskGroupResponse(runs) {
       };
     }
     const recovery = recoveryForError(run.error ?? new Error("Codex task failed before producing a result."), "codex_task_group");
+    const message = redactSensitiveText(run.error instanceof Error ? run.error.message : String(run.error ?? "Codex task failed."));
+    const result = recovery.recommendedAction ? `${message}
+
+Next: ${recovery.recommendedAction}` : message;
     return {
       name: run.task.name ?? run.task.description ?? `codex-task-${index + 1}`,
       ok: false,
       status: "failed",
-      summary: "Codex task failed before producing a result.",
-      result: "",
+      summary: firstUsefulLine(message, "Codex task failed before producing a result."),
+      result,
       session_id: run.session?.id,
       error: {
-        message: redactSensitiveText(run.error instanceof Error ? run.error.message : String(run.error ?? "Codex task failed.")),
+        message,
         recoverable: recovery.recoverable,
         kind: recovery.reason,
         retry_after_ms: recovery.retryAfterMs
@@ -26040,16 +26138,17 @@ function nativeTaskPrompt(args) {
 
 ${args.prompt}`;
 }
-function sessionProgressPayload(session) {
+function sessionProgressPayload(session, preferredResult) {
   if (!session || typeof session !== "object") return {};
   const value = session;
   const partial2 = value.partial && typeof value.partial === "object" ? value.partial : void 0;
   const lastResult = value.lastResult && typeof value.lastResult === "object" ? value.lastResult : void 0;
+  const preferred = preferredResult && typeof preferredResult === "object" ? preferredResult : void 0;
   const activeTurn = value.activeTurn && typeof value.activeTurn === "object" ? value.activeTurn : void 0;
   const updatedAt = typeof value.updatedAt === "string" ? Date.parse(value.updatedAt) : NaN;
   const createdAt = typeof activeTurn?.createdAt === "string" ? Date.parse(activeTurn.createdAt) : NaN;
   const elapsedBase = Number.isFinite(createdAt) ? createdAt : updatedAt;
-  const partialResult = typeof partial2?.lastAgentMessage === "string" ? partial2.lastAgentMessage : typeof lastResult?.finalMessage === "string" ? lastResult.finalMessage : void 0;
+  const partialResult = typeof partial2?.lastAgentMessage === "string" ? partial2.lastAgentMessage : typeof preferred?.finalMessage === "string" ? preferred.finalMessage : typeof lastResult?.finalMessage === "string" ? lastResult.finalMessage : void 0;
   return {
     partial_result: partialResult,
     last_event: typeof activeTurn?.status === "string" ? `${activeTurn.kind ?? "turn"}:${activeTurn.status}` : typeof value.status === "string" ? value.status : void 0,
@@ -26192,7 +26291,7 @@ function toRunOptions(args) {
     skipGitRepoCheck: args.skip_git_repo_check,
     ignoreRules: args.ignore_rules,
     isolatedCodexHome: args.isolated_codex_home,
-    mcpConfigPolicy: args.mcp_config_policy ?? (args.codex_mcp_servers ? "explicit" : void 0),
+    mcpConfigPolicy: args.mcp_config_policy ?? (args.codex_mcp_servers && Object.keys(args.codex_mcp_servers).length > 0 ? "explicit" : void 0),
     codexMcpServers: args.codex_mcp_servers,
     forwardSensitiveEnv: args.forward_sensitive_env,
     idleTimeoutMs: args.idle_timeout_ms,
@@ -26637,7 +26736,7 @@ registerTool(
     description: "Delegate one task to OpenAI Codex, like Claude's native Task tool. Waits for Codex by default, returns the answer plus a session_id for follow-up. Read-only by default; Codex Spark and full access are opt-in.",
     inputSchema: {
       description: external_exports.string().trim().min(1).describe("Short human-readable task label, like Claude's native Task description."),
-      prompt: external_exports.string().min(1).describe(
+      prompt: external_exports.string().trim().min(1).describe(
         "Self-contained Codex task prompt. Include scope, read-only expectation, output shape, and file/line reference requirements when reviewing code."
       ),
       subagent_type: external_exports.enum(codexRoleSchema.options).optional().describe("Optional role preset that picks sensible Codex defaults."),
@@ -26876,7 +26975,7 @@ var frontDoorParallelTaskSchema = external_exports.object({
 });
 var nativeTaskGroupTaskSchema = external_exports.object({
   description: external_exports.string().trim().min(1).describe("Short task label, like Claude's native Task description."),
-  prompt: external_exports.string().min(1).describe(
+  prompt: external_exports.string().trim().min(1).describe(
     "Self-contained Codex prompt for this independent task. Keep overlap low across parallel tasks."
   ),
   subagent_type: codexRoleSchema.optional().describe("Optional role preset that picks sensible Codex defaults."),
@@ -27005,7 +27104,7 @@ registerTool(
               hint: recovery?.recommendedAction ?? "Use the result directly, or use codex_followup mode queue for another prompt in this Codex context.",
               diagnostics: {
                 session: compactSession2,
-                ...sessionProgressPayload(compactSession2)
+                ...sessionProgressPayload(compactSession2, waitResult)
               },
               error: recovery ? {
                 recoverable: recovery.recoverable,
@@ -27016,7 +27115,7 @@ registerTool(
             waited.timeoutReason === "wait_cancelled"
           );
         }
-        const description = args.description ?? (mode === "steer" ? "Steer Codex session" : "Continue Codex session");
+        const description = args.description;
         const runOptions = publicRunOptions({
           ...args,
           description,

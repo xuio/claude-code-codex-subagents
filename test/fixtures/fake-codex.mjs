@@ -141,6 +141,21 @@ if (args[0] === "app-server") {
     if (unterminatedStreamChars > 0) {
       process.stdout.write("u".repeat(unterminatedStreamChars));
     }
+    if (activePrompt.includes("RUN_COMMAND_EVENT")) {
+      send({
+        method: "item/completed",
+        params: {
+          threadId,
+          turnId,
+          item: {
+            type: "commandExecution",
+            id: "item_command",
+            command: "rg example",
+            status: "completed",
+          },
+        },
+      });
+    }
     send({
       method: "item/agentMessage/delta",
       params: { threadId, turnId, itemId: "item_final", delta: finalMessage },

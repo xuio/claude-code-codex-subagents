@@ -371,6 +371,20 @@ describe("runAgent", () => {
     await expect(readFile(path.join(recordDir, "calls.jsonl"), "utf8")).rejects.toThrow();
   });
 
+  it("does not infer explicit MCP policy from an empty server object", async () => {
+    const projectDir = await tempDir("codex-subagents-repo-");
+
+    const result = await runAgent({
+      prompt: "empty mcp server object",
+      projectDir,
+      codexBin: fakeCodex,
+      codexMcpServers: {},
+    });
+
+    expect(result.ok).toBe(true);
+    expect(result.validationError).toBeUndefined();
+  });
+
   it("treats requested structured-output parse failures as failed runs", async () => {
     const projectDir = await tempDir("codex-subagents-repo-");
 

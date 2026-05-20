@@ -165,6 +165,28 @@ describe("CodexSessionManager", () => {
     manager.cancel(started.session.id);
   });
 
+  it("does not fall back to exec for invalid app-server run configuration", async () => {
+    const manager = new CodexSessionManager();
+    const projectDir = await tempDir("codex-subagents-session-project-");
+    const recordDir = await tempDir("codex-subagents-session-record-");
+
+    await expect(
+      manager.start({
+        prompt: "invalid app-server configuration",
+        projectDir,
+        codexBin: fakeCodex,
+        modelPreset: "spark",
+        reasoningSummary: "concise",
+        env: {
+          FAKE_CODEX_RECORD_DIR: recordDir,
+        },
+      }),
+    ).rejects.toThrow(/reasoning_summary='concise'/);
+
+    await expect(readFile(path.join(recordDir, "calls.jsonl"), "utf8")).rejects.toThrow();
+    await manager.shutdown("test_cleanup");
+  });
+
   it("does not carry full-access bypass into later exec session prompts", async () => {
     process.env.CODEX_SUBAGENTS_SESSION_PROTOCOL = "exec";
     const manager = new CodexSessionManager();

@@ -24,6 +24,11 @@ interface SessionStateFile {
   sessions: DurableSessionState[];
 }
 
+interface SessionStateFilterOptions {
+  maxAgeMs?: number;
+  dropUnresumable?: boolean;
+}
+
 export function defaultSessionStateFile(env: NodeJS.ProcessEnv = process.env): string {
   const explicit = env.CODEX_SUBAGENTS_SESSION_STATE_FILE?.trim();
   if (explicit) return path.resolve(explicit);
@@ -37,22 +42,24 @@ export class SessionStateStore {
     this.file = file;
   }
 
-  load(): DurableSessionState[] {
+  load(options: SessionStateFilterOptions = {}): DurableSessionState[] {
     try {
       const parsed = JSON.parse(readFileSync(this.file, "utf8")) as Partial<SessionStateFile>;
       if (parsed.version !== 1 || !Array.isArray(parsed.sessions)) return [];
-      return parsed.sessions.filter(isDurableSessionState);
+      return parsed.sessions
+        .filter(isDurableSessionState)
+        .filter((session) => keepDurableSessionState(session, options));
     } catch {
       return [];
     }
   }
 
-  save(sessions: DurableSessionState[], options: { replaceIds?: Iterable<string> } = {}): void {
+  save(sessions: DurableSessionState[], options: { replaceIds?: Iterable<string> } & SessionStateFilterOptions = {}): void {
     mkdirSync(path.dirname(this.file), { recursive: true });
     const temp = `${this.file}.${process.pid}.tmp`;
     const replaceIds = new Set(options.replaceIds ?? sessions.map((session) => session.id));
     const merged = [
-      ...this.load().filter((session) => !replaceIds.has(session.id)),
+      ...this.load(options).filter((session) => !replaceIds.has(session.id)),
       ...sessions,
     ];
     const payload: SessionStateFile = {
@@ -78,6 +85,19 @@ function isDurableSessionState(value: unknown): value is DurableSessionState {
     typeof session.baseOptions === "object" &&
     session.baseOptions !== null
   );
+}
+
+function keepDurableSessionState(
+  session: DurableSessionState,
+  options: SessionStateFilterOptions,
+): boolean {
+  if (options.dropUnresumable && session.status === "active" && !session.codexThreadId) return false;
+  if (options.maxAgeMs !== undefined) {
+    const updatedAt = Date.parse(session.updatedAt);
+    if (!Number.isFinite(updatedAt)) return false;
+    if (Date.now() - updatedAt > options.maxAgeMs) return false;
+  }
+  return true;
 }
 
 export function durableRunOptions(options: AgentRunOptions): Partial<AgentRunOptions> {

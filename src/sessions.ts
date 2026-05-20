@@ -1,7 +1,7 @@
 import { AppServerUnavailableError, CodexAppServerSession, type AppServerStatus } from "./app-server.js";
 import { BackpressureError, runQueuedAgent } from "./jobs.js";
 import { errorForLog, logger, summarizeRawTrafficForLog } from "./logging.js";
-import type { AgentRunOptions, AgentRunPartial, AgentRunResult } from "./runner.js";
+import { RunValidationError, type AgentRunOptions, type AgentRunPartial, type AgentRunResult } from "./runner.js";
 import { recordDiagnosticEvent } from "./diagnostics.js";
 import {
   durableRunOptions,
@@ -180,6 +180,7 @@ function defaultSessionProtocol(env: NodeJS.ProcessEnv = process.env): SessionPr
 
 function shouldFallbackToExec(error: unknown, env: NodeJS.ProcessEnv = process.env): boolean {
   if (env.CODEX_SUBAGENTS_DISABLE_EXEC_FALLBACK === "1") return false;
+  if (error instanceof RunValidationError) return false;
   return error instanceof AppServerUnavailableError || error instanceof Error;
 }
 
@@ -1138,7 +1139,10 @@ export class CodexSessionManager {
   private loadPersistedSessions(): void {
     const store = this.stateStore;
     if (!store) return;
-    for (const persisted of store.load()) {
+    for (const persisted of store.load({
+      maxAgeMs: this.idleTtlSeconds * 1000,
+      dropUnresumable: true,
+    })) {
       const record = this.recordFromState(persisted);
       if (!record) continue;
       this.sessions.set(record.id, record);
@@ -1208,7 +1212,11 @@ export class CodexSessionManager {
         error: session.error,
       }));
     try {
-      store.save(states, { replaceIds: this.persistedSessionIds });
+      store.save(states, {
+        replaceIds: this.persistedSessionIds,
+        maxAgeMs: this.idleTtlSeconds * 1000,
+        dropUnresumable: true,
+      });
     } catch (error) {
       logger.error("session.state.save_failed", { stateFile: store.file, error: errorForLog(error) });
     }

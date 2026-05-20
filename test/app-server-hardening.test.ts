@@ -411,6 +411,36 @@ describe("app-server hardening", () => {
     expect(store.load().map((session) => session.id).sort()).toEqual(["external", "local"]);
   });
 
+  it("drops stale or unresumable durable sessions during merge", async () => {
+    const stateDir = await tempDir("codex-subagents-state-prune-");
+    const store = new SessionStateStore(path.join(stateDir, "sessions.json"));
+    const now = new Date().toISOString();
+    const old = new Date(Date.now() - 120_000).toISOString();
+    const state = (id: string, updatedAt: string, codexThreadId?: string): DurableSessionState => ({
+      id,
+      status: "active",
+      createdAt: updatedAt,
+      updatedAt,
+      codexThreadId,
+      protocol: "app-server",
+      turns: 1,
+      baseOptions: { projectDir: stateDir },
+    });
+
+    store.save([
+      state("fresh", now, "thread-fresh"),
+      state("old", old, "thread-old"),
+      state("unresumable", now),
+    ]);
+    store.save([state("local", now, "thread-local")], {
+      replaceIds: ["local"],
+      maxAgeMs: 60_000,
+      dropUnresumable: true,
+    });
+
+    expect(store.load().map((session) => session.id).sort()).toEqual(["fresh", "local"]);
+  });
+
   it("marks live steering unsupported when turn/steer fails", async () => {
     const manager = new CodexSessionManager();
     const projectDir = await tempDir("codex-subagents-app-steer-fail-project-");

@@ -55,6 +55,11 @@ That maps to Codex's unrestricted local mode. It can write files, mutate git
 state, use DNS/network, and run package installs. Use it only when the user
 explicitly asks for that capability.
 
+There is also an advanced `workspace-write` sandbox. It can write inside the
+configured workspace but is not full local access and does not enable DNS/network
+or arbitrary filesystem writes. The `patcher` role uses `workspace-write` by
+default; use other roles or omit `subagent_type` for strictly read-only work.
+
 ## Nested Subagents Can Increase Cost And Latency
 
 Nested Codex subagents are supported, including Spark. Keep nested work scoped,

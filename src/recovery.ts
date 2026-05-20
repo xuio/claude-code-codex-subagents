@@ -51,6 +51,21 @@ export function recoveryForError(error: unknown, context = "tool_call"): Recover
     };
   }
 
+  if (
+    lower.includes("enoent") ||
+    lower.includes("enotdir") ||
+    lower.includes("eisdir") ||
+    lower.includes("no such file or directory") ||
+    lower.includes("not a directory") ||
+    lower.includes("not executable")
+  ) {
+    return {
+      recoverable: false,
+      reason: "invalid_path",
+      recommendedAction: "Fix the configured path or working directory before retrying.",
+    };
+  }
+
   if (lower.includes("timed out") || lower.includes("timeout")) {
     return {
       recoverable: true,

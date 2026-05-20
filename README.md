@@ -111,6 +111,11 @@ Full local access is opt-in per call:
 Use that only when the user explicitly wants Codex to edit files, write git state,
 use DNS/network, install packages, or behave like a normal unrestricted Codex run.
 
+Advanced callers can still request `advanced.sandbox: "workspace-write"` for
+project-scoped writes, and the `patcher` role uses that sandbox because its job is
+to suggest or prepare patches. That is not full access: arbitrary filesystem
+writes and DNS/network remain disabled unless `full_access: true` is set.
+
 ## Documentation
 
 - [Usage guide](docs/USAGE.md) - tools, examples, models, sessions, env vars.

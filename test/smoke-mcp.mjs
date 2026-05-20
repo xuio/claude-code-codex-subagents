@@ -1,12 +1,13 @@
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { CallToolResultSchema } from "@modelcontextprotocol/sdk/types.js";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, readFile, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 
 const root = process.cwd();
 const projectDir = await mkdtemp(path.join(os.tmpdir(), "codex-subagents-smoke-project-"));
+const recordDir = path.join(projectDir, "records");
 const fakeCodex = path.join(root, "test/fixtures/fake-codex.mjs");
 const client = new Client({ name: "codex-subagents-smoke", version: "0.1.0" });
 const transport = new StdioClientTransport({
@@ -17,6 +18,7 @@ const transport = new StdioClientTransport({
     CODEX_SUBAGENTS_CODEX_BIN: fakeCodex,
     CLAUDE_PROJECT_DIR: projectDir,
     CODEX_SUBAGENTS_SESSION_STATE_FILE: path.join(projectDir, "sessions.json"),
+    FAKE_CODEX_RECORD_DIR: recordDir,
   },
   stderr: "pipe",
 });
@@ -130,6 +132,46 @@ try {
     missingSession,
   );
 
+  const invalidReasoning = await callTool("codex_task", {
+    description: "Invalid reasoning smoke",
+    prompt: "should not start",
+    project_dir: projectDir,
+    advanced: { reasoning: "minimal" },
+  });
+  assert(invalidReasoning.isError, "invalid reasoning should return an MCP error", invalidReasoning);
+  assert(
+    invalidReasoning.content?.[0]?.text?.includes("reasoning_effort='minimal'"),
+    "failed AgentRunResult text should include validation detail",
+    invalidReasoning,
+  );
+
+  const timedOut = await callTool("codex_task", {
+    description: "Timeout smoke",
+    prompt: "timeout smoke DELAY_MS=500",
+    project_dir: projectDir,
+    advanced: { timeout_ms: 20, terminate_grace_ms: 20 },
+  });
+  assert(timedOut.isError, "timeout should return an MCP error", timedOut);
+  assert(
+    timedOut.content?.[0]?.text &&
+      timedOut.content[0].text !== "Codex task timeout" &&
+      timedOut.content[0].text.includes("Codex task timeout:"),
+    "timeout AgentRunResult text should include failure detail",
+    timedOut,
+  );
+
+  const emptyMcpServers = await callTool("codex_task", {
+    description: "Empty MCP servers smoke",
+    prompt: "empty mcp servers smoke",
+    project_dir: projectDir,
+    advanced: { codex_mcp_servers: {} },
+  });
+  assert(
+    emptyMcpServers.structuredContent?.ok,
+    "empty codex_mcp_servers should not infer mcp_config_policy=explicit",
+    emptyMcpServers.structuredContent,
+  );
+
   const single = await callTool("codex_task", {
     description: "Single smoke",
     prompt: "single smoke RUN_COMMAND_EVENT",
@@ -139,6 +181,12 @@ try {
   assert(single.structuredContent?.ok, "codex_task should return ok", single.structuredContent);
   assert(single.structuredContent?.result?.includes("single smoke"), "codex_task should return answer-first result", single.structuredContent);
   assert(single.structuredContent?.session_id, "codex_task should return session_id", single.structuredContent);
+  assert(
+    single.structuredContent?.commands?.[0]?.command === "rg example" &&
+      single.structuredContent?.diagnostics?.commands?.[0]?.command === "rg example",
+    "codex_task should surface command events in the first-class commands field",
+    single.structuredContent,
+  );
   assert(
     single.structuredContent?.diagnostics?.cwd === projectDir &&
       single.structuredContent?.diagnostics?.model === "gpt-5.3-codex-spark" &&
@@ -188,6 +236,23 @@ try {
       !waitedFirstTurn.structuredContent?.result?.includes("single follow-up smoke"),
     "turn-specific wait should return the requested turn result, not session.lastResult",
     waitedFirstTurn.structuredContent,
+  );
+  assert(
+    waitedFirstTurn.structuredContent?.diagnostics?.partial_result?.includes("single smoke RUN_COMMAND_EVENT") &&
+      !waitedFirstTurn.structuredContent?.diagnostics?.partial_result?.includes("single follow-up smoke"),
+    "turn-specific wait diagnostics should not expose the latest session result as partial_result",
+    waitedFirstTurn.structuredContent,
+  );
+  const calls = (await readFile(path.join(recordDir, "calls.jsonl"), "utf8"))
+    .trim()
+    .split("\n")
+    .map((line) => JSON.parse(line));
+  const followupCall = calls.find((call) => call.method === "turn/start" && call.prompt?.includes("single follow-up smoke"));
+  assert(followupCall, "expected recorded follow-up turn/start call", calls);
+  assert(
+    !followupCall.prompt.includes("Task description: Continue Codex session"),
+    "codex_followup without an explicit description should not prepend boilerplate",
+    followupCall,
   );
 
   const background = await callTool("codex_task", {

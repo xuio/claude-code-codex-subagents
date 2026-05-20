@@ -151,7 +151,7 @@ function compactSessionTurn(value: unknown): unknown {
   if (!value || typeof value !== "object") return value;
   const turn = value as Record<string, unknown>;
   if (typeof turn.prompt !== "string") return value;
-  const prompt = truncateString(turn.prompt, 2_000);
+  const prompt = truncateString(redactSensitiveText(turn.prompt), 2_000);
   return {
     ...turn,
     prompt: prompt.text,

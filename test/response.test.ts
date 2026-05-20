@@ -111,7 +111,7 @@ describe("MCP response compaction", () => {
   });
 
   it("compacts session turn prompts in MCP snapshots", () => {
-    const prompt = "p".repeat(100_000);
+    const prompt = `ghp_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA0000 ${"p".repeat(100_000)}`;
     const compact = compactSessionSnapshotForMcp({
       id: "session-test",
       activeTurn: { id: "turn-active", prompt },
@@ -127,6 +127,8 @@ describe("MCP response compaction", () => {
     });
 
     expect((compact.activeTurn as { prompt: string }).prompt.length).toBeLessThan(3_000);
+    expect((compact.activeTurn as { prompt: string }).prompt).toContain("[REDACTED]");
+    expect((compact.activeTurn as { prompt: string }).prompt).not.toContain("ghp_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA0000");
     expect((compact.activeTurn as { promptOmittedChars: number }).promptOmittedChars).toBeGreaterThan(90_000);
     expect((compact.queuedTurns as unknown[])).toHaveLength(1);
     expect((compact.recentTurns as unknown[])).toHaveLength(20);

@@ -74,7 +74,7 @@ export async function cleanupRuntime(reason: string, graceMs = 2_500): Promise<v
       killChildProcess(child, "SIGTERM");
     }
 
-    const waitMs = Math.max(50, Math.min(graceMs, 1_000));
+    const waitMs = Math.max(50, Math.min(graceMs, 60_000));
     await new Promise((resolve) => setTimeout(resolve, waitMs));
 
     for (const [child, meta] of trackedChildren) {

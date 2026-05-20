@@ -574,7 +574,68 @@ function summarizeResultValue(value: unknown, fallbackText: string, fallback: st
     const summary = (value as { summary?: unknown }).summary;
     if (typeof summary === "string" && summary.trim()) return firstUsefulLine(summary, fallback);
   }
+  if (typeof value === "string" && !value.trim() && fallbackText.trim()) {
+    return firstUsefulLine(fallbackText, fallback);
+  }
   return firstUsefulLine(stringifyResultValue(value, fallbackText), fallback);
+}
+
+function agentFallbackErrorText(
+  agent: {
+    validationError?: unknown;
+    eventSummary?: { errors?: unknown[] };
+    stderr?: unknown;
+  },
+  recovery?: { recommendedAction?: string },
+): string | undefined {
+  const validationError = typeof agent.validationError === "string" ? agent.validationError.trim() : "";
+  if (validationError) return validationError;
+
+  const eventError = agent.eventSummary?.errors?.find(
+    (error): error is string => typeof error === "string" && error.trim().length > 0,
+  );
+  if (eventError) return eventError.trim();
+
+  const stderr = typeof agent.stderr === "string" ? agent.stderr.trim() : "";
+  if (stderr) return stderr;
+
+  const recoveryAction = recovery?.recommendedAction?.trim();
+  return recoveryAction || undefined;
+}
+
+function visibleAgentAnswer(
+  agent: ReturnType<typeof compactAgentResultForMcp>,
+  recovery?: { recommendedAction?: string },
+): string {
+  const resultValue = agent.structuredOutput ?? agent.finalMessage;
+  const answer = stringifyResultValue(resultValue, agent.finalMessage);
+  const structuredOutputError = typeof agent.structuredOutputError === "string" ? agent.structuredOutputError : undefined;
+  if (!agent.ok && structuredOutputError) {
+    return answer
+      ? `${answer}\n\nStructured output parse failed: ${structuredOutputError}`
+      : `Codex task ${agent.status}: Structured output parse failed: ${structuredOutputError}`;
+  }
+
+  const fallbackReason = !agent.ok && !answer ? agentFallbackErrorText(agent, recovery) : undefined;
+  if (fallbackReason) return `Codex task ${agent.status}: ${fallbackReason}`;
+  return answer;
+}
+
+function agentSafety(agent: ReturnType<typeof compactAgentResultForMcp>): Record<string, unknown> {
+  return {
+    sandbox: agent.sandbox,
+    full_access: Boolean(agent.dangerouslyBypassApprovalsAndSandbox),
+    warning:
+      agent.dangerouslyBypassApprovalsAndSandbox
+        ? "Codex ran with full non-sandbox access."
+        : agent.sandbox === "workspace-write"
+          ? "Codex could write inside the configured workspace."
+          : undefined,
+  };
+}
+
+function agentCommands(agent: ReturnType<typeof compactAgentResultForMcp>): Array<{ command?: string; status?: string }> {
+  return agent.eventSummary.commands.map((command) => ({ ...command }));
 }
 
 function suggestedActionForAgent(result: { ok: boolean; status: string }, recovery?: { recommendedAction?: string }): string {
@@ -634,6 +695,9 @@ function diagnosticsForAgent(agent: ReturnType<typeof compactAgentResultForMcp>)
     stderr_tail: agent.stderr || undefined,
     stdout_tail: agent.stdoutTail || undefined,
     structured_output_error: agent.structuredOutputError || undefined,
+    validation_error: agent.validationError || undefined,
+    timeout_reason: agent.timeoutReason || undefined,
+    commands: agentCommands(agent),
   };
 }
 
@@ -650,13 +714,13 @@ function nativeAgentPayload(
   const agent = compactAgentResultForMcp(result);
   const recovery = recoveryForAgentResult(result);
   const resultValue = agent.structuredOutput ?? agent.finalMessage;
-  const answer = stringifyResultValue(resultValue, agent.finalMessage);
   const structuredOutputError = typeof agent.structuredOutputError === "string" ? agent.structuredOutputError : undefined;
-  const visibleAnswer =
-    !agent.ok && structuredOutputError
-      ? `${answer}\n\nStructured output parse failed: ${structuredOutputError}`
-      : answer;
+  const visibleAnswer = visibleAgentAnswer(agent, recovery);
   const sessionId = context.session && typeof context.session === "object" ? (context.session as { id?: string }).id : undefined;
+  const sessionFallbackReason =
+    context.session && typeof context.session === "object"
+      ? (context.session as { appServerFallbackReason?: string }).appServerFallbackReason
+      : undefined;
   return {
     ok: agent.ok,
     status: agent.status,
@@ -665,18 +729,23 @@ function nativeAgentPayload(
     session_id: sessionId,
     turn: context.turn,
     structured: agent.structuredOutput,
+    commands: agentCommands(agent),
+    safety: agentSafety(agent),
     hint: recovery?.recommendedAction ?? suggestedActionForAgent(agent, recovery),
     error: recovery
       ? {
           message: structuredOutputError
             ? `Structured output parse failed: ${structuredOutputError}`
-            : agent.eventSummary.errors[0] ?? agent.stderr ?? `Codex task ${agent.status}`,
+            : agentFallbackErrorText(agent, recovery) ?? `Codex task ${agent.status}`,
           recoverable: recovery.recoverable,
           kind: recovery.reason,
           retry_after_ms: recovery.retryAfterMs,
         }
       : undefined,
-    diagnostics: diagnosticsForAgent(agent),
+    diagnostics: {
+      ...diagnosticsForAgent(agent),
+      app_server_fallback_reason: sessionFallbackReason || undefined,
+    },
   };
 }
 
@@ -703,18 +772,21 @@ function nativeParallelResponse(
   const normalized = agents.map((agent, index) => {
     const recovery = recoveries[index];
     const task = context.descriptions[index] ?? {};
-    const answer = stringifyResultValue(agent.structuredOutput ?? agent.finalMessage, agent.finalMessage);
+    const resultValue = agent.structuredOutput ?? agent.finalMessage;
+    const answer = visibleAgentAnswer(agent, recovery);
     return {
       name: agent.name ?? task.name ?? `codex-task-${index + 1}`,
       ok: agent.ok,
       status: agent.status,
-      summary: summarizeResultValue(agent.structuredOutput ?? agent.finalMessage, answer, `Codex task ${agent.status}`),
+      summary: summarizeResultValue(resultValue, answer, `Codex task ${agent.status}`),
       result: answer,
       session_id: task.session_id,
       structured: agent.structuredOutput,
+      commands: agentCommands(agent),
+      safety: agentSafety(agent),
       error: recovery
         ? {
-            message: agent.eventSummary.errors[0] ?? agent.stderr ?? `Codex task ${agent.status}`,
+            message: agentFallbackErrorText(agent, recovery) ?? `Codex task ${agent.status}`,
             recoverable: recovery.recoverable,
             kind: recovery.reason,
             retry_after_ms: recovery.retryAfterMs,
@@ -750,18 +822,21 @@ function nativeTaskGroupResponse(runs: NativeTaskGroupRun[]): CallToolResult {
     if (run.result) {
       const agent = compactAgentResultForMcp(run.result);
       const recovery = recoveryForAgentResult(run.result);
-      const answer = stringifyResultValue(agent.structuredOutput ?? agent.finalMessage, agent.finalMessage);
+      const resultValue = agent.structuredOutput ?? agent.finalMessage;
+      const answer = visibleAgentAnswer(agent, recovery);
       return {
         name: agent.name ?? run.task.name ?? run.task.description ?? `codex-task-${index + 1}`,
         ok: agent.ok,
         status: agent.status,
-        summary: summarizeResultValue(agent.structuredOutput ?? agent.finalMessage, answer, `Codex task ${agent.status}`),
+        summary: summarizeResultValue(resultValue, answer, `Codex task ${agent.status}`),
         result: answer,
         session_id: run.session?.id,
         structured: agent.structuredOutput,
+        commands: agentCommands(agent),
+        safety: agentSafety(agent),
         error: recovery
           ? {
-              message: agent.eventSummary.errors[0] ?? agent.stderr ?? `Codex task ${agent.status}`,
+              message: agentFallbackErrorText(agent, recovery) ?? `Codex task ${agent.status}`,
               recoverable: recovery.recoverable,
               kind: recovery.reason,
               retry_after_ms: recovery.retryAfterMs,
@@ -772,15 +847,17 @@ function nativeTaskGroupResponse(runs: NativeTaskGroupRun[]): CallToolResult {
     }
 
     const recovery = recoveryForError(run.error ?? new Error("Codex task failed before producing a result."), "codex_task_group");
+    const message = redactSensitiveText(run.error instanceof Error ? run.error.message : String(run.error ?? "Codex task failed."));
+    const result = recovery.recommendedAction ? `${message}\n\nNext: ${recovery.recommendedAction}` : message;
     return {
       name: run.task.name ?? run.task.description ?? `codex-task-${index + 1}`,
       ok: false,
       status: "failed",
-      summary: "Codex task failed before producing a result.",
-      result: "",
+      summary: firstUsefulLine(message, "Codex task failed before producing a result."),
+      result,
       session_id: run.session?.id,
       error: {
-        message: redactSensitiveText(run.error instanceof Error ? run.error.message : String(run.error ?? "Codex task failed.")),
+        message,
         recoverable: recovery.recoverable,
         kind: recovery.reason,
         retry_after_ms: recovery.retryAfterMs,
@@ -815,11 +892,13 @@ function nativeTaskPrompt(args: { description?: string; prompt: string; subagent
   return `${prefix.join("\n")}\n\n${args.prompt}`;
 }
 
-function sessionProgressPayload(session: unknown): Record<string, unknown> {
+function sessionProgressPayload(session: unknown, preferredResult?: unknown): Record<string, unknown> {
   if (!session || typeof session !== "object") return {};
   const value = session as Record<string, unknown>;
   const partial = value.partial && typeof value.partial === "object" ? (value.partial as Record<string, unknown>) : undefined;
   const lastResult = value.lastResult && typeof value.lastResult === "object" ? (value.lastResult as Record<string, unknown>) : undefined;
+  const preferred =
+    preferredResult && typeof preferredResult === "object" ? (preferredResult as Record<string, unknown>) : undefined;
   const activeTurn = value.activeTurn && typeof value.activeTurn === "object" ? (value.activeTurn as Record<string, unknown>) : undefined;
   const updatedAt = typeof value.updatedAt === "string" ? Date.parse(value.updatedAt) : NaN;
   const createdAt = typeof activeTurn?.createdAt === "string" ? Date.parse(activeTurn.createdAt) : NaN;
@@ -827,6 +906,8 @@ function sessionProgressPayload(session: unknown): Record<string, unknown> {
   const partialResult =
     typeof partial?.lastAgentMessage === "string"
       ? partial.lastAgentMessage
+      : typeof preferred?.finalMessage === "string"
+        ? preferred.finalMessage
       : typeof lastResult?.finalMessage === "string"
         ? lastResult.finalMessage
         : undefined;
@@ -1038,7 +1119,9 @@ function toRunOptions(args: {
     skipGitRepoCheck: args.skip_git_repo_check,
     ignoreRules: args.ignore_rules,
     isolatedCodexHome: args.isolated_codex_home,
-    mcpConfigPolicy: args.mcp_config_policy ?? (args.codex_mcp_servers ? "explicit" : undefined),
+    mcpConfigPolicy:
+      args.mcp_config_policy ??
+      (args.codex_mcp_servers && Object.keys(args.codex_mcp_servers).length > 0 ? "explicit" : undefined),
     codexMcpServers: args.codex_mcp_servers,
     forwardSensitiveEnv: args.forward_sensitive_env,
     idleTimeoutMs: args.idle_timeout_ms,
@@ -1667,6 +1750,7 @@ registerTool(
         .describe("Short human-readable task label, like Claude's native Task description."),
       prompt: z
         .string()
+        .trim()
         .min(1)
         .describe(
           "Self-contained Codex task prompt. Include scope, read-only expectation, output shape, and file/line reference requirements when reviewing code.",
@@ -1941,6 +2025,7 @@ const nativeTaskGroupTaskSchema = z.object({
     .describe("Short task label, like Claude's native Task description."),
   prompt: z
     .string()
+    .trim()
     .min(1)
     .describe(
       "Self-contained Codex prompt for this independent task. Keep overlap low across parallel tasks.",
@@ -2130,7 +2215,7 @@ registerTool(
                 "Use the result directly, or use codex_followup mode queue for another prompt in this Codex context.",
               diagnostics: {
                 session: compactSession,
-                ...sessionProgressPayload(compactSession),
+                ...sessionProgressPayload(compactSession, waitResult),
               },
               error: recovery
                 ? {
@@ -2144,7 +2229,7 @@ registerTool(
           );
         }
 
-        const description = args.description ?? (mode === "steer" ? "Steer Codex session" : "Continue Codex session");
+        const description = args.description;
         const runOptions = publicRunOptions({
           ...args,
           description,

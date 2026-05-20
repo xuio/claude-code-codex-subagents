@@ -200,6 +200,11 @@ This maps to Codex's `--dangerously-bypass-approvals-and-sandbox` flag and allow
 DNS/network access, file writes, package installs, and git writes. Keep it scoped
 to the specific tool call that needs it.
 
+`advanced.sandbox: "workspace-write"` is a narrower advanced mode for
+project-scoped writes without DNS/network or arbitrary filesystem access. The
+`patcher` role uses `workspace-write`; all other built-in roles stay read-only.
+Responses include a `safety` block so callers can see which sandbox actually ran.
+
 ## Sharp Edges
 
 See [Known limitations](KNOWN_LIMITATIONS.md) for the current operational sharp

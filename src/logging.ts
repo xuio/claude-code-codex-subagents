@@ -1,7 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import { appendFileSync, chmodSync, mkdirSync, renameSync, statSync } from "node:fs";
 import path from "node:path";
-import { redactJsonValue, redactSensitiveText } from "./redaction.js";
+import { isSensitiveKey, redactJsonValue, redactSensitiveText } from "./redaction.js";
 
 export const logLevels = ["debug", "info", "warn", "error", "silent"] as const;
 export type LogLevel = (typeof logLevels)[number];
@@ -14,8 +14,6 @@ const levelWeight: Record<LogLevel, number> = {
   error: 40,
   silent: Number.POSITIVE_INFINITY,
 };
-
-const sensitiveKeyRe = /(api[_-]?key|token|secret|password|private[_-]?key|cookie|session|credential|auth)/i;
 
 let logWriter: (line: string) => void = (line) => {
   writeDefaultLog(line);
@@ -83,7 +81,7 @@ function shortenRaw(text: string, max = maxStringChars()): string | { chars: num
 }
 
 export function summarizeForLog(value: unknown, key = "", depth = 0): unknown {
-  if (sensitiveKeyRe.test(key)) return "[REDACTED]";
+  if (key && isSensitiveKey(key)) return "[REDACTED]";
 
   if (typeof value === "string") {
     return shorten(value);
