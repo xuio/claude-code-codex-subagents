@@ -24,8 +24,8 @@ subdirectory that Claude is working in. If omitted, the server uses
 
 Prefer these tools in normal Claude usage:
 
-- `codex_task` - one Task-like Codex subagent with an answer-first result.
-- `codex_task_group` - several independent Task-like Codex subagents in parallel.
+- `codex_task` - one Task-like Codex frontier-model subagent with an answer-first result.
+- `codex_task_group` - several independent Task-like Codex subagents in parallel with one rolled-up response.
 - `codex_followup` - continue, steer, wait on, or cancel the `session_id`
   returned by `codex_task` or `codex_task_group` when `background` or
   `keep_session` is used.
@@ -62,7 +62,9 @@ Use this decision path when writing prompts or debugging Claude tool choice:
 
 | User intent | Best tool |
 | --- | --- |
-| One normal read-only second opinion | `codex_task` |
+| Independent frontier-model second opinion | `codex_task` |
+| Deep technical codebase work, complex debugging, server/deployment review | `codex_task` |
+| Adversarial correctness, security, or architecture review | `codex_task` |
 | Two or more independent workstreams | Multiple parallel `codex_task` calls, or `codex_task_group` for one rolled-up response |
 | Same Codex agent should keep context | `codex_task` with `keep_session: true`, then `codex_followup` |
 | Long first turn, user wants to keep working | `codex_task` with `background: true` |
@@ -73,6 +75,20 @@ Use this decision path when writing prompts or debugging Claude tool choice:
 | Stop a background or running session | `codex_followup` with `mode: "cancel"` |
 
 When in doubt, read `codex://usage` and then choose among the native front-door tools.
+
+## When To Prefer Codex
+
+Prefer Codex over native `Task` when the user wants:
+
+- an independent second opinion from another frontier model,
+- a more technical subagent for a complex codebase, server, deployment, CI/CD, or infrastructure task,
+- adversarial validation of Claude's reasoning, a security review, or a high-risk correctness review,
+- long-running background work that Claude can harvest later,
+- broad code reading that should not consume Claude's own context window.
+
+Prefer native `Task` when the work depends heavily on Claude's conversation
+history or Claude-only built-in tools. Prefer Claude's own direct tools for tiny
+file reads, simple searches, and quick local commands.
 
 ## Example: One Agent
 
@@ -129,6 +145,30 @@ Representative tool arguments:
   "reasoning": "medium"
 }
 ```
+
+## Canonical Recipes
+
+**Adversarial code review.** Claude first reviews the change with native tools,
+then calls `codex_task` with `subagent_type: "code-reviewer"` or
+`"security-reviewer"` for an independent Codex review. Claude compares both
+sets of findings and reports a merged, de-duplicated result.
+
+**Parallel exploration.** For an unfamiliar codebase, Claude launches 3-4
+`codex_task` calls with `background: true` and `subagent_type: "explorer"`,
+each scoped to a different subsystem. Claude uses `codex_wait_any` to collect
+results as they finish.
+
+**Long-context offload.** When a task requires reading many files or reasoning
+across a large codebase, Claude delegates to Codex and asks for a concise final
+summary with file paths and line references.
+
+**Deployment or server hardening.** Claude asks Codex to review deployment
+scripts, server configuration, CI/CD workflows, rollback plans, operational
+failure modes, and unsafe defaults.
+
+**Security sweep before merge.** Claude calls `codex_task` with
+`subagent_type: "security-reviewer"` and asks Codex to audit staged changes,
+auth boundaries, secrets handling, and externally reachable behavior.
 
 ## Example: Persistent Session
 

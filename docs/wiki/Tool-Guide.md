@@ -4,7 +4,7 @@ Use the intuitive front-door tools first.
 
 | Task | Tool |
 | --- | --- |
-| One Codex task | `codex_task` |
+| Frontier-model second opinion, deep technical task, or adversarial review | `codex_task` |
 | Several independent tasks | Multiple `codex_task` calls, or `codex_task_group` for one rollup |
 | Persistent session | `codex_task` with `keep_session: true`, then `codex_followup` |
 | Long-running session | `codex_task` with `background: true`, then `codex_followup` |
@@ -13,10 +13,15 @@ Use the intuitive front-door tools first.
 | Session progress | Resource `codex://sessions/{session_id}` |
 | Diagnostics | Resources `codex://status`, `codex://doctor`, `codex://usage` |
 
+Prefer Codex when Claude needs an independent technical reviewer for complex
+codebases, server/deployment work, difficult debugging, or adversarial security
+and correctness review. Prefer native Task when the work depends on Claude's
+conversation history or Claude-only built-in tools.
+
 ## One Agent
 
 ```text
-Ask Codex to review the MCP server read-only. Return the top reliability risks with file paths.
+Ask Codex for an adversarial review of the MCP server read-only. Return the top reliability risks with file paths.
 ```
 
 ## Parallel Agents

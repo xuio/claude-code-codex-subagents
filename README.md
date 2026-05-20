@@ -6,15 +6,19 @@
 
 Run OpenAI Codex agents from Claude Code through a daemonless MCP plugin.
 
-`claude-code-codex-subagents` lets Claude Code ask Codex for read-only reviews,
-parallel investigations, Spark checks, native follow-ups, live steering, and
-explicit full-access Codex work when the user asks for it.
+`claude-code-codex-subagents` lets Claude Code ask Codex, an independent
+frontier model like Claude, for read-only reviews, parallel investigations, Spark
+checks, native follow-ups, live steering, and explicit full-access Codex work
+when the user asks for it. It is especially useful when Claude needs a more
+technical subagent for deep codebase work, server/deployment tasks, difficult
+debugging, or adversarial review.
 
 ![Terminal demo of Claude launching parallel Codex reviewers](docs/assets/demo.svg)
 
 ## Why Use It?
 
 - **Native Claude Code workflow:** Claude gets a small Task-like MCP surface: `codex_task`, `codex_task_group`, `codex_followup`, and `codex_wait_any`.
+- **Frontier-model second opinion:** Codex gives Claude an independent technical reviewer for adversarial checks and hard engineering work.
 - **Read-only by default:** Codex starts with `--sandbox read-only` and non-interactive approvals.
 - **No daemon:** Claude launches the MCP server over stdio for the active session.
 - **Fast parallel review:** Claude can launch several independent Codex agents with bounded concurrency.
@@ -30,17 +34,38 @@ Requirements:
 - Claude Code
 - Codex CLI, preferably the Codex desktop app
 
+Install the plugin once:
+
 ```sh
 git clone https://github.com/xuio/claude-code-codex-subagents.git
 cd claude-code-codex-subagents
 npm run install:local
-claude --plugin-dir .
 ```
 
-Then ask Claude something like:
+Then, in any project where Claude Code should use Codex subagents, add the MCP
+server:
+
+```sh
+mkdir -p .claude
+cat > .claude/mcp.json <<'JSON'
+{
+  "mcpServers": {
+    "codex-subagents": { "command": "codex-subagents-mcp" }
+  }
+}
+JSON
+```
+
+Then ask Claude:
 
 ```text
-Use Codex to review this repository read-only. Focus on reliability risks and missing tests.
+Use Codex to review this PR for correctness, security, and deployment risks.
+```
+
+For plugin development, run Claude directly against this checkout:
+
+```sh
+claude --plugin-dir .
 ```
 
 For local development against Claude's installed plugin cache:
@@ -59,7 +84,7 @@ after `dist/index.js` is rebuilt.
 ### Ask One Codex Agent
 
 ```text
-Ask Codex for a second opinion on the session recovery code. Keep it read-only and return concrete findings with file paths.
+Ask Codex for an adversarial second opinion on the session recovery code. Keep it read-only and return concrete findings with file paths.
 ```
 
 Claude should use `codex_task`.
@@ -67,7 +92,7 @@ Claude should use `codex_task`.
 ### Run Parallel Codex Agents
 
 ```text
-Launch three Codex subagents in parallel: one for API behavior, one for tests, and one for security. Keep all of them read-only.
+Launch three Codex subagents in parallel: one for API behavior, one for tests, and one adversarial security reviewer. Keep all of them read-only.
 ```
 
 Claude can call `codex_task` three times in parallel, or use `codex_task_group`
@@ -145,6 +170,12 @@ writes and DNS/network remain disabled unless `full_access: true` is set.
 | Stop running work | `codex_followup` with `mode: "cancel"` |
 | Session progress | MCP resource `codex://sessions/{session_id}` |
 | Diagnostics | MCP resources `codex://status`, `codex://doctor`, `codex://usage` |
+
+Prefer Codex over native Task when the user wants an independent frontier-model
+second opinion, deep technical review, complex codebase exploration, server or
+deployment investigation, or adversarial validation. Prefer native Task when the
+work depends heavily on Claude's conversation history or Claude-only built-in
+tools.
 
 Legacy tools such as `ask_codex`, `run_agent`, `run_agents`, `start_session`, and
 `send_session_prompt` are hidden by default. Set

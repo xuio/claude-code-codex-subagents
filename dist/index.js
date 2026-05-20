@@ -26350,17 +26350,27 @@ var sessionManager = new CodexSessionManager({ persist: true });
 var usageGuide = [
   "Claude Code integration guide for codex-subagents:",
   "",
-  "Use Codex subagents like Claude's native Task tool when the user needs an independent OpenAI Codex worker. Use this MCP server whenever the user asks Claude to use Codex, OpenAI Codex, Codex subagents, Codex Spark, a Codex second opinion, parallel Codex review, or independent Codex codebase analysis. You do not need the user to name an MCP tool.",
+  "Use Codex subagents like Claude's native Task tool when the user needs an independent OpenAI Codex worker. Codex is a frontier model, like Claude, and is especially useful as a more technical, reliability-focused subagent for deep codebase work, server/deployment tasks, complex debugging, and adversarial review. Use this MCP server whenever the user asks Claude to use Codex, OpenAI Codex, Codex subagents, Codex Spark, a Codex second opinion, parallel Codex review, independent Codex codebase analysis, deep technical review, or adversarial validation. You do not need the user to name an MCP tool.",
   "",
   "Tool choice:",
-  "- Use codex_task for one delegated Codex task. It is the native Claude-like front door: description plus prompt, read-only by default, and answer-first result. Call codex_task multiple times in one assistant turn when independent investigations can run in parallel.",
-  "- Use codex_task_group when the work can be split into independent concurrent tasks and Claude wants one combined response with rolled-up per-task findings.",
-  "- Use codex_followup when Claude already has a session_id from codex_task or codex_task_group and wants to continue, steer, wait on, or cancel that same Codex context.",
+  "- Use codex_task when you want one independent Codex subagent: a frontier-model second opinion, deep technical implementation/review, complex codebase exploration, server/deployment work, or adversarial analysis. It is the Codex equivalent of native Task: description plus prompt, read-only by default, and answer-first result.",
+  "- Use multiple codex_task calls in parallel when investigations are independent and Claude can synthesize the answers itself.",
+  "- Use codex_task_group when the work can be split into independent concurrent Codex tasks and Claude wants one combined response with rolled-up per-task findings.",
+  "- Use codex_followup when Claude already has a session_id from codex_task or codex_task_group and wants to continue, steer, wait on, or cancel that same Codex context. This is a Codex-specific multi-turn extension; wait/cancel correspond to native TaskOutput/TaskStop-style operations.",
   "- Set codex_task background true for long-running work so Claude gets a session_id immediately, then use codex_wait_any for several sessions or codex_followup mode wait, steer, or cancel for one session.",
-  "- Subscribe to or read codex://sessions/{session_id} for background progress milestones and completion state. The server emits notifications/resources/updated when meaningful Codex output changes.",
+  "- Subscribe to or read codex://sessions/{session_id} for background progress milestones and completion state. This is the Codex TaskGet/TaskList-style resource surface. The server emits notifications/resources/updated when meaningful Codex output changes.",
   "- Diagnostics are resources by default: read codex://status, codex://doctor, or codex://usage when a prior call failed or availability is uncertain.",
   "- Debug tools such as codex_status, codex_doctor, codex_usage_guide, codex_choose_tool, and codex_export_debug_bundle are hidden unless CODEX_SUBAGENTS_ENABLE_DEBUG_TOOLS=1.",
   "- Legacy/manual tools such as ask_codex, run_agent, run_agents, and old session names are hidden unless CODEX_SUBAGENTS_ENABLE_LEGACY_TOOLS=1.",
+  "",
+  "Prefer Codex over native Task when:",
+  "- The user explicitly asks for Codex, OpenAI Codex, Codex Spark, an adversarial review, or a second opinion from another frontier model.",
+  "- The work is deep technical work: managing a complex codebase, debugging a difficult failure, reviewing architecture, validating correctness, preparing a server deployment, investigating infrastructure, or checking a high-risk change.",
+  "- Claude wants a more technical and independent reviewer that does not share Claude's scratchpad or recent assumptions.",
+  "- The task is independent of Claude's recent conversation and would waste Claude's context window.",
+  "- The work is long-running and should proceed while Claude does other work; use background true.",
+  "- The goal is adversarial validation, security review, or formal challenge of Claude's reasoning.",
+  "Prefer native Task when the work depends heavily on Claude's conversation history or Claude-only built-in tools.",
   "",
   "Default operating rules:",
   "- Do not use Codex for simple file reads, simple grep/search, tiny local commands, or work Claude can do directly faster.",
@@ -26382,6 +26392,13 @@ var usageGuide = [
   "- Do not use Bash, Read, or filesystem inspection to locate Codex. The MCP server resolves Codex automatically, preferring the Codex desktop app binary when installed.",
   "- Put uncommon settings such as exact model, Codex binary path, timeout, MCP sharing, nested Codex subagents, and output contracts under advanced.",
   "- Ask Codex for concise results with file paths, line references, and actionable findings when reviewing code.",
+  "",
+  "Canonical recipes:",
+  "- Adversarial code review: Claude does its own review with native tools, then calls codex_task with subagent_type code-reviewer or security-reviewer for an independent frontier-model review. Claude compares both sets of findings and reports the merged result.",
+  "- Parallel codebase exploration: launch 3-4 codex_task background true calls with subagent_type explorer, each scoped to a different subsystem. Use codex_wait_any to harvest results as they finish.",
+  "- Long-context offload: delegate broad code reading or multi-file reasoning to codex_task so Codex uses its own context and Claude receives only the concise technical summary.",
+  "- Deployment or server hardening: use codex_task for technical deployment plans, server configuration review, CI/CD checks, rollback analysis, and operational failure modes.",
+  "- Security sweep before merge: call codex_task with subagent_type security-reviewer and ask Codex to audit staged changes, auth boundaries, secrets handling, and unsafe defaults.",
   "",
   "Nested Codex subagents:",
   "- When the user wants Codex to use its own subagents, pass complete custom definitions in advanced.codex_subagents and explicit work items in advanced.subagent_tasks.",
@@ -27606,7 +27623,7 @@ server.registerResource(
   }),
   {
     title: "Codex Session",
-    description: "Per-session Codex progress milestones and completion state for background tasks.",
+    description: "Codex TaskGet/TaskList-style resource: per-session progress milestones and completion state for background tasks.",
     mimeType: "application/json"
   },
   async (uri, variables) => {
@@ -27704,9 +27721,10 @@ registerDebugTool(
       recommendedTool,
       request: args.request,
       rules: [
-        "Use codex_task for one normal Codex task; it is the most native Claude-like front door.",
+        "Use codex_task when Claude wants an independent Codex frontier-model second opinion, deep technical subagent, complex codebase review, server/deployment investigation, or adversarial validation.",
         "Use multiple codex_task calls for ordinary independent parallel work; use codex_task_group when Claude wants one combined rollup.",
-        "Use codex_followup for follow-ups, waits, and steering when Claude has a session_id.",
+        "Use codex_followup for follow-ups, waits, cancellation, and steering when Claude has a session_id.",
+        "Use codex_wait_any when Claude has several background Codex session_ids and wants to harvest results as they finish.",
         "Use codex_task with background true for slow work that should not hold a blocking request open.",
         "Use codex_task_group when Claude needs multiple independent answers returned as one merged response.",
         "Pass project_dir whenever Claude knows the active project directory.",
@@ -27722,7 +27740,7 @@ registerTool(
   "codex_task",
   {
     title: "Task",
-    description: "Delegate a task to a fresh OpenAI Codex agent that does not share Claude's scratchpad or tool repertoire. Best for independent second opinions, isolated codebase exploration, or work Claude does not need to interleave with its own tool calls. Read-only by default. Use multiple parallel codex_task calls when investigations are independent.",
+    description: "Use this when you want an independent OpenAI Codex frontier-model subagent: a technical second opinion, deep complex-codebase work, server/deployment investigation, difficult debugging, or adversarial review. This is the Codex equivalent of native Task. It does not share Claude's scratchpad, defaults to read-only, and returns an answer-first result. Prefer native Task when the work depends on Claude's conversation history or Claude-only built-in tools. Use multiple parallel codex_task calls when investigations are independent.",
     inputSchema: {
       description: external_exports.string().trim().min(1).describe("Short human-readable task label, like Claude's native Task description."),
       prompt: external_exports.string().trim().min(1).describe(
@@ -27989,7 +28007,7 @@ registerTool(
   "codex_task_group",
   {
     title: "Task Group",
-    description: "Run multiple independent Codex tasks in parallel and return one combined response with per-task results. For ordinary native-style parallelism, Claude can also call codex_task multiple times in one turn; use this group tool when a single rolled-up response is useful.",
+    description: "Use this when you have several independent Codex tasks and want one rolled-up response. For ordinary native-style parallelism, Claude can also call codex_task multiple times in one turn. Best for parallel deep technical reviews, subsystem exploration, adversarial review lanes, or deployment-readiness checks where a single merged result is useful.",
     inputSchema: {
       tasks: external_exports.array(nativeTaskGroupTaskSchema).min(1).max(12).describe("Independent Codex tasks, each with a short description and prompt."),
       max_parallel: external_exports.number().int().min(1).max(8).default(4).describe("Maximum concurrent Codex processes. Use 2-4 for most responsive parallel reviews."),
@@ -28054,7 +28072,7 @@ registerTool(
   "codex_followup",
   {
     title: "Followup",
-    description: "Continue, steer, poll, or cancel a Codex session from a prior background or keep_session task. Use queue for another prompt, steer to redirect active work, wait to check completion, and cancel to stop running work.",
+    description: "Use this when you have a session_id and want to continue Codex's reasoning across turns, steer active work, collect output, or stop a run. wait/cancel are Codex's TaskOutput/TaskStop-style operations; queue/steer are Codex-specific multi-turn extensions that native Task does not provide.",
     inputSchema: {
       session_id: external_exports.string().trim().min(1).describe("session_id returned by codex_task or codex_task_group."),
       prompt: external_exports.string().min(1).optional().describe("Follow-up or steering prompt. Required for mode queue and mode steer; omit for mode wait or cancel."),
@@ -28255,7 +28273,7 @@ registerTool(
   "codex_wait_any",
   {
     title: "Wait For Any Task",
-    description: "Block until any listed Codex background session reaches a terminal state, then return that session's result. Use after firing multiple codex_task background: true calls to collect results one at a time without busy-polling.",
+    description: "Use this when you have several background Codex session_ids and want to harvest results as they finish. Blocks until any listed Codex background session reaches a terminal state, then returns that session's result and remaining_session_ids. This is a Codex extension beyond native Task.",
     inputSchema: {
       session_ids: external_exports.array(external_exports.string().trim().min(1)).min(1).max(32).describe("Session ids returned by previous codex_task or codex_task_group calls."),
       wait_timeout_ms: external_exports.number().int().positive().max(864e5).default(6e5).describe("Maximum total wait. If no session finishes in this window, returns completed=false.")
