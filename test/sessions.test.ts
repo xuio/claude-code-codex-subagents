@@ -20,6 +20,16 @@ async function recordedCalls(recordDir: string): Promise<Array<{ args: string[];
     .map((line) => JSON.parse(line));
 }
 
+async function waitFor<T>(read: () => T | undefined, timeoutMs = 2_000): Promise<T> {
+  const started = Date.now();
+  while (Date.now() - started < timeoutMs) {
+    const value = read();
+    if (value) return value;
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  throw new Error("Timed out waiting for condition");
+}
+
 afterEach(async () => {
   delete process.env.CODEX_SUBAGENTS_SESSION_PROTOCOL;
   await Promise.all(tempDirs.splice(0).map((dir) => rm(dir, { recursive: true, force: true })));
@@ -140,6 +150,28 @@ describe("CodexSessionManager", () => {
     expect(started.session.active).toBe(false);
     expect(started.session.partial).toBeUndefined();
     manager.cancel(started.session.id);
+  });
+
+  it("cancels active sessions, preserves partial output, and drains queued turns", async () => {
+    const manager = new CodexSessionManager();
+    const projectDir = await tempDir("codex-subagents-session-project-");
+
+    const { session } = manager.startAsync({
+      prompt: "session cancel partial APP_PROGRESS_AFTER_MS=650 DELAY_MS=5000",
+      projectDir,
+      codexBin: fakeCodex,
+    });
+    await waitFor(() => manager.get(session.id)?.partial?.lastAgentMessage);
+
+    const queued = await manager.send(session.id, "queued before cancel", {}, { wait: false });
+    expect(queued.turn?.status).toBe("queued");
+    expect(manager.stats().queuedTurns).toBe(1);
+
+    const cancelled = manager.cancel(session.id, "test changed direction");
+    expect(cancelled?.status).toBe("cancelled");
+    expect(cancelled?.partial?.lastAgentMessage).toContain("progress");
+    expect(cancelled?.queuedTurns).toHaveLength(0);
+    expect(manager.stats().queuedTurns).toBe(0);
   });
 
   it("returns the requested turn result when waiting by turn id", async () => {

@@ -88,9 +88,9 @@ Start a long-running Codex session on this repo, then let me send follow-up prom
 ```
 
 Claude should use `codex_task` for the initial prompt, preserve the returned
-`session_id`, and use `codex_followup` to continue, steer, or wait on that same
-Codex context. For a completed first turn, Claude should set `keep_session: true`;
-for long first turns, Claude should set `background: true`.
+`session_id`, and use `codex_followup` to continue, steer, wait on, or cancel
+that same Codex context. For a completed first turn, Claude should set
+`keep_session: true`; for long first turns, Claude should set `background: true`.
 
 ## Safety Model
 
@@ -138,6 +138,7 @@ writes and DNS/network remain disabled unless `full_access: true` is set.
 | Persistent context | `codex_task` with `keep_session: true`, then `codex_followup` |
 | Long-running sessions | `codex_task` with `background: true`, then `codex_followup` |
 | Live steering | `codex_followup` with `mode: "steer"` |
+| Stop running work | `codex_followup` with `mode: "cancel"` |
 | Diagnostics | MCP resources `codex://status`, `codex://doctor`, `codex://usage` |
 
 Legacy tools such as `ask_codex`, `run_agent`, `run_agents`, `start_session`, and

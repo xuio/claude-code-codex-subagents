@@ -25162,18 +25162,18 @@ var CodexSessionManager = class {
       timeoutReason: "wait_timeout"
     };
   }
-  cancel(id) {
+  cancel(id, reason) {
     const session = this.sessions.get(id);
     if (!session) {
       logger.warn("session.cancel_unknown", { sessionId: id });
       return void 0;
     }
-    logger.warn("session.cancel", { sessionId: id, active: Boolean(session.controller) });
+    logger.warn("session.cancel", { sessionId: id, active: Boolean(session.controller), reason });
     session.cancelRequested = true;
     for (const turn of session.queuedTurns) {
       turn.status = "cancelled";
       turn.updatedAt = (/* @__PURE__ */ new Date()).toISOString();
-      turn.error = "Session was cancelled before this turn started.";
+      turn.error = reason ? `Session cancelled: ${reason}` : "Session was cancelled before this turn started.";
       this.notifyTurn(turn);
     }
     session.queuedTurns = [];
@@ -25736,8 +25736,8 @@ var usageGuide = [
   "Tool choice:",
   "- Use codex_task for one delegated Codex task. It is the native Claude-like front door: description plus prompt, read-only by default, and answer-first result. Call codex_task multiple times in one assistant turn when independent investigations can run in parallel.",
   "- Use codex_task_group when the work can be split into independent concurrent tasks and Claude wants one combined response with rolled-up per-task findings.",
-  "- Use codex_followup when Claude already has a session_id from codex_task or codex_task_group and wants to continue, steer, or wait on that same Codex context.",
-  "- Set codex_task background true for long-running work so Claude gets a session_id immediately, then use codex_followup mode wait or steer.",
+  "- Use codex_followup when Claude already has a session_id from codex_task or codex_task_group and wants to continue, steer, wait on, or cancel that same Codex context.",
+  "- Set codex_task background true for long-running work so Claude gets a session_id immediately, then use codex_followup mode wait, steer, or cancel.",
   "- Diagnostics are resources by default: read codex://status, codex://doctor, or codex://usage when a prior call failed or availability is uncertain.",
   "- Debug tools such as codex_status, codex_doctor, codex_usage_guide, codex_choose_tool, and codex_export_debug_bundle are hidden unless CODEX_SUBAGENTS_ENABLE_DEBUG_TOOLS=1.",
   "- Legacy/manual tools such as ask_codex, run_agent, run_agents, and old session names are hidden unless CODEX_SUBAGENTS_ENABLE_LEGACY_TOOLS=1.",
@@ -25748,6 +25748,7 @@ var usageGuide = [
   "- If the user explicitly asks for non-sandbox/full local capabilities, set full_access true. This maps to Codex's --dangerously-bypass-approvals-and-sandbox flag and allows DNS/network plus unrestricted file and git writes.",
   "- Approvals are non-interactive; do not expect Codex to ask permission.",
   '- If codex_followup mode wait returns completed false with timeoutReason "wait_timeout", the session is still running unless its status says otherwise.',
+  "- Use codex_followup mode cancel to stop a background or actively running Codex session early. The response includes whatever partial output streamed before the interrupt.",
   '- If a tool returns error.kind "backpressure", reduce max_parallel or wait before retrying. codex://status exposes current queue/session limits.',
   "- If a response mentions outputArtifacts, use the artifact paths for full retained output instead of asking Codex to resend huge stdout/stderr.",
   '- Do not use model_preset "spark" by default. Use Spark only when the user asks for Spark or when a quick focused sidecar check is clearly more appropriate than the default Codex model.',
@@ -26336,17 +26337,22 @@ function nativeTaskPrompt(args) {
 
 ${args.prompt}`;
 }
-function sessionProgressPayload(session, preferredResult) {
-  if (!session || typeof session !== "object") return {};
+function sessionPartialMessage(session, preferredResult) {
+  if (!session || typeof session !== "object") return void 0;
   const value = session;
   const partial2 = value.partial && typeof value.partial === "object" ? value.partial : void 0;
   const lastResult = value.lastResult && typeof value.lastResult === "object" ? value.lastResult : void 0;
   const preferred = preferredResult && typeof preferredResult === "object" ? preferredResult : void 0;
+  return typeof partial2?.lastAgentMessage === "string" ? partial2.lastAgentMessage : typeof preferred?.finalMessage === "string" ? preferred.finalMessage : typeof lastResult?.finalMessage === "string" ? lastResult.finalMessage : void 0;
+}
+function sessionProgressPayload(session, preferredResult) {
+  if (!session || typeof session !== "object") return {};
+  const value = session;
+  const partialResult = sessionPartialMessage(session, preferredResult);
   const activeTurn = value.activeTurn && typeof value.activeTurn === "object" ? value.activeTurn : void 0;
   const updatedAt = typeof value.updatedAt === "string" ? Date.parse(value.updatedAt) : NaN;
   const createdAt = typeof activeTurn?.createdAt === "string" ? Date.parse(activeTurn.createdAt) : NaN;
   const elapsedBase = Number.isFinite(createdAt) ? createdAt : updatedAt;
-  const partialResult = typeof partial2?.lastAgentMessage === "string" ? partial2.lastAgentMessage : typeof preferred?.finalMessage === "string" ? preferred.finalMessage : typeof lastResult?.finalMessage === "string" ? lastResult.finalMessage : void 0;
   return {
     partial_result: partialResult,
     last_event: typeof activeTurn?.status === "string" ? `${activeTurn.kind ?? "turn"}:${activeTurn.status}` : typeof value.status === "string" ? value.status : void 0,
@@ -27005,7 +27011,7 @@ registerTool(
             result: `Codex task started in the background. Session: ${session2.id}`,
             session_id: session2.id,
             turn,
-            hint: "Use codex_followup mode wait or steer with this session_id."
+            hint: "Use codex_followup mode wait, steer, or cancel with this session_id."
           };
           if (args.advanced?.include_diagnostics) {
             payload.diagnostics = {
@@ -27227,7 +27233,7 @@ var nativeTaskGroupTaskSchema = external_exports.object({
   keep_session: external_exports.boolean().default(false).describe("Return this task's session_id after completion so Claude can follow up. Leave false for native Task-like one-shot work."),
   ...nativeBaseInputSchema
 });
-var followupModeSchema = external_exports.enum(["queue", "steer", "wait"]);
+var followupModeSchema = external_exports.enum(["queue", "steer", "wait", "cancel"]);
 registerTool(
   "codex_task_group",
   {
@@ -27297,12 +27303,13 @@ registerTool(
   "codex_followup",
   {
     title: "Followup",
-    description: "Continue, steer, or poll a Codex session from a prior background or keep_session task. Use queue for another prompt in the same context, steer to redirect active work, and wait to check whether the current work has finished.",
+    description: "Continue, steer, poll, or cancel a Codex session from a prior background or keep_session task. Use queue for another prompt, steer to redirect active work, wait to check completion, and cancel to stop running work.",
     inputSchema: {
       session_id: external_exports.string().trim().min(1).describe("session_id returned by codex_task or codex_task_group."),
-      prompt: external_exports.string().min(1).optional().describe("Follow-up or steering prompt. Required for mode queue and mode steer; omit for mode wait."),
+      prompt: external_exports.string().min(1).optional().describe("Follow-up or steering prompt. Required for mode queue and mode steer; omit for mode wait or cancel."),
       description: external_exports.string().trim().min(1).optional().describe("Optional short label for this follow-up turn."),
-      mode: followupModeSchema.default("queue").describe("queue continues the Codex context, steer redirects active work, wait collects an existing result."),
+      reason: external_exports.string().trim().min(1).max(500).optional().describe("Optional reason for mode cancel; logged and echoed in the response."),
+      mode: followupModeSchema.default("queue").describe("queue continues the Codex context, steer redirects active work, wait collects an existing result, cancel stops running work."),
       interrupt_current: external_exports.boolean().default(false).describe("For mode steer, cancel the active Codex turn and run this steering prompt next. Leave false unless the user explicitly wants interruption."),
       background: external_exports.boolean().default(false).describe("Return after queueing or steering instead of waiting for the Codex turn to finish."),
       turn_id: external_exports.string().trim().min(1).optional().describe("For mode wait, optionally wait for one specific turn."),
@@ -27316,7 +27323,7 @@ registerTool(
       const mode = args.mode ?? "queue";
       const prompt = args.prompt?.trim();
       try {
-        if (mode !== "wait" && !prompt) {
+        if (mode !== "wait" && mode !== "cancel" && !prompt) {
           return nativeErrorResult(new Error(`codex_followup mode ${mode} requires prompt.`), "codex_followup");
         }
         if (mode === "wait") {
@@ -27363,6 +27370,62 @@ registerTool(
             };
           }
           return nativeTextResult(payload2, waited.timeoutReason === "wait_cancelled");
+        }
+        if (mode === "cancel") {
+          await progress.send(`Cancelling Codex session ${args.session_id}`);
+          const sessionBefore = sessionManager.get(args.session_id);
+          if (!sessionBefore) {
+            await progress.flush();
+            return nativeErrorResult(new Error(`Unknown session_id: ${args.session_id}`), "codex_followup");
+          }
+          const wasActive = sessionBefore.active;
+          const activeTurn = sessionBefore.activeTurn;
+          const lastResult = sessionBefore.lastResult;
+          if (!wasActive && sessionBefore.queuedTurns.length === 0 && lastResult?.status === "completed") {
+            await progress.flush();
+            const compactSession3 = compactSessionSnapshotForMcp(sessionBefore);
+            const compactResult = compactAgentResultForMcp(lastResult);
+            const resultValue = compactResult.structuredOutput ?? compactResult.finalMessage;
+            const resultText = stringifyResultValue(resultValue, compactResult.finalMessage);
+            return nativeTextResult({
+              ok: true,
+              status: "already_completed",
+              cancelled: false,
+              was_active: false,
+              summary: "Codex session had already completed.",
+              result: resultText || "Codex session had already completed.",
+              session_id: args.session_id,
+              elapsed_ms: sessionProgressPayload(compactSession3, compactResult).elapsed_ms,
+              diagnostics: args.advanced?.include_diagnostics ? { session: compactSession3, result: compactResult } : void 0,
+              hint: "The session had already completed. Start a new codex_task if more work is needed."
+            });
+          }
+          const cancelled = sessionManager.cancel(args.session_id, args.reason);
+          await progress.flush();
+          if (!cancelled) {
+            return nativeErrorResult(new Error(`Unknown session_id: ${args.session_id}`), "codex_followup");
+          }
+          const compactSession2 = compactSessionSnapshotForMcp(cancelled);
+          const partialMessage = sessionPartialMessage(compactSession2);
+          const activeTurnStartedMs = activeTurn?.createdAt ? Date.parse(activeTurn.createdAt) : NaN;
+          const elapsedMs = Number.isFinite(activeTurnStartedMs) ? Math.max(0, Date.now() - activeTurnStartedMs) : sessionProgressPayload(compactSession2).elapsed_ms;
+          return nativeTextResult({
+            ok: true,
+            status: "cancelled",
+            cancelled: true,
+            was_active: wasActive,
+            reason: args.reason,
+            summary: wasActive ? `Codex session cancelled${typeof elapsedMs === "number" ? ` after ${(elapsedMs / 1e3).toFixed(1)}s` : ""}.` : "Codex session marked cancelled (was idle).",
+            result: partialMessage || (wasActive ? "Codex was cancelled mid-turn; no partial output was captured." : "Codex session was already idle when cancelled."),
+            session_id: args.session_id,
+            cancelled_turn: activeTurn ? { ...activeTurn, status: "cancelled" } : void 0,
+            elapsed_ms: elapsedMs,
+            diagnostics: args.advanced?.include_diagnostics ? {
+              session: compactSession2,
+              ...sessionProgressPayload(compactSession2)
+            } : void 0,
+            hint: "The session is closed. Start a new codex_task if more work is needed."
+          });
         }
         const description = args.description;
         const runOptions = publicRunOptions({
@@ -27415,7 +27478,7 @@ registerTool(
           session_id: args.session_id,
           turn: response.turn,
           delivery,
-          hint: "Use codex_followup mode wait or steer with this session_id."
+          hint: "Use codex_followup mode wait, steer, or cancel with this session_id."
         };
         if (args.advanced?.include_diagnostics) {
           payload.diagnostics = {

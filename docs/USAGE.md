@@ -26,8 +26,9 @@ Prefer these tools in normal Claude usage:
 
 - `codex_task` - one Task-like Codex subagent with an answer-first result.
 - `codex_task_group` - several independent Task-like Codex subagents in parallel.
-- `codex_followup` - continue, steer, or wait on the `session_id` returned by
-  `codex_task` or `codex_task_group` when `background` or `keep_session` is used.
+- `codex_followup` - continue, steer, wait on, or cancel the `session_id`
+  returned by `codex_task` or `codex_task_group` when `background` or
+  `keep_session` is used.
 
 Legacy compatibility tools are hidden by default. Set
 `CODEX_SUBAGENTS_ENABLE_LEGACY_TOOLS=1` only for older clients that still call
@@ -65,6 +66,7 @@ Use this decision path when writing prompts or debugging Claude tool choice:
 | Add a normal follow-up to a running session | `codex_followup` with `mode: "queue"` |
 | Redirect the active app-server turn | `codex_followup` with `mode: "steer"` |
 | Wait for a background session | `codex_followup` with `mode: "wait"` |
+| Stop a background or running session | `codex_followup` with `mode: "cancel"` |
 
 When in doubt, read `codex://usage` and then choose among the three native tools.
 
@@ -160,6 +162,20 @@ To steer an active app-server turn:
 
 If `session.supportsRealSteering` is false, the session fell back to the exec
 protocol and steering becomes a high-priority queued turn.
+
+To stop a background or actively running session:
+
+```json
+{
+  "session_id": "session-...",
+  "mode": "cancel",
+  "reason": "user changed direction"
+}
+```
+
+The cancel response includes partial output if Codex streamed any before the
+interrupt. Foreground `codex_task` calls are cancelled by Claude Code's normal
+request interruption path, not by a tool call from the same in-flight turn.
 
 ## Spark And Reasoning
 

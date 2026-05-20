@@ -141,6 +141,16 @@ try {
     "native error text should include the underlying failure",
     missingSession,
   );
+  const missingCancel = await callTool("codex_followup", {
+    session_id: "session-does-not-exist-smoke",
+    mode: "cancel",
+  });
+  assert(missingCancel.isError, "missing cancel session should return an MCP error", missingCancel);
+  assert(
+    missingCancel.content?.[0]?.text?.includes("Unknown session_id: session-does-not-exist-smoke"),
+    "cancel error text should include the unknown session id",
+    missingCancel,
+  );
 
   const invalidReasoning = await callTool("codex_task", {
     description: "Invalid reasoning smoke",
@@ -342,6 +352,44 @@ try {
     waitedWithDiagnostics.structuredContent?.diagnostics?.session?.status === "idle",
     "completed session diagnostics should use idle status when no turn is running",
     waitedWithDiagnostics.structuredContent,
+  );
+
+  const alreadyCompletedCancel = await callTool("codex_followup", {
+    session_id: single.structuredContent.session_id,
+    mode: "cancel",
+    reason: "smoke already complete",
+  });
+  assert(
+    alreadyCompletedCancel.structuredContent?.status === "already_completed" &&
+      alreadyCompletedCancel.structuredContent?.cancelled === false &&
+      alreadyCompletedCancel.structuredContent?.was_active === false,
+    "cancel on an already-completed session should be idempotent",
+    alreadyCompletedCancel.structuredContent,
+  );
+
+  const cancellable = await callTool("codex_task", {
+    description: "Cancellable smoke",
+    prompt: "cancellable smoke APP_PROGRESS_AFTER_MS=10 DELAY_MS=5000",
+    project_dir: projectDir,
+    background: true,
+  });
+  assert(cancellable.structuredContent?.session_id, "cancellable background task should return session_id", cancellable.structuredContent);
+  await new Promise((resolve) => setTimeout(resolve, 50));
+  const cancelled = await callTool("codex_followup", {
+    session_id: cancellable.structuredContent.session_id,
+    mode: "cancel",
+    reason: "smoke test no longer needs it",
+    advanced: { include_diagnostics: true },
+  });
+  assert(cancelled.structuredContent?.ok, "cancel should succeed", cancelled.structuredContent);
+  assert(cancelled.structuredContent?.status === "cancelled", "cancel should report cancelled status", cancelled.structuredContent);
+  assert(cancelled.structuredContent?.cancelled === true, "cancel response should set cancelled true", cancelled.structuredContent);
+  assert(cancelled.structuredContent?.was_active === true, "cancel should report active work was interrupted", cancelled.structuredContent);
+  assert(
+    String(cancelled.structuredContent?.result ?? "").includes("progress") ||
+      String(cancelled.structuredContent?.result ?? "").includes("no partial output"),
+    "cancel should include partial output or an explicit no-partial message",
+    cancelled.structuredContent,
   );
 
   const group = await callTool("codex_task_group", {

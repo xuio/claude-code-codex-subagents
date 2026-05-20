@@ -572,18 +572,20 @@ export class CodexSessionManager {
     };
   }
 
-  cancel(id: string): CodexSessionSnapshot | undefined {
+  cancel(id: string, reason?: string): CodexSessionSnapshot | undefined {
     const session = this.sessions.get(id);
     if (!session) {
       logger.warn("session.cancel_unknown", { sessionId: id });
       return undefined;
     }
-    logger.warn("session.cancel", { sessionId: id, active: Boolean(session.controller) });
+    logger.warn("session.cancel", { sessionId: id, active: Boolean(session.controller), reason });
     session.cancelRequested = true;
     for (const turn of session.queuedTurns) {
       turn.status = "cancelled";
       turn.updatedAt = new Date().toISOString();
-      turn.error = "Session was cancelled before this turn started.";
+      turn.error = reason
+        ? `Session cancelled: ${reason}`
+        : "Session was cancelled before this turn started.";
       this.notifyTurn(turn);
     }
     session.queuedTurns = [];
