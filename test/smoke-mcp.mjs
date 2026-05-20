@@ -171,20 +171,28 @@ try {
     "empty codex_mcp_servers should not infer mcp_config_policy=explicit",
     emptyMcpServers.structuredContent,
   );
+  assert(
+    !emptyMcpServers.structuredContent?.session_id &&
+      !emptyMcpServers.structuredContent?.diagnostics &&
+      !emptyMcpServers.structuredContent?.hint,
+    "completed one-shot codex_task should default to a lean native-style payload",
+    emptyMcpServers.structuredContent,
+  );
 
   const single = await callTool("codex_task", {
     description: "Single smoke",
     prompt: "single smoke RUN_COMMAND_EVENT",
     project_dir: projectDir,
-    advanced: { model: "spark" },
+    keep_session: true,
+    advanced: { model: "spark", include_diagnostics: true },
   });
   assert(single.structuredContent?.ok, "codex_task should return ok", single.structuredContent);
   assert(single.structuredContent?.result?.includes("single smoke"), "codex_task should return answer-first result", single.structuredContent);
-  assert(single.structuredContent?.session_id, "codex_task should return session_id", single.structuredContent);
+  assert(single.structuredContent?.session_id, "codex_task should return session_id when keep_session is true", single.structuredContent);
   assert(
-    single.structuredContent?.commands?.[0]?.command === "rg example" &&
+    !single.structuredContent?.commands &&
       single.structuredContent?.diagnostics?.commands?.[0]?.command === "rg example",
-    "codex_task should surface command events in the first-class commands field",
+    "codex_task should keep command events in opt-in diagnostics",
     single.structuredContent,
   );
   assert(
@@ -212,6 +220,20 @@ try {
     "app-server output_contract should parse structured output",
     structured.structuredContent,
   );
+  assert(
+    structured.content?.[0]?.text?.startsWith("fake structured review\n\n{"),
+    "structured text content should lead with the summary before JSON",
+    structured,
+  );
+
+  const persona = await callTool("codex_task", {
+    description: "Review persona smoke",
+    prompt: "persona smoke",
+    project_dir: projectDir,
+    subagent_type: "code-reviewer",
+    advanced: { output_contract: "freeform" },
+  });
+  assert(persona.structuredContent?.ok, "code-reviewer persona task should complete", persona.structuredContent);
 
   const followup = await callTool("codex_followup", {
     session_id: single.structuredContent.session_id,
@@ -229,6 +251,7 @@ try {
     mode: "wait",
     turn_id: single.structuredContent.turn?.id,
     wait_timeout_ms: 5_000,
+    advanced: { include_diagnostics: true },
   });
   assert(waitedFirstTurn.structuredContent?.completed === true, "turn-specific wait should complete", waitedFirstTurn.structuredContent);
   assert(
@@ -253,6 +276,14 @@ try {
     !followupCall.prompt.includes("Task description: Continue Codex session"),
     "codex_followup without an explicit description should not prepend boilerplate",
     followupCall,
+  );
+  const personaCall = calls.find((call) => call.method === "turn/start" && call.prompt?.includes("persona smoke"));
+  assert(personaCall, "expected recorded persona turn/start call", calls);
+  assert(
+    personaCall.prompt.includes("You are a code-review subagent.") &&
+      !personaCall.prompt.includes("Codex subagent type: code-reviewer"),
+    "subagent_type should prepend a real persona instead of implementation jargon",
+    personaCall,
   );
 
   const background = await callTool("codex_task", {
@@ -282,22 +313,34 @@ try {
   });
   assert(waited.structuredContent?.completed === true, "codex_followup mode wait should collect completion", waited.structuredContent);
   assert(
-    waited.structuredContent?.diagnostics?.session?.partial === undefined,
-    "completed session diagnostics should not expose stale running partial state",
+    !waited.structuredContent?.diagnostics && typeof waited.structuredContent?.elapsed_ms === "number",
+    "codex_followup mode wait should default to a lean poll-shaped payload",
     waited.structuredContent,
   );
+  const waitedWithDiagnostics = await callTool("codex_followup", {
+    session_id: background.structuredContent.session_id,
+    mode: "wait",
+    wait_timeout_ms: 5_000,
+    advanced: { include_diagnostics: true },
+  });
   assert(
-    waited.structuredContent?.diagnostics?.session?.status === "idle",
+    waitedWithDiagnostics.structuredContent?.diagnostics?.session?.partial === undefined,
+    "completed session diagnostics should not expose stale running partial state",
+    waitedWithDiagnostics.structuredContent,
+  );
+  assert(
+    waitedWithDiagnostics.structuredContent?.diagnostics?.session?.status === "idle",
     "completed session diagnostics should use idle status when no turn is running",
-    waited.structuredContent,
+    waitedWithDiagnostics.structuredContent,
   );
 
   const group = await callTool("codex_task_group", {
     tasks: [
-      { name: "alpha", description: "Alpha smoke", prompt: "alpha DELAY_MS=20", project_dir: projectDir },
-      { name: "beta", description: "Beta smoke", prompt: "beta DELAY_MS=20", project_dir: projectDir },
+      { name: "alpha", description: "Alpha smoke", prompt: "alpha DELAY_MS=20", project_dir: projectDir, keep_session: true },
+      { name: "beta", description: "Beta smoke", prompt: "beta DELAY_MS=20", project_dir: projectDir, keep_session: true },
     ],
     max_parallel: 2,
+    advanced: { include_diagnostics: true },
   });
   const results = group.structuredContent?.results;
   assert(group.structuredContent?.ok, "codex_task_group failed", group.structuredContent);
@@ -309,7 +352,7 @@ try {
         result.diagnostics?.cwd === projectDir &&
         result.diagnostics?.sandbox === "read-only",
     ),
-    "codex_task_group should preserve project_dir/read-only defaults and return session ids",
+    "codex_task_group should preserve project_dir/read-only defaults and return session ids when requested",
     results,
   );
 
@@ -341,6 +384,7 @@ try {
     project_dir: projectDir,
     advanced: {
       model: "spark",
+      include_diagnostics: true,
       codex_subagents: [
         {
           name: "ui_spark",

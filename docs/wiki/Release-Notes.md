@@ -8,8 +8,9 @@ Native Claude-facing tool surface:
 - `codex_task_group`
 - `codex_followup`
 
-Every `codex_task` returns a `session_id`, diagnostics moved to resources, and
-debug/legacy tools are hidden unless explicitly enabled.
+`codex_task` defaults to a lean answer-first result, returns `session_id` only
+for `background`, `keep_session`, or failure cases, diagnostics moved to
+resources, and debug/legacy tools are hidden unless explicitly enabled.
 
 ## v0.2.0
 

@@ -8,7 +8,8 @@ Highlights:
 
 - Default tool surface is now `codex_task`, `codex_task_group`, and
   `codex_followup`.
-- `codex_task` always returns a `session_id` for follow-up, wait, or steering.
+- `codex_task` now defaults to a lean answer-first payload; it returns a
+  `session_id` for `background`, `keep_session`, or failure cases.
 - Power-user knobs moved under `advanced`; routine calls use `description`,
   `prompt`, `project_dir`, `reasoning`, `subagent_type`, and `full_access`.
 - Diagnostics are resources by default: `codex://usage`, `codex://status`, and

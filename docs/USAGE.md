@@ -27,7 +27,7 @@ Prefer these tools in normal Claude usage:
 - `codex_task` - one Task-like Codex subagent with an answer-first result.
 - `codex_task_group` - several independent Task-like Codex subagents in parallel.
 - `codex_followup` - continue, steer, or wait on the `session_id` returned by
-  `codex_task` or `codex_task_group`.
+  `codex_task` or `codex_task_group` when `background` or `keep_session` is used.
 
 Legacy compatibility tools are hidden by default. Set
 `CODEX_SUBAGENTS_ENABLE_LEGACY_TOOLS=1` only for older clients that still call
@@ -38,6 +38,10 @@ Diagnostic resources are available without cluttering the tool picker:
 - `codex://usage`
 - `codex://status`
 - `codex://doctor`
+
+Native tool responses are intentionally lean by default. For a single debugging
+call, set `advanced.include_diagnostics: true` to include cwd/model/sandbox,
+event summaries, command events, and compacted session state in the response.
 
 Tool-callable diagnostics are hidden by default. Set
 `CODEX_SUBAGENTS_ENABLE_DEBUG_TOOLS=1` only when a client needs:
@@ -55,8 +59,8 @@ Use this decision path when writing prompts or debugging Claude tool choice:
 | User intent | Best tool |
 | --- | --- |
 | One normal read-only second opinion | `codex_task` |
-| Two or more independent workstreams | `codex_task_group` |
-| Same Codex agent should keep context | `codex_task`, then `codex_followup` |
+| Two or more independent workstreams | Multiple parallel `codex_task` calls, or `codex_task_group` for one rolled-up response |
+| Same Codex agent should keep context | `codex_task` with `keep_session: true`, then `codex_followup` |
 | Long first turn, user wants to keep working | `codex_task` with `background: true` |
 | Add a normal follow-up to a running session | `codex_followup` with `mode: "queue"` |
 | Redirect the active app-server turn | `codex_followup` with `mode: "steer"` |
@@ -129,11 +133,12 @@ Use a persistent session when Codex should keep context across prompts.
   "description": "Investigate session manager",
   "prompt": "Investigate the session manager read-only. Keep a compact working map of the code.",
   "project_dir": "/path/to/project",
-  "reasoning": "medium"
+  "reasoning": "medium",
+  "keep_session": true
 }
 ```
 
-`codex_task` returns a `session_id`. Then:
+`codex_task` returns a `session_id` when `keep_session` is true. Then:
 
 ```json
 {

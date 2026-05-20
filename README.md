@@ -70,7 +70,8 @@ Claude should use `codex_task`.
 Launch three Codex subagents in parallel: one for API behavior, one for tests, and one for security. Keep all of them read-only.
 ```
 
-Claude should use `codex_task_group` and split the work into independent tasks.
+Claude can call `codex_task` three times in parallel, or use `codex_task_group`
+when a single rolled-up response is useful.
 
 ### Use Spark
 
@@ -88,7 +89,8 @@ Start a long-running Codex session on this repo, then let me send follow-up prom
 
 Claude should use `codex_task` for the initial prompt, preserve the returned
 `session_id`, and use `codex_followup` to continue, steer, or wait on that same
-Codex context. For long first turns, Claude should set `background: true`.
+Codex context. For a completed first turn, Claude should set `keep_session: true`;
+for long first turns, Claude should set `background: true`.
 
 ## Safety Model
 
@@ -133,7 +135,7 @@ writes and DNS/network remain disabled unless `full_access: true` is set.
 | --- | --- |
 | One read-only Codex task | `codex_task` |
 | Several independent tasks | `codex_task_group` |
-| Persistent context | `codex_task`, then `codex_followup` |
+| Persistent context | `codex_task` with `keep_session: true`, then `codex_followup` |
 | Long-running sessions | `codex_task` with `background: true`, then `codex_followup` |
 | Live steering | `codex_followup` with `mode: "steer"` |
 | Diagnostics | MCP resources `codex://status`, `codex://doctor`, `codex://usage` |

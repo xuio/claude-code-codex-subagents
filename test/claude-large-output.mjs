@@ -67,7 +67,7 @@ function assert(condition, message, details) {
 
 const prompt = `Validate that the installed codex-subagents plugin handles oversized Codex output without surfacing a Claude tool-result overflow error. Use only the codex-subagents MCP tools. Use this exact fake Codex binary: ${fakeCodex}. Use this exact project_dir: ${projectDir}.
 
-Call codex_task with description "Large output validation" and prompt "CLAUDE_LARGE_OUTPUT APP_LARGE_STREAM_CHARS=80000 APP_STDERR_CHARS=80000", project_dir, reasoning "low", advanced.codex_bin, and advanced.timeout_ms 60000.
+Call codex_task with description "Large output validation" and prompt "CLAUDE_LARGE_OUTPUT APP_LARGE_STREAM_CHARS=80000 APP_STDERR_CHARS=80000", project_dir, reasoning "low", advanced.codex_bin, advanced.timeout_ms 60000, and advanced.include_diagnostics true.
 
 Verify the tool result says ok true and diagnostics.compacted true. Return exactly one compact JSON object and no markdown. Shape: {"ok": boolean, "compacted": boolean}.`;
 const systemPrompt =

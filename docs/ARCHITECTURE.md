@@ -65,7 +65,9 @@ are not persisted.
 After an MCP runtime shutdown, app-server sessions with a Codex thread id are
 preserved as recoverable internally. The default Claude-facing flow is to keep the
 `session_id` returned by `codex_task` and use `codex_followup` while the MCP
-process is alive; hidden debug tools can inspect lower-level recovery state.
+process is alive. `codex_task` returns that id for `background: true`,
+`keep_session: true`, or failure cases; hidden debug tools can inspect
+lower-level recovery state.
 
 Async one-shot jobs are process-local and do not survive MCP restarts. Their tool
 results advertise this limitation and recommend persistent sessions for recoverable

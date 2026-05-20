@@ -48,8 +48,8 @@ const usageGuide = [
   "Use Codex subagents like Claude's native Task tool when the user needs an independent OpenAI Codex worker. Use this MCP server whenever the user asks Claude to use Codex, OpenAI Codex, Codex subagents, Codex Spark, a Codex second opinion, parallel Codex review, or independent Codex codebase analysis. You do not need the user to name an MCP tool.",
   "",
   "Tool choice:",
-  "- Use codex_task for one delegated Codex task. It is the native Claude-like front door: description plus prompt, read-only by default, answer-first result, and a session_id for follow-up.",
-  "- Use codex_task_group when the work can be split into independent concurrent tasks, for example separate reviewers for API flow, tests, security, performance, UI, docs, or migration risk.",
+  "- Use codex_task for one delegated Codex task. It is the native Claude-like front door: description plus prompt, read-only by default, and answer-first result. Call codex_task multiple times in one assistant turn when independent investigations can run in parallel.",
+  "- Use codex_task_group when the work can be split into independent concurrent tasks and Claude wants one combined response with rolled-up per-task findings.",
   "- Use codex_followup when Claude already has a session_id from codex_task or codex_task_group and wants to continue, steer, or wait on that same Codex context.",
   "- Set codex_task background true for long-running work so Claude gets a session_id immediately, then use codex_followup mode wait or steer.",
   "- Diagnostics are resources by default: read codex://status, codex://doctor, or codex://usage when a prior call failed or availability is uncertain.",
@@ -69,7 +69,7 @@ const usageGuide = [
   "- Do not combine model_preset \"spark\" with reasoning_summary values other than \"none\"; Spark does not support reasoning.summary.",
   "- Do not set service_tier by default. Let Codex use its normal account/default service tier unless the user explicitly asks for a service tier.",
   "- Pass project_dir whenever Claude knows the active project directory so Codex works in the same tree as Claude Code.",
-  "- codex_task always returns a session_id. Preserve it when the user may want a follow-up.",
+  "- codex_task returns a session_id only for background tasks, keep_session requests, or failures. Set keep_session true when Claude expects to continue the Codex context after a completed task.",
   "- Raw debug logs are intentionally verbose and may contain MCP traffic and prompt text. Treat logs and debug bundles as sensitive local data.",
   "- Do not use Bash, Read, or filesystem inspection to locate Codex. The MCP server resolves Codex automatically, preferring the Codex desktop app binary when installed.",
   "- Put uncommon settings such as exact model, Codex binary path, timeout, MCP sharing, nested Codex subagents, and output contracts under advanced.",
@@ -365,6 +365,9 @@ const frontDoorInputSchema = {
 };
 
 const codexRoleSchema = z.enum([
+  "general-purpose",
+  "code-reviewer",
+  "security-reviewer",
   "reviewer",
   "explorer",
   "security",
@@ -385,18 +388,100 @@ const codexRoleDefaults: Record<
     reasoning?: (typeof reasoningEfforts)[number];
     output_contract?: (typeof outputContracts)[number];
     sandbox?: (typeof sandboxModes)[number];
+    persona: string;
   }
 > = {
-  reviewer: { reasoning: "medium", output_contract: "review_findings", sandbox: "read-only" },
-  explorer: { reasoning: "medium", output_contract: "freeform", sandbox: "read-only" },
-  security: { reasoning: "high", output_contract: "review_findings", sandbox: "read-only" },
-  performance: { reasoning: "high", output_contract: "review_findings", sandbox: "read-only" },
-  tests: { reasoning: "medium", output_contract: "review_findings", sandbox: "read-only" },
-  planner: { reasoning: "high", output_contract: "plan", sandbox: "read-only" },
-  risk: { reasoning: "high", output_contract: "risk_matrix", sandbox: "read-only" },
-  patcher: { reasoning: "high", output_contract: "patch_suggestions", sandbox: "workspace-write" },
-  docs: { reasoning: "medium", output_contract: "freeform", sandbox: "read-only" },
-  ui: { reasoning: "medium", output_contract: "freeform", sandbox: "read-only" },
+  "general-purpose": {
+    reasoning: "medium",
+    output_contract: "freeform",
+    sandbox: "read-only",
+    persona:
+      "You are a general-purpose Codex subagent. Work independently, stay scoped to the task, and return a concise answer with concrete file paths or commands when relevant.",
+  },
+  "code-reviewer": {
+    reasoning: "medium",
+    output_contract: "review_findings",
+    sandbox: "read-only",
+    persona:
+      "You are a code-review subagent. Look for correctness, security, reliability, and maintainability issues. Lead with findings ordered by severity; each finding needs a file:line reference and a short recommendation. Do not summarize the code unless there are no findings.",
+  },
+  "security-reviewer": {
+    reasoning: "high",
+    output_contract: "review_findings",
+    sandbox: "read-only",
+    persona:
+      "You are a security-review subagent. Focus on exploitable behavior, secret handling, injection, authz/authn, filesystem/network exposure, and unsafe defaults. Report only actionable risks with file:line evidence and severity.",
+  },
+  reviewer: {
+    reasoning: "medium",
+    output_contract: "review_findings",
+    sandbox: "read-only",
+    persona:
+      "You are a code-review subagent. Look for correctness, security, reliability, and maintainability issues. Lead with findings ordered by severity; each finding needs a file:line reference and a short recommendation. Do not summarize the code unless there are no findings.",
+  },
+  explorer: {
+    reasoning: "low",
+    output_contract: "freeform",
+    sandbox: "read-only",
+    persona:
+      "You are exploring a codebase. Return concise findings with file paths and line numbers first. Do not edit files, do not propose broad refactors, and keep prose minimal.",
+  },
+  security: {
+    reasoning: "high",
+    output_contract: "review_findings",
+    sandbox: "read-only",
+    persona:
+      "You are a security-review subagent. Focus on exploitable behavior, secret handling, injection, authz/authn, filesystem/network exposure, and unsafe defaults. Report only actionable risks with file:line evidence and severity.",
+  },
+  performance: {
+    reasoning: "high",
+    output_contract: "review_findings",
+    sandbox: "read-only",
+    persona:
+      "You are a performance-review subagent. Find concrete latency, CPU, memory, I/O, concurrency, or scaling risks. Prefer measured or code-backed findings and include exact file:line references.",
+  },
+  tests: {
+    reasoning: "medium",
+    output_contract: "review_findings",
+    sandbox: "read-only",
+    persona:
+      "You are a test-coverage subagent. Identify missing or weak tests for the requested change. Return focused gaps with the behavior to test, where the test should live, and why it matters.",
+  },
+  planner: {
+    reasoning: "high",
+    output_contract: "plan",
+    sandbox: "read-only",
+    persona:
+      "You are a planning subagent. Produce a practical implementation plan grounded in the current codebase. Keep scope tight, call out risks and dependencies, and do not edit files.",
+  },
+  risk: {
+    reasoning: "high",
+    output_contract: "risk_matrix",
+    sandbox: "read-only",
+    persona:
+      "You are a risk-analysis subagent. Identify concrete technical, operational, security, and compatibility risks. Rank by likelihood and impact, and include mitigation suggestions.",
+  },
+  patcher: {
+    reasoning: "high",
+    output_contract: "patch_suggestions",
+    sandbox: "workspace-write",
+    persona:
+      "You are a patch-suggestion subagent. Propose minimal, codebase-consistent changes. If editing is allowed by the sandbox, keep the patch tightly scoped and list changed files.",
+  },
+  docs: {
+    reasoning: "medium",
+    output_contract: "freeform",
+    sandbox: "read-only",
+    persona:
+      "You are a documentation subagent. Improve clarity, accuracy, examples, and user-facing guidance. Keep suggestions concrete and aligned with the existing documentation style.",
+  },
+  ui: {
+    reasoning: "medium",
+    output_contract: "freeform",
+    sandbox: "read-only",
+    persona:
+      "You are a UI-review subagent. Focus on usability, accessibility, responsive behavior, design-system consistency, and concrete frontend implementation details.",
+  },
 };
 
 const advancedInputSchema = z
@@ -442,6 +527,10 @@ const advancedInputSchema = z
     codex_subagents: commonInputSchema.codex_subagents,
     subagent_tasks: commonInputSchema.subagent_tasks,
     subagent_runtime: commonInputSchema.subagent_runtime,
+    include_diagnostics: z
+      .boolean()
+      .default(false)
+      .describe("Include verbose diagnostics in the tool response. Leave false unless debugging this MCP server."),
     dangerously_bypass_approvals_and_sandbox:
       commonInputSchema.dangerously_bypass_approvals_and_sandbox.optional(),
     wait_for_completion: z
@@ -450,7 +539,9 @@ const advancedInputSchema = z
       .describe("Advanced compatibility flag. Prefer top-level background on native tools."),
   })
   .strict()
-  .describe("Optional escape hatch for power-user Codex settings. Leave undefined for normal native-style delegation.");
+  .describe(
+    "DO NOT USE unless the user explicitly asked for exact model, timeout, diagnostics, custom MCP sharing, nested Codex subagents, or another uncommon Codex setting.",
+  );
 
 const nativeBaseInputSchema = {
   project_dir: commonInputSchema.project_dir.describe(
@@ -611,6 +702,10 @@ function visibleAgentAnswer(
   const resultValue = agent.structuredOutput ?? agent.finalMessage;
   const answer = stringifyResultValue(resultValue, agent.finalMessage);
   const structuredOutputError = typeof agent.structuredOutputError === "string" ? agent.structuredOutputError : undefined;
+  if (agent.ok && agent.structuredOutput !== undefined && !structuredOutputError) {
+    const summary = summarizeResultValue(agent.structuredOutput, agent.finalMessage, "").trim();
+    return summary && summary !== answer ? `${summary}\n\n${answer}` : answer;
+  }
   if (!agent.ok && structuredOutputError) {
     return answer
       ? `${answer}\n\nStructured output parse failed: ${structuredOutputError}`
@@ -639,9 +734,9 @@ function agentCommands(agent: ReturnType<typeof compactAgentResultForMcp>): Arra
   return agent.eventSummary.commands.map((command) => ({ ...command }));
 }
 
-function suggestedActionForAgent(result: { ok: boolean; status: string }, recovery?: { recommendedAction?: string }): string {
+function suggestedActionForAgent(result: { ok: boolean; status: string }, recovery?: { recommendedAction?: string }): string | undefined {
   if (recovery?.recommendedAction) return recovery.recommendedAction;
-  if (result.ok) return "Use the result directly, or ask a follow-up Codex task only if more independent analysis is needed.";
+  if (result.ok) return undefined;
   return "Inspect the Codex result details and retry only if the failure looks transient.";
 }
 
@@ -710,6 +805,8 @@ function nativeAgentPayload(
     tool: string;
     session?: ReturnType<typeof compactSessionSnapshotForMcp>;
     turn?: unknown;
+    includeDiagnostics?: boolean;
+    includeSessionId?: boolean;
   },
 ): Record<string, unknown> {
   const agent = compactAgentResultForMcp(result);
@@ -722,32 +819,38 @@ function nativeAgentPayload(
     context.session && typeof context.session === "object"
       ? (context.session as { appServerFallbackReason?: string }).appServerFallbackReason
       : undefined;
-  return {
+  const hint = recovery?.recommendedAction ?? suggestedActionForAgent(agent, recovery);
+  const payload: Record<string, unknown> = {
     ok: agent.ok,
     status: agent.status,
     summary: summarizeResultValue(resultValue, visibleAnswer, `Codex task ${agent.status}`),
     result: visibleAnswer,
-    session_id: sessionId,
-    turn: context.turn,
-    structured: agent.structuredOutput,
-    commands: agentCommands(agent),
-    safety: agentSafety(agent),
-    hint: recovery?.recommendedAction ?? suggestedActionForAgent(agent, recovery),
-    error: recovery
-      ? {
-          message: structuredOutputError
-            ? `Structured output parse failed: ${structuredOutputError}`
-            : agentFallbackErrorText(agent, recovery) ?? `Codex task ${agent.status}`,
-          recoverable: recovery.recoverable,
-          kind: recovery.reason,
-          retry_after_ms: recovery.retryAfterMs,
-        }
-      : undefined,
-    diagnostics: {
-      ...diagnosticsForAgent(agent),
-      app_server_fallback_reason: sessionFallbackReason || undefined,
-    },
   };
+  if (agent.structuredOutput !== undefined) payload.structured = agent.structuredOutput;
+  if ((context.includeSessionId || !agent.ok) && sessionId) {
+    payload.session_id = sessionId;
+    if (context.turn !== undefined) payload.turn = context.turn;
+  }
+  if (hint) payload.hint = hint;
+  if (recovery) {
+    payload.error = {
+      message: structuredOutputError
+        ? `Structured output parse failed: ${structuredOutputError}`
+        : agentFallbackErrorText(agent, recovery) ?? `Codex task ${agent.status}`,
+      recoverable: recovery.recoverable,
+      kind: recovery.reason,
+      retry_after_ms: recovery.retryAfterMs,
+    };
+  }
+  if (context.includeDiagnostics) {
+    payload.diagnostics = {
+      ...diagnosticsForAgent(agent),
+      session: context.session,
+      ...sessionProgressPayload(context.session),
+      app_server_fallback_reason: sessionFallbackReason || undefined,
+    };
+  }
+  return payload;
 }
 
 function nativeAgentResponse(
@@ -758,6 +861,8 @@ function nativeAgentResponse(
     tool: string;
     session?: ReturnType<typeof compactSessionSnapshotForMcp>;
     turn?: unknown;
+    includeDiagnostics?: boolean;
+    includeSessionId?: boolean;
   },
 ): CallToolResult {
   return nativeTextResult(nativeAgentPayload(result, context), !result.ok);
@@ -815,7 +920,7 @@ type NativeTaskGroupRun = {
   result?: AgentRunResult;
   error?: unknown;
   session?: { id?: string };
-  task: { name?: string; description?: string; prompt?: string };
+  task: { name?: string; description?: string; prompt?: string; keep_session?: boolean; advanced?: { include_diagnostics?: boolean } };
 };
 
 function nativeTaskGroupResponse(runs: NativeTaskGroupRun[]): CallToolResult {
@@ -825,26 +930,25 @@ function nativeTaskGroupResponse(runs: NativeTaskGroupRun[]): CallToolResult {
       const recovery = recoveryForAgentResult(run.result);
       const resultValue = agent.structuredOutput ?? agent.finalMessage;
       const answer = visibleAgentAnswer(agent, recovery);
-      return {
+      const item: Record<string, unknown> = {
         name: agent.name ?? run.task.name ?? run.task.description ?? `codex-task-${index + 1}`,
         ok: agent.ok,
         status: agent.status,
         summary: summarizeResultValue(resultValue, answer, `Codex task ${agent.status}`),
         result: answer,
-        session_id: run.session?.id,
-        structured: agent.structuredOutput,
-        commands: agentCommands(agent),
-        safety: agentSafety(agent),
-        error: recovery
-          ? {
-              message: agentFallbackErrorText(agent, recovery) ?? `Codex task ${agent.status}`,
-              recoverable: recovery.recoverable,
-              kind: recovery.reason,
-              retry_after_ms: recovery.retryAfterMs,
-            }
-          : undefined,
-        diagnostics: diagnosticsForAgent(agent),
       };
+      if (agent.structuredOutput !== undefined) item.structured = agent.structuredOutput;
+      if ((run.task.keep_session || !agent.ok) && run.session?.id) item.session_id = run.session.id;
+      if (recovery) {
+        item.error = {
+          message: agentFallbackErrorText(agent, recovery) ?? `Codex task ${agent.status}`,
+          recoverable: recovery.recoverable,
+          kind: recovery.reason,
+          retry_after_ms: recovery.retryAfterMs,
+        };
+      }
+      if (run.task.advanced?.include_diagnostics) item.diagnostics = diagnosticsForAgent(agent);
+      return item;
     }
 
     const recovery = recoveryForError(run.error ?? new Error("Codex task failed before producing a result."), "codex_task_group");
@@ -863,7 +967,7 @@ function nativeTaskGroupResponse(runs: NativeTaskGroupRun[]): CallToolResult {
         kind: recovery.reason,
         retry_after_ms: recovery.retryAfterMs,
       },
-      diagnostics: {},
+      diagnostics: run.task.advanced?.include_diagnostics ? {} : undefined,
     };
   });
   const ok = normalized.every((result) => result.ok);
@@ -876,17 +980,22 @@ function nativeTaskGroupResponse(runs: NativeTaskGroupRun[]): CallToolResult {
       summary: `${normalized.filter((result) => result.ok).length}/${normalized.length} Codex tasks completed successfully.`,
       result: resultText,
       results: normalized,
-      hint: firstFailed
-        ? "Use the successful per-task results directly and retry only the failed task if it is still needed."
-        : "Use the per-task results directly, or ask focused follow-up tasks for any gaps.",
+      hint: firstFailed ? "Retry only the failed task if it is still needed." : undefined,
     },
     !ok,
   );
 }
 
+function codexRoleForPrompt(args: { description?: string; subagent_type?: string }): CodexRole | undefined {
+  const candidate = args.subagent_type ?? (args.description ? "general-purpose" : undefined);
+  if (!candidate) return undefined;
+  return (codexRoleSchema.options as readonly string[]).includes(candidate) ? (candidate as CodexRole) : undefined;
+}
+
 function nativeTaskPrompt(args: { description?: string; prompt: string; subagent_type?: string }): string {
+  const role = codexRoleForPrompt(args);
   const prefix = [
-    args.subagent_type ? `Codex subagent type: ${args.subagent_type}` : undefined,
+    role ? codexRoleDefaults[role].persona : undefined,
     args.description ? `Task description: ${args.description}` : undefined,
   ].filter(Boolean);
   if (prefix.length === 0) return args.prompt;
@@ -1053,12 +1162,13 @@ function progressHeartbeatMs(): number {
 
 async function withProgressHeartbeat<T>(
   progress: ProgressReporter,
-  message: string,
+  message: string | (() => string | undefined),
   operation: () => Promise<T>,
   progressOptions?: ProgressOptions,
 ): Promise<T> {
   const interval = setInterval(() => {
-    void progress.send(message, progressOptions);
+    const currentMessage = typeof message === "function" ? message() : message;
+    if (currentMessage) void progress.send(currentMessage, progressOptions);
   }, progressHeartbeatMs());
   interval.unref();
   try {
@@ -1066,6 +1176,21 @@ async function withProgressHeartbeat<T>(
   } finally {
     clearInterval(interval);
   }
+}
+
+function codexLiveProgressMessage(sessionId: string, fallback: string): string {
+  const session = sessionManager.get(sessionId);
+  const partial = session?.partial;
+  const lastCommand = partial?.eventSummary.commands.at(-1);
+  if (lastCommand?.command) {
+    const suffix = lastCommand.status ? ` (${lastCommand.status})` : "";
+    return firstUsefulLine(`Codex running: ${lastCommand.command}${suffix}`, fallback);
+  }
+  if (partial?.lastAgentMessage) {
+    return firstUsefulLine(`Codex: ${partial.lastAgentMessage}`, fallback);
+  }
+  const activeStatus = session?.activeTurn?.status ?? session?.status;
+  return activeStatus ? `Codex session ${sessionId} ${activeStatus}` : fallback;
 }
 
 function toRunOptions(args: {
@@ -1345,13 +1470,14 @@ type NativeBaseInput = {
   project_dir?: string;
   reasoning?: PublicReasoning;
   full_access?: boolean;
-  advanced?: AdvancedInput;
+  advanced?: Partial<AdvancedInput>;
 };
 type NativeTaskV3Input = NativeBaseInput & {
   description: string;
   prompt: string;
   subagent_type?: CodexRole;
   background?: boolean;
+  keep_session?: boolean;
   session_name?: string;
 };
 type NativeTaskGroupItemV3Input = NativeBaseInput & {
@@ -1359,6 +1485,7 @@ type NativeTaskGroupItemV3Input = NativeBaseInput & {
   prompt: string;
   subagent_type?: CodexRole;
   name?: string;
+  keep_session?: boolean;
 };
 type NativeTaskGroupV3Input = NativeBaseInput & {
   tasks: NativeTaskGroupItemV3Input[];
@@ -1387,8 +1514,9 @@ function publicModel(model: string | undefined): string | undefined {
 function publicRunOptions(
   args: NativeBaseInput & { description?: string; prompt: string; subagent_type?: CodexRole; name?: string },
 ) {
-  const advanced = args.advanced ?? {};
-  const role = args.subagent_type ? codexRoleDefaults[args.subagent_type] : undefined;
+  const advanced: Partial<AdvancedInput> = args.advanced ?? {};
+  const roleKey = codexRoleForPrompt(args);
+  const role = roleKey ? codexRoleDefaults[roleKey] : undefined;
   const fullAccess = Boolean(args.full_access ?? advanced.dangerously_bypass_approvals_and_sandbox);
   return toRunOptions({
     prompt: nativeTaskPrompt({
@@ -1730,10 +1858,10 @@ registerDebugTool(
         request: args.request,
         rules: [
           "Use codex_task for one normal Codex task; it is the most native Claude-like front door.",
-          "Use codex_task_group for multiple independent Codex tasks.",
+          "Use multiple codex_task calls for ordinary independent parallel work; use codex_task_group when Claude wants one combined rollup.",
           "Use codex_followup for follow-ups, waits, and steering when Claude has a session_id.",
           "Use codex_task with background true for slow work that should not hold a blocking request open.",
-          "Use codex_task_group when Claude needs multiple independent answers to merge or compare.",
+          "Use codex_task_group when Claude needs multiple independent answers returned as one merged response.",
           "Pass project_dir whenever Claude knows the active project directory.",
           "Do not use Codex for simple file reads, simple grep/search, or tiny commands Claude can do directly.",
           "When error.kind is backpressure, inspect codex://status and retry with less parallelism after a short wait.",
@@ -1750,7 +1878,7 @@ registerTool(
   {
     title: "Task",
     description:
-      "Delegate one task to OpenAI Codex, like Claude's native Task tool. Waits for Codex by default, returns the answer plus a session_id for follow-up. Read-only by default; Codex Spark and full access are opt-in.",
+      "Delegate a task to a fresh OpenAI Codex agent that does not share Claude's scratchpad or tool repertoire. Best for independent second opinions, isolated codebase exploration, or work Claude does not need to interleave with its own tool calls. Read-only by default. Use multiple parallel codex_task calls when investigations are independent.",
     inputSchema: {
       description: z
         .string()
@@ -1767,11 +1895,15 @@ registerTool(
       subagent_type: z
         .enum(codexRoleSchema.options)
         .optional()
-        .describe("Optional role preset that picks sensible Codex defaults."),
+        .describe("Claude-style Codex persona. Prefer general-purpose, explorer, planner, code-reviewer, or security-reviewer. Defaults to general-purpose."),
       background: z
         .boolean()
         .default(false)
-        .describe("Return immediately with a session_id while Codex keeps working. Leave false for normal Task-like behavior."),
+        .describe("Equivalent to native run_in_background: return immediately with a session_id while Codex keeps working."),
+      keep_session: z
+        .boolean()
+        .default(false)
+        .describe("Return session_id after a completed task so Claude can continue this Codex context. Leave false for one-shot native Task-like work."),
       session_name: z.string().trim().min(1).optional().describe("Optional human label for the returned Codex session."),
       ...nativeBaseInputSchema,
     },
@@ -1790,19 +1922,22 @@ registerTool(
           const { session, turn } = sessionManager.startAsync(runOptions, { sessionName: args.session_name });
           await progress.flush();
           const compactSession = compactSessionSnapshotForMcp(session);
-          return nativeTextResult({
+          const payload: Record<string, unknown> = {
             ok: true,
             status: "running",
             summary: `Started Codex task: ${args.description}`,
             result: `Codex task started in the background. Session: ${session.id}`,
             session_id: session.id,
             turn,
-            hint: "Use codex_followup with mode wait to collect the result, or mode steer to redirect the running Codex session.",
-            diagnostics: {
+            hint: "Use codex_followup mode wait or steer with this session_id.",
+          };
+          if (args.advanced?.include_diagnostics) {
+            payload.diagnostics = {
               session: compactSession,
               ...sessionProgressPayload(compactSession),
-            },
-          });
+            };
+          }
+          return nativeTextResult(payload);
         }
         const { session, result } = await withProgressHeartbeat(
           progress,
@@ -1818,6 +1953,8 @@ registerTool(
           tool: "codex_task",
           session: compactSession,
           turn: compactSession.recentTurns?.at(-1),
+          includeDiagnostics: Boolean(args.advanced?.include_diagnostics),
+          includeSessionId: Boolean(args.keep_session),
         });
       } catch (error) {
         await progress.flush();
@@ -2039,8 +2176,14 @@ const nativeTaskGroupTaskSchema = z.object({
     .describe(
       "Self-contained Codex prompt for this independent task. Keep overlap low across parallel tasks.",
     ),
-  subagent_type: codexRoleSchema.optional().describe("Optional role preset that picks sensible Codex defaults."),
+  subagent_type: codexRoleSchema
+    .optional()
+    .describe("Claude-style Codex persona. Prefer general-purpose, explorer, planner, code-reviewer, or security-reviewer."),
   name: z.string().trim().min(1).optional().describe("Optional stable label for this Codex task."),
+  keep_session: z
+    .boolean()
+    .default(false)
+    .describe("Return this task's session_id after completion so Claude can follow up. Leave false for native Task-like one-shot work."),
   ...nativeBaseInputSchema,
 });
 
@@ -2051,7 +2194,7 @@ registerTool(
   {
     title: "Task Group",
     description:
-      "Delegate multiple independent tasks to Codex in parallel, like launching several native Task subagents. Each result includes its own session_id for follow-up. Read-only by default.",
+      "Run multiple independent Codex tasks in parallel and return one combined response with per-task results. For ordinary native-style parallelism, Claude can also call codex_task multiple times in one turn; use this group tool when a single rolled-up response is useful.",
     inputSchema: {
       tasks: z
         .array(nativeTaskGroupTaskSchema)
@@ -2084,6 +2227,7 @@ registerTool(
             mapWithConcurrency(group.tasks, group.maxParallel, async (runOptions, index) => {
               const task = args.tasks[index];
               if (!task) throw new Error(`Missing Codex task at index ${index}.`);
+              const responseTask = { ...task, advanced: { ...(args.advanced ?? {}), ...(task.advanced ?? {}) } };
               try {
                 const { session, result } = await sessionManager.start(withRequestAbort({
                   ...runOptions,
@@ -2098,7 +2242,7 @@ registerTool(
                     : `Codex task group finished with errors (${completed}/${args.tasks.length})`
                   : `${result.ok ? "Completed" : "Finished"} ${task.name ?? task.description} (${completed}/${args.tasks.length})`;
                 await progress.send(message, last ? { progress: total, total } : { total, reserveFinal: true });
-                return { result, session: compactSessionSnapshotForMcp(session), task };
+                return { result, session: compactSessionSnapshotForMcp(session), task: responseTask };
               } catch (error) {
                 completed += 1;
                 failed += 1;
@@ -2113,7 +2257,7 @@ registerTool(
                     : `Failed ${task.name ?? task.description} (${completed}/${args.tasks.length})`,
                   last ? { progress: total, total } : { total, reserveFinal: true },
                 );
-                return { error, task };
+                return { error, task: responseTask };
               }
             }),
           { total, reserveFinal: true },
@@ -2134,7 +2278,7 @@ registerTool(
   {
     title: "Followup",
     description:
-      "Continue, steer, or wait on a Codex session returned by codex_task or codex_task_group. This is the native follow-up path for Claude when a Codex subagent should keep context.",
+      "Continue, steer, or poll a Codex session from a prior background or keep_session task. Use queue for another prompt in the same context, steer to redirect active work, and wait to check whether the current work has finished.",
     inputSchema: {
       session_id: z.string().trim().min(1).describe("session_id returned by codex_task or codex_task_group."),
       prompt: z
@@ -2179,7 +2323,7 @@ registerTool(
           await progress.send(`Waiting for Codex session ${args.session_id}`);
           const waited = await withProgressHeartbeat(
             progress,
-            `Still waiting for Codex session ${args.session_id}`,
+            () => codexLiveProgressMessage(args.session_id, `Still waiting for Codex session ${args.session_id}`),
             () => sessionManager.wait(args.session_id, args.wait_timeout_ms ?? 600_000, args.turn_id, extra?.signal),
           );
           await progress.flush();
@@ -2205,37 +2349,36 @@ registerTool(
               ? stringifyResultValue(waitValue, waitFallback)
               : "";
           const completed = Boolean(waited.completed);
-          return nativeTextResult(
-            {
-              ok: waited.timeoutReason !== "wait_cancelled",
-              status: completed ? "completed" : "running",
-              completed,
-              timeoutReason: waited.timeoutReason,
-              summary: completed
-                ? summarizeResultValue(waitValue, resultText, "Codex session is ready.")
-                : waited.timeoutReason === "wait_timeout"
-                  ? "Codex session is still running."
-                  : "Codex session wait was cancelled.",
-              result: resultText || (completed ? "Codex session is idle." : "Codex session is still running."),
-              session_id: args.session_id,
-              turn: waited.turn,
-              hint:
-                recovery?.recommendedAction ??
-                "Use the result directly, or use codex_followup mode queue for another prompt in this Codex context.",
-              diagnostics: {
-                session: compactSession,
-                ...sessionProgressPayload(compactSession, waitResult),
-              },
-              error: recovery
-                ? {
-                    recoverable: recovery.recoverable,
-                    kind: recovery.reason,
-                    retry_after_ms: recovery.retryAfterMs,
-                  }
-                : undefined,
-            },
-            waited.timeoutReason === "wait_cancelled",
-          );
+          const progressPayload = sessionProgressPayload(compactSession, waitResult);
+          const payload: Record<string, unknown> = {
+            ok: waited.timeoutReason !== "wait_cancelled",
+            completed,
+            status: completed ? "completed" : "running",
+            result: resultText || (completed ? "Codex session is idle." : "Codex session is still running."),
+            session_id: args.session_id,
+            elapsed_ms: progressPayload.elapsed_ms,
+            summary: completed
+              ? summarizeResultValue(waitValue, resultText, "Codex session is ready.")
+              : waited.timeoutReason === "wait_timeout"
+                ? "Codex session is still running."
+                : "Codex session wait was cancelled.",
+          };
+          if (waited.timeoutReason) payload.timeoutReason = waited.timeoutReason;
+          if (recovery) {
+            payload.error = {
+              recoverable: recovery.recoverable,
+              kind: recovery.reason,
+              retry_after_ms: recovery.retryAfterMs,
+            };
+          }
+          if (args.advanced?.include_diagnostics) {
+            payload.turn = waited.turn;
+            payload.diagnostics = {
+              session: compactSession,
+              ...progressPayload,
+            };
+          }
+          return nativeTextResult(payload, waited.timeoutReason === "wait_cancelled");
         }
 
         const description = args.description;
@@ -2263,7 +2406,11 @@ registerTool(
                 waitSignal: extra?.signal,
               });
         const response = wait
-          ? await withProgressHeartbeat(progress, `Still waiting for Codex session ${args.session_id}`, run)
+          ? await withProgressHeartbeat(
+              progress,
+              () => codexLiveProgressMessage(args.session_id, `Still waiting for Codex session ${args.session_id}`),
+              run,
+            )
           : await run();
         if (response.error || !response.session) {
           await progress.flush();
@@ -2279,10 +2426,12 @@ registerTool(
             tool: "codex_followup",
             session: compactSession,
             turn: response.turn,
+            includeDiagnostics: Boolean(args.advanced?.include_diagnostics),
+            includeSessionId: true,
           });
         }
         const delivery = "delivery" in response ? response.delivery : undefined;
-        return nativeTextResult({
+        const payload: Record<string, unknown> = {
           ok: true,
           status: compactSession.active ? "running" : "queued",
           summary:
@@ -2296,12 +2445,15 @@ registerTool(
           session_id: args.session_id,
           turn: response.turn,
           delivery,
-          hint: "Use codex_followup mode wait to collect the result, or mode steer to redirect active work.",
-          diagnostics: {
+          hint: "Use codex_followup mode wait or steer with this session_id.",
+        };
+        if (args.advanced?.include_diagnostics) {
+          payload.diagnostics = {
             session: compactSession,
             ...sessionProgressPayload(compactSession),
-          },
-        });
+          };
+        }
+        return nativeTextResult(payload);
       } catch (error) {
         await progress.flush();
         logger.error("codex_followup.failed", { error: errorForLog(error) });
