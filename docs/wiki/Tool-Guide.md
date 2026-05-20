@@ -18,6 +18,10 @@ codebases, server/deployment work, difficult debugging, or adversarial security
 and correctness review. Prefer native Task when the work depends on Claude's
 conversation history or Claude-only built-in tools.
 
+Blocking waits return in bounded slices so Claude Desktop stays responsive. If
+`completed` is false, call `codex_followup` mode `wait` or `codex_wait_any`
+again, or read `codex://sessions/{session_id}`.
+
 ## One Agent
 
 ```text

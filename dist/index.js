@@ -23906,6 +23906,26 @@ function updateOrphanWatchdogState(options) {
   };
 }
 
+// src/wait-timeout.ts
+var defaultBlockingWaitTimeoutMs = 3e5;
+var hardMaxBlockingWaitTimeoutMs = 3e5;
+var minBlockingWaitTimeoutMs = 25;
+function configuredMaxBlockingWaitMs(env = process.env) {
+  const parsed = Number(env.CODEX_SUBAGENTS_MAX_BLOCKING_WAIT_MS);
+  if (!Number.isFinite(parsed) || parsed <= 0) return defaultBlockingWaitTimeoutMs;
+  return Math.max(minBlockingWaitTimeoutMs, Math.min(Math.floor(parsed), hardMaxBlockingWaitTimeoutMs));
+}
+function capBlockingWaitTimeout(requestedMs, env = process.env) {
+  const requested = requestedMs ?? configuredMaxBlockingWaitMs(env);
+  const normalized = Math.max(1, Math.floor(requested));
+  const effective = Math.min(normalized, configuredMaxBlockingWaitMs(env));
+  return {
+    requestedMs: normalized,
+    effectiveMs: effective,
+    capped: effective < normalized
+  };
+}
+
 // src/response.ts
 var singleAgentLimits = {
   finalMessageChars: 12e3,
@@ -26437,6 +26457,7 @@ var usageGuide = [
   "- If the user explicitly asks for non-sandbox/full local capabilities, set full_access true. This maps to Codex's --dangerously-bypass-approvals-and-sandbox flag and allows DNS/network plus unrestricted file and git writes.",
   "- Approvals are non-interactive; do not expect Codex to ask permission.",
   '- If codex_followup mode wait returns completed false with timeoutReason "wait_timeout", the session is still running unless its status says otherwise.',
+  `- Blocking wait tools are capped to ${defaultBlockingWaitTimeoutMs}ms by default so Claude stays responsive. If a wait returns completed false, call codex_followup mode wait or codex_wait_any again, or read codex://sessions/{session_id}.`,
   "- Use codex_wait_any after launching several background Codex tasks to harvest whichever one finishes first without busy-polling.",
   "- Use codex_followup mode cancel to stop a background or actively running Codex session early. The response includes whatever partial output streamed before the interrupt, and the matching Codex Desktop thread is archived best-effort when supported.",
   '- If a tool returns error.kind "backpressure", reduce max_parallel or wait before retrying. codex://status exposes current queue/session limits.',
@@ -27181,6 +27202,22 @@ function progressHeartbeatMs() {
   if (!Number.isFinite(parsed) || parsed <= 0) return 1e4;
   return Math.max(25, Math.min(Math.floor(parsed), 6e4));
 }
+function waitTimeoutFields(waitTimeout) {
+  const fields = {
+    requested_wait_timeout_ms: waitTimeout.requestedMs,
+    effective_wait_timeout_ms: waitTimeout.effectiveMs
+  };
+  if (waitTimeout.capped) fields.wait_timeout_capped = true;
+  return fields;
+}
+function logCappedWait(tool, waitTimeout, fields = {}) {
+  if (!waitTimeout.capped) return;
+  logger.warn(`${tool}.wait_timeout_capped`, {
+    ...fields,
+    requestedMs: waitTimeout.requestedMs,
+    effectiveMs: waitTimeout.effectiveMs
+  });
+}
 async function withProgressHeartbeat(progress, message, operation, progressOptions) {
   const interval = setInterval(() => {
     const currentMessage = typeof message === "function" ? message() : message;
@@ -27488,6 +27525,11 @@ async function codexStatusPayload(codexBin) {
       debounce_ms: 250,
       max_delay_ms: 2e3,
       max_milestones_per_session: maxSessionMilestones()
+    },
+    waits: {
+      default_blocking_wait_timeout_ms: defaultBlockingWaitTimeoutMs,
+      max_blocking_wait_ms: configuredMaxBlockingWaitMs(),
+      hard_max_blocking_wait_ms: hardMaxBlockingWaitTimeoutMs
     },
     logging: loggingDiagnostics(),
     artifacts: outputArtifactDiagnostics(),
@@ -28141,7 +28183,9 @@ registerTool(
       interrupt_current: external_exports.boolean().default(false).describe("For mode steer, cancel the active Codex turn and run this steering prompt next. Leave false unless the user explicitly wants interruption."),
       background: external_exports.boolean().default(false).describe("Return after queueing or steering instead of waiting for the Codex turn to finish."),
       turn_id: external_exports.string().trim().min(1).optional().describe("For mode wait, optionally wait for one specific turn."),
-      wait_timeout_ms: external_exports.number().int().positive().max(864e5).default(6e5).describe("Maximum wait time for mode wait, or for queue/steer when background is false."),
+      wait_timeout_ms: external_exports.number().int().positive().max(864e5).default(defaultBlockingWaitTimeoutMs).describe(
+        "Maximum wait time for mode wait, or for queue/steer when background is false. The server caps long waits to keep Claude responsive."
+      ),
       ...nativeBaseInputSchema
     }
   },
@@ -28155,6 +28199,8 @@ registerTool(
           return nativeErrorResult(new Error(`codex_followup mode ${mode} requires prompt.`), "codex_followup");
         }
         if (mode === "wait") {
+          const waitTimeout2 = capBlockingWaitTimeout(args.wait_timeout_ms);
+          logCappedWait("codex_followup", waitTimeout2, { sessionId: args.session_id, mode });
           await progress.send(`Waiting for Codex session ${args.session_id}`);
           const waited = await withProgressHeartbeat(
             progress,
@@ -28162,7 +28208,7 @@ registerTool(
             () => withSessionMilestoneProgress(
               progress,
               args.session_id,
-              () => sessionManager.wait(args.session_id, args.wait_timeout_ms ?? 6e5, args.turn_id, extra?.signal)
+              () => sessionManager.wait(args.session_id, waitTimeout2.effectiveMs, args.turn_id, extra?.signal)
             )
           );
           await progress.flush();
@@ -28185,9 +28231,13 @@ registerTool(
             session_id: args.session_id,
             last_milestone_seq: waited.session.lastMilestoneSeq,
             elapsed_ms: progressPayload.elapsed_ms,
+            ...waitTimeoutFields(waitTimeout2),
             summary: completed ? summarizeResultValue(waitValue, resultText, "Codex session is ready.") : waited.timeoutReason === "wait_timeout" ? "Codex session is still running." : "Codex session wait was cancelled."
           };
           if (waited.timeoutReason) payload2.timeoutReason = waited.timeoutReason;
+          if (!completed && waited.timeoutReason === "wait_timeout") {
+            payload2.hint = waitTimeout2.capped ? "This wait returned at the server responsiveness cap. Call codex_followup mode wait again, or read codex://sessions/<session_id> for current progress." : "Call codex_followup mode wait again, or read codex://sessions/<session_id> for current progress.";
+          }
           if (recovery) {
             payload2.error = {
               recoverable: recovery.recoverable,
@@ -28269,25 +28319,89 @@ registerTool(
         });
         const { prompt: runPrompt, ...overrides } = runOptions;
         const wait = !args.background;
+        const waitTimeout = capBlockingWaitTimeout(args.wait_timeout_ms);
+        if (wait) logCappedWait("codex_followup", waitTimeout, { sessionId: args.session_id, mode });
         await progress.send(
           mode === "steer" ? `Steering Codex session ${args.session_id}` : `Sending follow-up to Codex session ${args.session_id}`
         );
         const run = () => mode === "steer" ? sessionManager.steer(args.session_id, runPrompt, overrides, {
-          wait,
+          wait: false,
           interruptCurrent: args.interrupt_current,
           waitSignal: extra?.signal
         }) : sessionManager.send(args.session_id, runPrompt, overrides, {
-          wait,
+          wait: false,
           waitSignal: extra?.signal
         });
-        const response = wait ? await withProgressHeartbeat(
-          progress,
-          () => codexLiveProgressMessage(args.session_id, `Still waiting for Codex session ${args.session_id}`),
-          () => withSessionMilestoneProgress(progress, args.session_id, run)
-        ) : await run();
+        const response = await run();
         if (response.error || !response.session) {
           await progress.flush();
           return nativeErrorResult(new Error(response.error ?? "Codex follow-up did not return a session."), "codex_followup");
+        }
+        const delivery = "delivery" in response ? response.delivery : void 0;
+        const turnId = response.turn && typeof response.turn.id === "string" ? response.turn.id : void 0;
+        if (wait && turnId) {
+          const waited = await withProgressHeartbeat(
+            progress,
+            () => codexLiveProgressMessage(args.session_id, `Still waiting for Codex session ${args.session_id}`),
+            () => withSessionMilestoneProgress(
+              progress,
+              args.session_id,
+              () => sessionManager.wait(args.session_id, waitTimeout.effectiveMs, turnId, extra?.signal)
+            )
+          );
+          if (waited.error || !waited.session) {
+            await progress.flush();
+            return nativeErrorResult(new Error(waited.error ?? "Codex follow-up wait did not return a session."), "codex_followup");
+          }
+          if (waited.timeoutReason === "wait_cancelled") {
+            await progress.flush();
+            return nativeErrorResult(new Error("MCP request was cancelled by the client."), "codex_followup");
+          }
+          const compactSession2 = compactSessionSnapshotForMcp(waited.session);
+          if (waited.completed) {
+            if (!waited.result) {
+              await progress.flush();
+              return nativeErrorResult(
+                new Error(waited.turn?.error ?? "Codex follow-up completed without a result."),
+                "codex_followup"
+              );
+            }
+            await reportAgentResult(progress, waited.result);
+            await progress.flush();
+            return nativeAgentResponse(waited.result, {
+              description,
+              prompt: prompt ?? "",
+              tool: "codex_followup",
+              session: compactSession2,
+              turn: waited.turn ?? response.turn,
+              includeDiagnostics: Boolean(args.advanced?.include_diagnostics),
+              includeSessionId: true
+            });
+          }
+          await progress.flush();
+          const progressPayload = sessionProgressPayload(compactSession2);
+          const payload2 = {
+            ok: true,
+            status: "running",
+            completed: false,
+            timeoutReason: "wait_timeout",
+            summary: "Codex follow-up is still running.",
+            result: "Codex follow-up is still running.",
+            session_id: args.session_id,
+            turn: waited.turn ?? response.turn,
+            delivery,
+            last_milestone_seq: waited.session.lastMilestoneSeq,
+            elapsed_ms: progressPayload.elapsed_ms,
+            ...waitTimeoutFields(waitTimeout),
+            hint: waitTimeout.capped ? "This wait returned at the server responsiveness cap. Call codex_followup mode wait again with this session_id and turn_id, or read codex://sessions/<session_id>." : "Call codex_followup mode wait again with this session_id and turn_id, or read codex://sessions/<session_id>."
+          };
+          if (args.advanced?.include_diagnostics) {
+            payload2.diagnostics = {
+              session: compactSession2,
+              ...progressPayload
+            };
+          }
+          return nativeTextResult(payload2);
         }
         if (response.result) await reportAgentResult(progress, response.result);
         await progress.flush();
@@ -28303,7 +28417,6 @@ registerTool(
             includeSessionId: true
           });
         }
-        const delivery = "delivery" in response ? response.delivery : void 0;
         const payload = {
           ok: true,
           status: compactSession.active ? "running" : "queued",
@@ -28333,10 +28446,12 @@ registerTool(
   "codex_wait_any",
   {
     title: "Wait For Any Task",
-    description: "Use this when you have several background Codex session_ids and want to harvest results as they finish. Blocks until any listed Codex background session reaches a terminal state, then returns that session's result and remaining_session_ids. This is a Codex extension beyond native Task.",
+    description: "Use this when you have several background Codex session_ids and want to harvest results as they finish. Waits until any listed Codex background session reaches a terminal state, then returns that session's result and remaining_session_ids. Long waits are capped into responsive slices; call again if completed=false. This is a Codex extension beyond native Task.",
     inputSchema: {
       session_ids: external_exports.array(external_exports.string().trim().min(1)).min(1).max(32).describe("Session ids returned by previous codex_task or codex_task_group calls."),
-      wait_timeout_ms: external_exports.number().int().positive().max(864e5).default(6e5).describe("Maximum total wait. If no session finishes in this window, returns completed=false.")
+      wait_timeout_ms: external_exports.number().int().positive().max(864e5).default(defaultBlockingWaitTimeoutMs).describe(
+        "Requested total wait. The server caps long waits to keep Claude responsive; if no session finishes, returns completed=false."
+      )
     }
   },
   async (args, extra) => {
@@ -28344,8 +28459,10 @@ registerTool(
       const progress = createProgressReporter(extra);
       const startedAt = Date.now();
       const sessionIds = [...new Set(args.session_ids)];
+      const waitTimeout = capBlockingWaitTimeout(args.wait_timeout_ms);
       const unsubscribers = [];
       try {
+        logCappedWait("codex_wait_any", waitTimeout, { sessionIds });
         await progress.send(`Waiting for ${sessionIds.length} Codex session${sessionIds.length === 1 ? "" : "s"}`);
         for (const sessionId of sessionIds) {
           unsubscribers.push(
@@ -28361,7 +28478,7 @@ registerTool(
             const active = sessionIds.map((sessionId) => codexLiveProgressMessage(sessionId, "")).filter(Boolean).slice(0, 2);
             return active.length > 0 ? active.join(" | ") : `Still waiting for ${sessionIds.length} Codex session${sessionIds.length === 1 ? "" : "s"}`;
           },
-          () => sessionManager.waitAny(sessionIds, args.wait_timeout_ms ?? 6e5, extra?.signal)
+          () => sessionManager.waitAny(sessionIds, waitTimeout.effectiveMs, extra?.signal)
         );
         for (const unsubscribe of unsubscribers.splice(0)) unsubscribe();
         await progress.flush();
@@ -28378,7 +28495,8 @@ registerTool(
             timeoutReason: "wait_timeout",
             session_ids: waited.remainingSessionIds ?? sessionIds,
             elapsed_ms: elapsedMs,
-            hint: "No session completed within the wait window. Retry with a larger timeout or inspect codex://sessions/<id>."
+            ...waitTimeoutFields(waitTimeout),
+            hint: waitTimeout.capped ? "No session completed before the server responsiveness cap. Call codex_wait_any again with session_ids, or inspect codex://sessions/<id>." : "No session completed within the wait window. Call codex_wait_any again or inspect codex://sessions/<id>."
           });
         }
         const compactResult = waited.result ? compactAgentResultForMcp(waited.result) : void 0;
@@ -28396,6 +28514,7 @@ registerTool(
           remaining_session_ids: waited.remainingSessionIds ?? sessionIds.filter((id) => id !== waited.session?.id),
           elapsed_ms: elapsedMs,
           last_milestone_seq: waited.session.lastMilestoneSeq,
+          ...waitTimeoutFields(waitTimeout),
           hint: "Call codex_wait_any again with remaining_session_ids to collect the next finisher."
         });
       } catch (error2) {
@@ -28908,17 +29027,19 @@ registerDebugTool(
     inputSchema: {
       session_id: sessionIdSchema,
       turn_id: external_exports.string().trim().min(1).optional().describe("Optional turn id to wait for. Omit to wait until the whole session queue is idle."),
-      timeout_ms: external_exports.number().int().positive().max(864e5).default(6e5)
+      timeout_ms: external_exports.number().int().positive().max(864e5).default(defaultBlockingWaitTimeoutMs)
     }
   },
   async (args, extra) => loggedToolCall("codex_session_wait", args, extra, async () => {
     const progress = createProgressReporter(extra);
     try {
+      const waitTimeout = capBlockingWaitTimeout(args.timeout_ms);
+      logCappedWait("codex_session_wait", waitTimeout, { sessionId: args.session_id });
       await progress.send(`Waiting for Codex session ${args.session_id}`);
       const waited = await withProgressHeartbeat(
         progress,
         `Still waiting for Codex session ${args.session_id}`,
-        () => sessionManager.wait(args.session_id, args.timeout_ms, args.turn_id, extra?.signal)
+        () => sessionManager.wait(args.session_id, waitTimeout.effectiveMs, args.turn_id, extra?.signal)
       );
       await progress.flush();
       if (waited.error || !waited.session) {
@@ -28933,6 +29054,7 @@ registerDebugTool(
         session: compactSession,
         ...sessionProgressPayload(compactSession),
         turn: waited.turn,
+        ...waitTimeoutFields(waitTimeout),
         recovery,
         suggested_next_action: recovery?.recommendedAction,
         next_action: recovery?.recommendedAction ?? "Use session.lastResult directly, or send a follow-up prompt if more Codex context is needed."
@@ -29459,17 +29581,19 @@ registerLegacyTool(
     inputSchema: {
       session_id: sessionIdSchema,
       turn_id: external_exports.string().trim().min(1).optional().describe("Optional turn id to wait for. Omit to wait until the whole session queue is idle."),
-      timeout_ms: external_exports.number().int().positive().max(864e5).default(6e5).describe("Maximum time to wait in milliseconds.")
+      timeout_ms: external_exports.number().int().positive().max(864e5).default(defaultBlockingWaitTimeoutMs).describe("Requested time to wait in milliseconds. The server caps long waits to keep Claude responsive.")
     }
   },
   async (args, extra) => loggedToolCall("wait_codex_session", args, extra, async () => {
     const progress = createProgressReporter(extra);
     try {
+      const waitTimeout = capBlockingWaitTimeout(args.timeout_ms);
+      logCappedWait("wait_codex_session", waitTimeout, { sessionId: args.session_id });
       await progress.send(`Waiting for Codex session ${args.session_id}`);
       const waited = await withProgressHeartbeat(
         progress,
         `Still waiting for Codex session ${args.session_id}`,
-        () => sessionManager.wait(args.session_id, args.timeout_ms, args.turn_id, extra?.signal)
+        () => sessionManager.wait(args.session_id, waitTimeout.effectiveMs, args.turn_id, extra?.signal)
       );
       await progress.send(
         waited.completed ? `Codex session ${args.session_id} is ready` : waited.timeoutReason === "wait_cancelled" ? `Cancelled wait for Codex session ${args.session_id}` : `Timed out waiting for Codex session ${args.session_id}`
@@ -29486,6 +29610,7 @@ registerLegacyTool(
         session: compactSession,
         ...sessionProgressPayload(compactSession),
         turn: waited.turn,
+        ...waitTimeoutFields(waitTimeout),
         recovery,
         suggested_next_action: recovery?.recommendedAction,
         next_action: recovery?.recommendedAction ?? "Use the session.lastResult or turn result directly, or send a follow-up prompt if more Codex context is needed."

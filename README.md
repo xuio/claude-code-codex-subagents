@@ -120,6 +120,10 @@ to `codex://sessions/{session_id}` for milestone and completion updates. For a
 completed first turn, Claude should set `keep_session: true`; for long first
 turns, Claude should set `background: true`.
 
+Blocking waits are capped to responsive slices by default. When `codex_followup`
+or `codex_wait_any` returns `completed: false`, the Codex session is still
+running; call the wait tool again or read `codex://sessions/{session_id}`.
+
 When app-server sessions use the Codex desktop binary, they are recorded as
 normal top-level Codex threads rather than hidden daemon work. The plugin sets the
 thread name from Claude's task label when the installed Codex app-server supports

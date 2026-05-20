@@ -34,14 +34,18 @@ function assert(condition, message, details) {
   }
 }
 
-async function callTool(name, args) {
-  return client.callTool(
+async function callToolOn(targetClient, name, args) {
+  return targetClient.callTool(
     {
       name,
       arguments: args,
     },
     CallToolResultSchema,
   );
+}
+
+async function callTool(name, args) {
+  return callToolOn(client, name, args);
 }
 
 async function readJsonResource(uri) {
@@ -73,6 +77,10 @@ async function recordedCalls() {
 }
 
 async function listToolsWithEnv(env) {
+  return withClientEnv(env, async (debugClient) => debugClient.listTools());
+}
+
+async function withClientEnv(env, run) {
   const debugClient = new Client({ name: "codex-subagents-smoke-debug", version: "0.1.0" });
   const debugTransport = new StdioClientTransport({
     command: path.join(root, "dist/index.js"),
@@ -83,7 +91,7 @@ async function listToolsWithEnv(env) {
   debugTransport.stderr?.resume();
   try {
     await debugClient.connect(debugTransport);
-    return await debugClient.listTools();
+    return await run(debugClient);
   } finally {
     await debugTransport.close().catch(() => {});
   }
@@ -190,6 +198,50 @@ try {
     missingCancel.content?.[0]?.text?.includes("Unknown session_id: session-does-not-exist-smoke"),
     "cancel error text should include the unknown session id",
     missingCancel,
+  );
+
+  await withClientEnv(
+    {
+      PATH: process.env.PATH ?? "",
+      CODEX_SUBAGENTS_CODEX_BIN: fakeCodex,
+      CLAUDE_PROJECT_DIR: projectDir,
+      CODEX_SUBAGENTS_SESSION_STATE_FILE: path.join(projectDir, "capped-wait-sessions.json"),
+      CODEX_SUBAGENTS_MAX_BLOCKING_WAIT_MS: "50",
+      FAKE_CODEX_RECORD_DIR: recordDir,
+    },
+    async (cappedClient) => {
+      const slow = await callToolOn(cappedClient, "codex_task", {
+        description: "Capped wait smoke",
+        prompt: "capped wait smoke DELAY_MS=500",
+        project_dir: projectDir,
+        background: true,
+      });
+      assert(slow.structuredContent?.session_id, "capped wait smoke should start a background session", slow);
+      const cappedWait = await callToolOn(cappedClient, "codex_wait_any", {
+        session_ids: [slow.structuredContent.session_id],
+        wait_timeout_ms: 5_000,
+      });
+      assert(
+        cappedWait.structuredContent?.completed === false &&
+          cappedWait.structuredContent?.wait_timeout_capped === true &&
+          cappedWait.structuredContent?.effective_wait_timeout_ms === 50 &&
+          cappedWait.structuredContent?.requested_wait_timeout_ms === 5_000,
+        "codex_wait_any should cap long blocking waits and return a running result",
+        cappedWait.structuredContent,
+      );
+      assert(
+        typeof cappedWait.structuredContent?.elapsed_ms === "number" &&
+          cappedWait.structuredContent.elapsed_ms < 1_000,
+        "capped wait should return before Claude Desktop's inactivity watchdog could fire",
+        cappedWait.structuredContent,
+      );
+      const cancelled = await callToolOn(cappedClient, "codex_followup", {
+        session_id: slow.structuredContent.session_id,
+        mode: "cancel",
+        reason: "capped wait smoke cleanup",
+      });
+      assert(cancelled.structuredContent?.status === "cancelled", "capped wait smoke cleanup should cancel the session", cancelled);
+    },
   );
 
   const invalidReasoning = await callTool("codex_task", {
@@ -334,6 +386,29 @@ try {
     "codex_followup without an explicit description should not prepend boilerplate",
     followupCall,
   );
+  const followupTimeoutSession = await callTool("codex_task", {
+    description: "Follow-up timeout session",
+    prompt: "follow-up timeout initial",
+    project_dir: projectDir,
+    keep_session: true,
+  });
+  const followupTimedOut = await callTool("codex_followup", {
+    session_id: followupTimeoutSession.structuredContent.session_id,
+    prompt: "follow-up timeout DELAY_MS=500",
+    wait_timeout_ms: 20,
+  });
+  assert(
+    followupTimedOut.structuredContent?.completed === false &&
+      followupTimedOut.structuredContent?.timeoutReason === "wait_timeout" &&
+      followupTimedOut.structuredContent?.effective_wait_timeout_ms === 20,
+    "foreground codex_followup should honor wait_timeout_ms instead of waiting indefinitely",
+    followupTimedOut.structuredContent,
+  );
+  await callTool("codex_followup", {
+    session_id: followupTimeoutSession.structuredContent.session_id,
+    mode: "cancel",
+    reason: "follow-up timeout smoke cleanup",
+  });
   const personaCall = calls.find((call) => call.method === "turn/start" && call.prompt?.includes("persona smoke"));
   assert(personaCall, "expected recorded persona turn/start call", calls);
   assert(

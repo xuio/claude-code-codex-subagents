@@ -15,6 +15,7 @@ Claude Code development workflow.
 | Model | Codex account or config default unless a tool call supplies one |
 | Reasoning effort | `medium` when a default is needed |
 | Logging | verbose JSONL on stderr |
+| Blocking wait cap | `300000` ms per wait call |
 
 Claude should pass `project_dir` when Codex should inspect the same repository or
 subdirectory that Claude is working in. If omitted, the server uses
@@ -77,6 +78,11 @@ Use this decision path when writing prompts or debugging Claude tool choice:
 `mode: "cancel"` also closes the associated app-server session. If Codex Desktop
 supports thread archiving, the plugin best-effort archives that Desktop thread so
 stopped Claude subagent work does not keep cluttering the active thread list.
+
+Blocking wait tools return periodically even when the requested timeout is very
+large. If `completed` is false with `timeoutReason: "wait_timeout"`, the Codex
+session is still managed by the MCP server; call `codex_followup` mode `wait` or
+`codex_wait_any` again, or read `codex://sessions/{session_id}` for live state.
 
 When in doubt, read `codex://usage` and then choose among the native front-door tools.
 
@@ -222,11 +228,14 @@ To collect whichever background session finishes first:
 ```json
 {
   "session_ids": ["session-a", "session-b"],
-  "wait_timeout_ms": 600000
+  "wait_timeout_ms": 300000
 }
 ```
 
-Use the returned `remaining_session_ids` in the next `codex_wait_any` call.
+Use the returned `remaining_session_ids` in the next `codex_wait_any` call. Long
+requested waits are capped by `CODEX_SUBAGENTS_MAX_BLOCKING_WAIT_MS` so Claude
+does not sit in one MCP call long enough for Desktop's inactivity watchdog to
+kill the parent session.
 
 To stop a background or actively running session:
 
@@ -339,6 +348,7 @@ servers should not be loaded for the run.
 | `CODEX_SUBAGENTS_MAX_SESSIONS` | Maximum retained persistent sessions |
 | `CODEX_SUBAGENTS_MAX_SESSION_QUEUED_TURNS` | Maximum queued turns per session |
 | `CODEX_SUBAGENTS_MAX_SESSION_MILESTONES` | Recent milestone ring size per session, clamped to 10-500 |
+| `CODEX_SUBAGENTS_MAX_BLOCKING_WAIT_MS` | Maximum duration for one blocking wait call, clamped to 25-300000 ms |
 | `CODEX_SUBAGENTS_SESSION_COMPLETED_TTL_SECONDS` | Retention for failed/cancelled sessions |
 | `CODEX_SUBAGENTS_SESSION_IDLE_TTL_SECONDS` | Retention for idle resumable sessions |
 | `CODEX_SUBAGENTS_SESSION_STATE_FILE` | Durable session metadata path |
