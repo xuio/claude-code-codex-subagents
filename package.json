@@ -33,6 +33,7 @@
     "test:stress": "node test/stress-mcp.mjs",
     "test:progress": "node test/progress-mcp.mjs",
     "test:advanced": "node test/advanced-mcp.mjs",
+    "test:stdio-shutdown": "node test/stdio-shutdown.mjs",
     "test:dev-link": "node test/dev-link.mjs",
     "test:plugin-manifest": "node test/plugin-manifest.mjs",
     "test:codex-runtime": "node test/codex-runtime-probe.mjs",
@@ -46,8 +47,8 @@
     "test:claude-real-codex": "node test/claude-real-codex.mjs",
     "test:claude-real-session": "node test/claude-real-session.mjs",
     "test:real-soak": "node test/real-soak.mjs",
-    "test:ci": "npm run build && npm run test:plugin-manifest && npm test && npm run smoke:mcp && npm run test:reliability && npm run test:stress && npm run test:progress && npm run test:advanced && npm run test:dev-link",
-    "test:comprehensive": "npm run build && npm test && npm run smoke:mcp && npm run test:reliability && npm run test:stress && npm run test:progress && npm run test:advanced && npm run test:codex-runtime && npm run test:app-server-contract && npm run test:real-matrix && npm run validate:plugin && npm run test:claude-desktop",
+    "test:ci": "npm run build && npm run test:plugin-manifest && npm test && npm run test:stdio-shutdown && npm run smoke:mcp && npm run test:reliability && npm run test:stress && npm run test:progress && npm run test:advanced && npm run test:dev-link",
+    "test:comprehensive": "npm run build && npm test && npm run test:stdio-shutdown && npm run smoke:mcp && npm run test:reliability && npm run test:stress && npm run test:progress && npm run test:advanced && npm run test:codex-runtime && npm run test:app-server-contract && npm run test:real-matrix && npm run validate:plugin && npm run test:claude-desktop",
     "test:claude-desktop": "node test/claude-desktop-cli.mjs"
   },
   "keywords": [

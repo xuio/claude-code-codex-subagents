@@ -203,7 +203,16 @@ export function loggingDiagnostics(env: NodeJS.ProcessEnv = process.env): Record
 }
 
 function writeDefaultLog(line: string): void {
-  process.stderr.write(`${line}\n`);
+  try {
+    if (!process.stderr.destroyed && process.stderr.writable) {
+      process.stderr.write(`${line}\n`, (error) => {
+        if (error) lastLogFileError = error.message;
+      });
+    }
+  } catch (error) {
+    lastLogFileError = error instanceof Error ? error.message : String(error);
+  }
+
   const logFile = process.env.CODEX_SUBAGENTS_LOG_FILE?.trim();
   if (!logFile) return;
   try {

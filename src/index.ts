@@ -31,6 +31,7 @@ import { errorForLog, logger, loggingDiagnostics, makeLogId, summarizeRawTraffic
 import { recoveryForAgentResult, recoveryForError, recoveryForWait } from "./recovery.js";
 import { redactJsonValue, redactSensitiveText } from "./redaction.js";
 import { createProgressReporter, type ProgressOptions, type ProgressReporter, type ToolExtra } from "./progress.js";
+import { isBrokenStdioError } from "./stdio.js";
 import {
   compactAgentResultForMcp,
   compactAgentResultsForMcp,
@@ -1002,7 +1003,7 @@ async function loggedToolCall(
   }
 }
 
-function installTransportLogging(transport: StdioServerTransport): void {
+function installTransportLogging(transport: StdioServerTransport, shutdown: (reason: string, exitCode?: number, graceMs?: number) => void): void {
   const previousOnMessage = transport.onmessage;
   transport.onmessage = (message) => {
     logger.rawDebug("mcp.transport.inbound", {
@@ -1013,6 +1014,10 @@ function installTransportLogging(transport: StdioServerTransport): void {
 
   const previousOnError = transport.onerror;
   transport.onerror = (error) => {
+    if (isBrokenStdioError(error)) {
+      shutdown("mcp_transport_broken_stdio", 0, 500);
+      return;
+    }
     logger.error("mcp.transport.error", { error: errorForLog(error) });
     previousOnError?.(error);
   };
@@ -1025,6 +1030,10 @@ function installTransportLogging(transport: StdioServerTransport): void {
     try {
       await send(message);
     } catch (error) {
+      if (isBrokenStdioError(error)) {
+        shutdown("mcp_transport_send_broken_stdio", 0, 500);
+        return;
+      }
       logger.error("mcp.transport.send_failed", { error: errorForLog(error) });
       throw error;
     }
@@ -3788,40 +3797,67 @@ registerCleanupHandler(async (reason) => {
   await sessionManager.shutdown(reason);
 });
 
-function installProcessCleanup(): void {
+function installProcessCleanup(): (reason: string, exitCode?: number, graceMs?: number) => void {
   let shutdownStarted = false;
-  const shutdown = (reason: string, exitCode?: number) => {
+  const shutdown = (reason: string, exitCode?: number, graceMs = 2_500) => {
     if (shutdownStarted) return;
     shutdownStarted = true;
-    void cleanupRuntime(reason).finally(() => {
+    const forceExit = exitCode === undefined
+      ? undefined
+      : setTimeout(() => process.exit(exitCode), Math.max(1_000, graceMs + 1_000));
+    forceExit?.unref();
+    void cleanupRuntime(reason, graceMs).finally(() => {
+      if (forceExit) clearTimeout(forceExit);
       if (exitCode !== undefined) process.exit(exitCode);
     });
+  };
+  const shutdownOnBrokenStdio = (reason: string) => (error: unknown) => {
+    if (isBrokenStdioError(error)) {
+      shutdown(reason, 0, 500);
+      return;
+    }
+    logger.error(`${reason}.error`, { error: errorForLog(error) });
   };
 
   process.once("SIGINT", () => shutdown("SIGINT", 130));
   process.once("SIGTERM", () => shutdown("SIGTERM", 143));
-  process.stdin.once("close", () => shutdown("stdin_close"));
+  process.stdin.once("close", () => shutdown("stdin_close", 0, 500));
+  process.stdin.once("end", () => shutdown("stdin_end", 0, 500));
+  process.stdin.once("error", shutdownOnBrokenStdio("stdin"));
+  process.stdout.once("error", shutdownOnBrokenStdio("stdout"));
+  process.stderr.once("error", shutdownOnBrokenStdio("stderr"));
+  return shutdown;
 }
 
 async function main(): Promise<void> {
-  installProcessCleanup();
+  const shutdown = installProcessCleanup();
   process.on("unhandledRejection", (error) => {
+    if (isBrokenStdioError(error)) {
+      shutdown("unhandled_broken_stdio", 0, 500);
+      return;
+    }
     logger.error("process.unhandled_rejection", { error: errorForLog(error) });
   });
   process.on("uncaughtException", (error) => {
+    if (isBrokenStdioError(error)) {
+      shutdown("uncaught_broken_stdio", 0, 500);
+      return;
+    }
     logger.error("process.uncaught_exception", { error: errorForLog(error) });
+    shutdown("uncaught_exception", 1, 500);
   });
 
   logger.info("server.starting", {
     logging: loggingDiagnostics(),
   });
   const transport = new StdioServerTransport();
-  installTransportLogging(transport);
+  installTransportLogging(transport, shutdown);
   await server.connect(transport);
   logger.info("server.connected", { transport: "stdio" });
 }
 
 main().catch((error) => {
+  if (isBrokenStdioError(error)) process.exit(0);
   logger.error("server.start_failed", { error: errorForLog(error) });
   process.exit(1);
 });

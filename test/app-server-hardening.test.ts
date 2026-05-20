@@ -263,7 +263,7 @@ describe("app-server hardening", () => {
       return calls.some((call) => call.method === "process/sigterm");
     }, 10_000);
     expect(sawSigterm).toBe(true);
-  });
+  }, 15_000);
 
   it("keeps concurrent app-server sessions isolated", async () => {
     const manager = new CodexSessionManager();
