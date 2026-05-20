@@ -23,7 +23,7 @@ debugging, or adversarial review.
 - **No daemon:** Claude launches the MCP server over stdio for the active session.
 - **Fast parallel review:** Claude can launch several independent Codex agents with bounded concurrency.
 - **Persistent sessions:** App-server sessions keep Codex context across prompts and support live steering.
-- **Codex desktop friendly:** The plugin prefers the Codex binary shipped inside `Codex.app` when it exists.
+- **Codex desktop friendly:** The plugin prefers the Codex binary shipped inside `Codex.app` and creates normal Codex threads with task names for Desktop history.
 - **Debuggable:** Verbose JSONL logging, diagnostics bundles, progress events, per-session resources, and recovery hints are built in.
 
 ## Quick Start
@@ -119,6 +119,11 @@ that same Codex context. For multiple background sessions, Claude should use
 to `codex://sessions/{session_id}` for milestone and completion updates. For a
 completed first turn, Claude should set `keep_session: true`; for long first
 turns, Claude should set `background: true`.
+
+When app-server sessions use the Codex desktop binary, they are recorded as
+normal top-level Codex threads rather than hidden daemon work. The plugin sets the
+thread name from Claude's task label when the installed Codex app-server supports
+thread naming.
 
 ## Safety Model
 

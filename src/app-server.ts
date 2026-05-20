@@ -32,6 +32,7 @@ type AppServerRequestMethod =
   | "initialize"
   | "thread/start"
   | "thread/resume"
+  | "thread/name/set"
   | "turn/start"
   | "turn/steer"
   | "turn/interrupt"
@@ -116,6 +117,12 @@ interface ActiveTurnState {
 
 function userText(text: string): JsonObject {
   return { type: "text", text, text_elements: [] };
+}
+
+function desktopThreadName(name: string | undefined): string | undefined {
+  const trimmed = name?.trim();
+  if (!trimmed) return undefined;
+  return trimmed.length > 120 ? `${trimmed.slice(0, 117)}...` : trimmed;
 }
 
 function sandboxPolicy(options: AgentRunOptions): JsonObject {
@@ -347,13 +354,15 @@ export class CodexAppServerSession {
             config: appServerConfig(options, reasoningEffort),
             serviceName: "claude-code-codex-subagents",
             ephemeral: options.ephemeral ?? false,
-            threadSource: "subagent",
           }, options.spawnTimeoutMs ?? 30_000) as { thread?: { id?: string }; cwd?: string };
       const threadId = thread.thread?.id;
       if (!threadId) throw new AppServerUnavailableError("Codex app-server did not return a thread id.");
       session.threadId = threadId;
       if (resumeThreadId) session.capabilities.threadResume = true;
       else session.capabilities.threadStart = true;
+      if (!resumeThreadId) {
+        await session.setThreadName(desktopThreadName(options.name), options.spawnTimeoutMs ?? 30_000);
+      }
       await session.probeThreadRead(options.spawnTimeoutMs ?? 30_000);
       return session;
     } catch (error) {
@@ -370,6 +379,21 @@ export class CodexAppServerSession {
     this.capabilities.initialize = true;
     this.userAgent = typeof initialized?.userAgent === "string" ? initialized.userAgent : undefined;
     this.codexHome = typeof initialized?.codexHome === "string" ? initialized.codexHome : undefined;
+  }
+
+  private async setThreadName(name: string | undefined, timeoutMs: number): Promise<void> {
+    if (!name) return;
+    try {
+      await this.request("thread/name/set", { threadId: this.threadId, name }, timeoutMs);
+    } catch (error) {
+      logger.warn("codex.app_server.thread_name_failed", {
+        ...this.logContext,
+        appServerId: this.id,
+        threadId: this.threadId,
+        name,
+        error: errorForLog(error),
+      });
+    }
   }
 
   get activeTurnId(): string | undefined {

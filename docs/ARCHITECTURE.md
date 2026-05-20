@@ -30,6 +30,11 @@ flowchart LR
 The app-server process is a child of the MCP server. When Claude shuts down the
 MCP server, there is no background daemon left behind.
 
+App-server threads are started as normal top-level Codex threads, not as nested
+Codex subagent threads. When the Codex app-server supports `thread/name/set`, the
+plugin best-effort names the thread from Claude's task label so the run is easy
+to find in Codex Desktop history.
+
 ## Binary Resolution
 
 The resolver checks candidates in this order:

@@ -24113,6 +24113,11 @@ var LimitedText2 = class {
 function userText(text) {
   return { type: "text", text, text_elements: [] };
 }
+function desktopThreadName(name) {
+  const trimmed = name?.trim();
+  if (!trimmed) return void 0;
+  return trimmed.length > 120 ? `${trimmed.slice(0, 117)}...` : trimmed;
+}
 function sandboxPolicy(options) {
   if (options.dangerouslyBypassApprovalsAndSandbox) return { type: "dangerFullAccess" };
   switch (options.sandbox ?? "read-only") {
@@ -24330,14 +24335,16 @@ var CodexAppServerSession = class _CodexAppServerSession {
         sandbox: sandboxMode(options),
         config: appServerConfig(options, reasoningEffort),
         serviceName: "claude-code-codex-subagents",
-        ephemeral: options.ephemeral ?? false,
-        threadSource: "subagent"
+        ephemeral: options.ephemeral ?? false
       }, options.spawnTimeoutMs ?? 3e4);
       const threadId = thread.thread?.id;
       if (!threadId) throw new AppServerUnavailableError("Codex app-server did not return a thread id.");
       session.threadId = threadId;
       if (resumeThreadId) session.capabilities.threadResume = true;
       else session.capabilities.threadStart = true;
+      if (!resumeThreadId) {
+        await session.setThreadName(desktopThreadName(options.name), options.spawnTimeoutMs ?? 3e4);
+      }
       await session.probeThreadRead(options.spawnTimeoutMs ?? 3e4);
       return session;
     } catch (error2) {
@@ -24353,6 +24360,20 @@ var CodexAppServerSession = class _CodexAppServerSession {
     this.capabilities.initialize = true;
     this.userAgent = typeof initialized?.userAgent === "string" ? initialized.userAgent : void 0;
     this.codexHome = typeof initialized?.codexHome === "string" ? initialized.codexHome : void 0;
+  }
+  async setThreadName(name, timeoutMs) {
+    if (!name) return;
+    try {
+      await this.request("thread/name/set", { threadId: this.threadId, name }, timeoutMs);
+    } catch (error2) {
+      logger.warn("codex.app_server.thread_name_failed", {
+        ...this.logContext,
+        appServerId: this.id,
+        threadId: this.threadId,
+        name,
+        error: errorForLog(error2)
+      });
+    }
   }
   get activeTurnId() {
     return this.activeTurn?.turnId;

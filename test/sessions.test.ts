@@ -80,6 +80,32 @@ describe("CodexSessionManager", () => {
     manager.cancel(started.session.id);
   });
 
+  it("starts app-server sessions as normal desktop-visible Codex threads with task names", async () => {
+    const manager = new CodexSessionManager();
+    const projectDir = await tempDir("codex-subagents-session-project-");
+    const recordDir = await tempDir("codex-subagents-session-record-");
+
+    const started = await manager.start({
+      prompt: "desktop visible session",
+      name: "Review desktop visibility",
+      projectDir,
+      codexBin: fakeCodex,
+      env: {
+        FAKE_CODEX_RECORD_DIR: recordDir,
+      },
+    });
+
+    expect(started.result.ok).toBe(true);
+    const calls = await recordedCalls(recordDir);
+    const threadStart = calls.find((call) => call.method === "thread/start");
+    expect(threadStart?.threadSource).toBeNull();
+    expect(threadStart?.serviceName).toBe("claude-code-codex-subagents");
+    expect(calls.some((call) => call.method === "thread/name/set" && call.name === "Review desktop visibility")).toBe(
+      true,
+    );
+    manager.cancel(started.session.id);
+  });
+
   it("delivers steering to the active app-server turn", async () => {
     const manager = new CodexSessionManager();
     const projectDir = await tempDir("codex-subagents-session-project-");
@@ -110,7 +136,10 @@ describe("CodexSessionManager", () => {
     expect(waited.session?.lastResult?.finalMessage).toContain("steer this active turn");
 
     const calls = await recordedCalls(recordDir);
-    expect(calls.map((call) => call.method).filter((method) => method !== "thread/read")).toEqual(["turn/start", "turn/steer"]);
+    expect(calls.map((call) => call.method).filter((method) => method === "turn/start" || method === "turn/steer")).toEqual([
+      "turn/start",
+      "turn/steer",
+    ]);
     manager.cancel(session.id);
   });
 

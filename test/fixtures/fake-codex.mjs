@@ -58,6 +58,7 @@ if (args[0] === "app-server") {
   let activeTurn = undefined;
   let activePrompt = "";
   let activeSteers = [];
+  let threadName = null;
   let activeTimer = undefined;
 
   function modeText() {
@@ -215,6 +216,15 @@ if (args[0] === "app-server") {
         return;
       }
       threadId = `fake-thread-${process.pid}-${Math.random().toString(36).slice(2, 8)}`;
+      threadName = null;
+      recordCall({
+        protocol: "app-server",
+        method,
+        threadId,
+        cwd: params?.cwd ?? process.cwd(),
+        threadSource: params?.threadSource ?? null,
+        serviceName: params?.serviceName ?? null,
+      });
       if (hasMode("THREAD_START_NO_ID")) {
         send({ id, result: { thread: {}, cwd: params?.cwd ?? process.cwd() } });
         return;
@@ -240,7 +250,7 @@ if (args[0] === "app-server") {
             agentNickname: null,
             agentRole: null,
             gitInfo: null,
-            name: null,
+            name: threadName,
             turns: [],
           },
           model: params?.model ?? "fake-model",
@@ -255,6 +265,16 @@ if (args[0] === "app-server") {
         },
       });
       send({ method: "thread/started", params: { thread: { id: threadId, cwd: params?.cwd ?? process.cwd(), turns: [] } } });
+      return;
+    }
+    if (method === "thread/name/set") {
+      threadName = typeof params?.name === "string" ? params.name : null;
+      recordCall({ protocol: "app-server", method, threadId: params?.threadId ?? threadId, name: threadName });
+      if (hasMode("THREAD_NAME_SET_ERROR")) {
+        send({ id, error: { code: -32000, message: "fake thread name set error" } });
+        return;
+      }
+      send({ id, result: {} });
       return;
     }
     if (method === "thread/resume") {
@@ -441,7 +461,7 @@ if (args[0] === "app-server") {
         send({ id, error: { code: -32000, message: "fake thread read error" } });
         return;
       }
-      send({ id, result: { thread: { id: threadId, turns: [] } } });
+      send({ id, result: { thread: { id: threadId, name: threadName, turns: [] } } });
       return;
     }
     send({ id, error: { code: -32601, message: `unknown method ${method}` } });
