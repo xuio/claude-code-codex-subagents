@@ -13,15 +13,25 @@ import {
   summarizeRawTrafficForLog,
 } from "../src/logging.js";
 
+const logEnvKeys = [
+  "CODEX_SUBAGENTS_LOG_PROFILE",
+  "CODEX_SUBAGENTS_LOG_LEVEL",
+  "CODEX_SUBAGENTS_LOG_RAW_REDACT",
+  "CODEX_SUBAGENTS_LOG_MAX_STRING_CHARS",
+  "CODEX_SUBAGENTS_DEBUG_BUNDLE_DIR",
+  "CODEX_SUBAGENTS_LOG_FILE",
+  "CODEX_SUBAGENTS_LOG_FILE_MAX_BYTES",
+] as const;
+
+const originalLogEnv = Object.fromEntries(logEnvKeys.map((key) => [key, process.env[key]]));
+
 afterEach(() => {
   resetLogWriterForTest();
-  delete process.env.CODEX_SUBAGENTS_LOG_PROFILE;
-  delete process.env.CODEX_SUBAGENTS_LOG_LEVEL;
-  delete process.env.CODEX_SUBAGENTS_LOG_RAW_REDACT;
-  delete process.env.CODEX_SUBAGENTS_LOG_MAX_STRING_CHARS;
-  delete process.env.CODEX_SUBAGENTS_DEBUG_BUNDLE_DIR;
-  delete process.env.CODEX_SUBAGENTS_LOG_FILE;
-  delete process.env.CODEX_SUBAGENTS_LOG_FILE_MAX_BYTES;
+  for (const key of logEnvKeys) {
+    const value = originalLogEnv[key];
+    if (value === undefined) delete process.env[key];
+    else process.env[key] = value;
+  }
 });
 
 describe("logging", () => {
@@ -32,6 +42,7 @@ describe("logging", () => {
   });
 
   it("logs raw MCP traffic without redacting prompt-like values", () => {
+    process.env.CODEX_SUBAGENTS_LOG_LEVEL = "debug";
     const lines: string[] = [];
     setLogWriterForTest((line) => lines.push(line));
 
@@ -57,6 +68,7 @@ describe("logging", () => {
   });
 
   it("redacts raw traffic by default in production logging profile", () => {
+    delete process.env.CODEX_SUBAGENTS_LOG_LEVEL;
     process.env.CODEX_SUBAGENTS_LOG_PROFILE = "production";
     const lines: string[] = [];
     setLogWriterForTest((line) => lines.push(line));
@@ -85,6 +97,7 @@ describe("logging", () => {
   it("writes log files with owner-only permissions", async () => {
     const dir = await mkdtemp(path.join(os.tmpdir(), "codex-subagents-logs-"));
     const logFile = path.join(dir, "server.log");
+    process.env.CODEX_SUBAGENTS_LOG_LEVEL = "info";
     process.env.CODEX_SUBAGENTS_LOG_FILE = logFile;
 
     logger.info("test.log_file_mode", { ok: true });
@@ -96,6 +109,7 @@ describe("logging", () => {
   it("keeps rotated log files owner-only", async () => {
     const dir = await mkdtemp(path.join(os.tmpdir(), "codex-subagents-logs-"));
     const logFile = path.join(dir, "server.log");
+    process.env.CODEX_SUBAGENTS_LOG_LEVEL = "info";
     process.env.CODEX_SUBAGENTS_LOG_FILE = logFile;
     process.env.CODEX_SUBAGENTS_LOG_FILE_MAX_BYTES = "10";
     await writeFile(logFile, "x".repeat(20), "utf8");
