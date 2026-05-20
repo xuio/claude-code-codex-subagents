@@ -19,6 +19,7 @@ let logWriter: (line: string) => void = (line) => {
   writeDefaultLog(line);
 };
 let lastLogFileError: string | undefined;
+let stderrMirrorDisabled = false;
 
 export function configuredLogProfile(env: NodeJS.ProcessEnv = process.env): LogProfile {
   const raw = env.CODEX_SUBAGENTS_LOG_PROFILE?.trim().toLowerCase();
@@ -184,9 +185,14 @@ export function setLogWriterForTest(writer: (line: string) => void): void {
 
 export function resetLogWriterForTest(): void {
   lastLogFileError = undefined;
+  stderrMirrorDisabled = false;
   logWriter = (line) => {
     writeDefaultLog(line);
   };
+}
+
+export function disableStderrLogMirrorForShutdown(): void {
+  stderrMirrorDisabled = true;
 }
 
 export function loggingDiagnostics(env: NodeJS.ProcessEnv = process.env): Record<string, unknown> {
@@ -199,12 +205,13 @@ export function loggingDiagnostics(env: NodeJS.ProcessEnv = process.env): Record
     logFile: logFile || undefined,
     logFileMaxBytes: logFile ? logFileMaxBytes(env) : undefined,
     logFileLastError: lastLogFileError,
+    stderrMirrorDisabled,
   };
 }
 
 function writeDefaultLog(line: string): void {
   try {
-    if (!process.stderr.destroyed && process.stderr.writable) {
+    if (!stderrMirrorDisabled && !process.stderr.destroyed && process.stderr.writable) {
       process.stderr.write(`${line}\n`, (error) => {
         if (error) lastLogFileError = error.message;
       });

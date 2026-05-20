@@ -21433,6 +21433,7 @@ var logWriter = (line) => {
   writeDefaultLog(line);
 };
 var lastLogFileError;
+var stderrMirrorDisabled = false;
 function configuredLogProfile(env = process.env) {
   const raw = env.CODEX_SUBAGENTS_LOG_PROFILE?.trim().toLowerCase();
   return raw === "production" ? "production" : "debug";
@@ -21535,6 +21536,9 @@ var logger = {
   rawWarn: (event, fields) => logRaw("warn", event, fields),
   rawError: (event, fields) => logRaw("error", event, fields)
 };
+function disableStderrLogMirrorForShutdown() {
+  stderrMirrorDisabled = true;
+}
 function loggingDiagnostics(env = process.env) {
   const logFile = env.CODEX_SUBAGENTS_LOG_FILE?.trim();
   return {
@@ -21544,12 +21548,13 @@ function loggingDiagnostics(env = process.env) {
     maxStringChars: maxStringChars(env),
     logFile: logFile || void 0,
     logFileMaxBytes: logFile ? logFileMaxBytes(env) : void 0,
-    logFileLastError: lastLogFileError
+    logFileLastError: lastLogFileError,
+    stderrMirrorDisabled
   };
 }
 function writeDefaultLog(line) {
   try {
-    if (!process.stderr.destroyed && process.stderr.writable) {
+    if (!stderrMirrorDisabled && !process.stderr.destroyed && process.stderr.writable) {
       process.stderr.write(`${line}
 `, (error2) => {
         if (error2) lastLogFileError = error2.message;
@@ -23308,6 +23313,75 @@ var CodexJobManager = class {
 };
 var jobManager = new CodexJobManager();
 
+// src/processes.ts
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
+var execFileAsync = promisify(execFile);
+var staleCpuThresholdPct = 25;
+function sanitizeCommand(command) {
+  const redacted = redactSensitiveText(command);
+  return redacted.length <= 500 ? redacted : `${redacted.slice(0, 500)}...`;
+}
+function parsePsProcessLine(line) {
+  const match = line.trim().match(/^(\d+)\s+(\d+)\s+(\d+)\s+(\S+)\s+([0-9.]+)\s+(\S+)\s+(.+)$/);
+  if (!match) return void 0;
+  const [, pid, ppid, pgid, stat3, cpuPct, elapsed, command] = match;
+  if (!pid || !ppid || !pgid || !stat3 || !cpuPct || !elapsed || !command) return void 0;
+  return {
+    pid: Number(pid),
+    ppid: Number(ppid),
+    pgid: Number(pgid),
+    stat: stat3,
+    cpuPct: Number(cpuPct),
+    elapsed,
+    command: sanitizeCommand(command)
+  };
+}
+function isPluginProcess(command) {
+  return command.includes("codex-subagents") && command.includes("dist/index.js");
+}
+function pluginProcessDiagnosticsFromSnapshots(snapshots, currentPid = process.pid) {
+  const pluginProcesses = snapshots.filter((snapshot3) => isPluginProcess(snapshot3.command));
+  const staleSuspects = pluginProcesses.filter((snapshot3) => snapshot3.pid !== currentPid && snapshot3.ppid === 1);
+  return {
+    supported: true,
+    currentPid,
+    pluginProcesses,
+    staleSuspects,
+    highCpuStaleSuspects: staleSuspects.filter((snapshot3) => snapshot3.cpuPct >= staleCpuThresholdPct)
+  };
+}
+async function detectPluginProcesses() {
+  if (process.platform === "win32") {
+    return {
+      supported: false,
+      currentPid: process.pid,
+      pluginProcesses: [],
+      staleSuspects: [],
+      highCpuStaleSuspects: [],
+      error: "process scan is not implemented on Windows"
+    };
+  }
+  try {
+    const { stdout } = await execFileAsync(
+      "ps",
+      ["-axo", "pid=,ppid=,pgid=,stat=,%cpu=,etime=,command="],
+      { timeout: 1e3, maxBuffer: 1e6, encoding: "utf8" }
+    );
+    const snapshots = stdout.split("\n").map((line) => parsePsProcessLine(line)).filter((snapshot3) => Boolean(snapshot3));
+    return pluginProcessDiagnosticsFromSnapshots(snapshots);
+  } catch (error2) {
+    return {
+      supported: false,
+      currentPid: process.pid,
+      pluginProcesses: [],
+      staleSuspects: [],
+      highCpuStaleSuspects: [],
+      error: error2 instanceof Error ? error2.message : String(error2)
+    };
+  }
+}
+
 // src/recovery.ts
 function messageFor(error2) {
   return error2 instanceof Error ? error2.message : String(error2);
@@ -23523,7 +23597,20 @@ function isBrokenStdioError(error2) {
   const value = error2;
   if (typeof value.code === "string" && brokenStdioCodes.has(value.code)) return true;
   const message = typeof value.message === "string" ? value.message.toLowerCase() : "";
-  return message.includes("broken pipe") || message.includes("stream has been destroyed") || message.includes("write after end");
+  return message.includes("broken pipe") || message.includes("channel closed") || message.includes("socket closed") || message.includes("stream has been destroyed") || message.includes("write after end");
+}
+function isOrphanedParentPid(parentPid) {
+  return parentPid <= 1;
+}
+function updateOrphanWatchdogState(options) {
+  if (!isOrphanedParentPid(options.parentPid)) {
+    return { shouldExit: false };
+  }
+  const orphanSinceMs = options.previousOrphanSinceMs ?? options.nowMs;
+  return {
+    orphanSinceMs,
+    shouldExit: options.nowMs - orphanSinceMs >= options.graceMs
+  };
 }
 
 // src/response.ts
@@ -26333,35 +26420,41 @@ async function loggedToolCall(tool, args, extra, run) {
     return errorResult(error2, tool);
   }
 }
-function installTransportLogging(transport, shutdown) {
+function installTransportLogging(transport, shutdown, isShuttingDown) {
   const previousOnMessage = transport.onmessage;
   transport.onmessage = (message) => {
-    logger.rawDebug("mcp.transport.inbound", {
-      message: summarizeRawTrafficForLog(message)
-    });
+    if (!isShuttingDown()) {
+      logger.rawDebug("mcp.transport.inbound", {
+        message: summarizeRawTrafficForLog(message)
+      });
+    }
     previousOnMessage?.(message);
   };
   const previousOnError = transport.onerror;
   transport.onerror = (error2) => {
     if (isBrokenStdioError(error2)) {
-      shutdown("mcp_transport_broken_stdio", 0, 500);
+      shutdown("mcp_transport_broken_stdio", 0, 250);
       return;
     }
+    if (isShuttingDown()) return;
     logger.error("mcp.transport.error", { error: errorForLog(error2) });
     previousOnError?.(error2);
   };
   const send = transport.send.bind(transport);
   transport.send = async (message) => {
-    logger.rawDebug("mcp.transport.outbound", {
-      message: summarizeRawTrafficForLog(message)
-    });
+    if (!isShuttingDown()) {
+      logger.rawDebug("mcp.transport.outbound", {
+        message: summarizeRawTrafficForLog(message)
+      });
+    }
     try {
       await send(message);
     } catch (error2) {
       if (isBrokenStdioError(error2)) {
-        shutdown("mcp_transport_send_broken_stdio", 0, 500);
+        shutdown("mcp_transport_send_broken_stdio", 0, 250);
         return;
       }
+      if (isShuttingDown()) return;
       logger.error("mcp.transport.send_failed", { error: errorForLog(error2) });
       throw error2;
     }
@@ -26604,6 +26697,7 @@ async function mapWithConcurrency(items, maxParallel, worker) {
 }
 async function codexStatusPayload(codexBin) {
   const status = await probeCodexVersion(codexBin);
+  const processes = await detectPluginProcesses();
   return {
     ok: !status.error,
     binary: status.binary,
@@ -26643,6 +26737,7 @@ async function codexStatusPayload(codexBin) {
     sessions: sessionManager.stats(),
     logging: loggingDiagnostics(),
     artifacts: outputArtifactDiagnostics(),
+    processes,
     diagnostics: {
       ...diagnosticStats(),
       recentFailures: recentDiagnosticEvents(20)
@@ -26700,6 +26795,14 @@ async function codexDoctorPayload(args = {}) {
   checks.push({ name: "artifacts", ok: true, detail: outputArtifactDiagnostics() });
   checks.push({ name: "diagnostics", ok: true, detail: diagnosticStats() });
   checks.push({ name: "lifecycle", ok: true, detail: lifecycleStats() });
+  const processes = await detectPluginProcesses();
+  const processOk = processes.highCpuStaleSuspects.length === 0;
+  if (!processOk) ok = false;
+  checks.push({
+    name: "stale_processes",
+    ok: processOk,
+    detail: processes
+  });
   return {
     ok,
     checks,
@@ -28609,12 +28712,55 @@ registerCleanupHandler(async (reason) => {
   jobManager.cancelAll(reason);
   await sessionManager.shutdown(reason);
 });
+function envBoundedInteger(name, fallback, min, max) {
+  const parsed = Number(process.env[name]);
+  if (!Number.isInteger(parsed) || parsed <= 0) return fallback;
+  return Math.max(min, Math.min(parsed, max));
+}
+function installOrphanWatchdog(controller) {
+  const forceOrphanForTest = process.env.CODEX_SUBAGENTS_TEST_FORCE_ORPHAN === "1";
+  const initialParentPid = forceOrphanForTest ? 2 : process.ppid;
+  if (initialParentPid <= 1) {
+    logger.warn("lifecycle.orphan_watchdog.disabled", {
+      parentPid: initialParentPid,
+      reason: "process started without a live parent"
+    });
+    return;
+  }
+  const intervalMs = envBoundedInteger("CODEX_SUBAGENTS_ORPHAN_WATCHDOG_INTERVAL_MS", 1e3, 100, 6e4);
+  const graceMs = envBoundedInteger("CODEX_SUBAGENTS_ORPHAN_WATCHDOG_GRACE_MS", 2e3, 250, 6e4);
+  let orphanSinceMs;
+  const interval = setInterval(() => {
+    if (controller.isShuttingDown()) return;
+    const parentPid = forceOrphanForTest ? 1 : process.ppid;
+    const state = updateOrphanWatchdogState({
+      parentPid,
+      nowMs: Date.now(),
+      previousOrphanSinceMs: orphanSinceMs,
+      graceMs
+    });
+    orphanSinceMs = state.orphanSinceMs;
+    if (state.shouldExit) {
+      logger.warn("lifecycle.orphaned_parent", {
+        parentPid,
+        graceMs,
+        reason: "daemonless stdio MCP server lost its parent process"
+      });
+      controller.shutdown("orphaned_parent", 0, 250);
+    }
+  }, intervalMs);
+  interval.unref();
+  registerCleanupHandler(() => clearInterval(interval));
+}
 function installProcessCleanup() {
   let shutdownStarted = false;
+  let requestedExitCode;
   const shutdown = (reason, exitCode, graceMs = 2500) => {
     if (shutdownStarted) return;
     shutdownStarted = true;
-    const forceExit = exitCode === void 0 ? void 0 : setTimeout(() => process.exit(exitCode), Math.max(1e3, graceMs + 1e3));
+    requestedExitCode = exitCode;
+    disableStderrLogMirrorForShutdown();
+    const forceExit = exitCode === void 0 ? void 0 : setTimeout(() => process.exit(exitCode), Math.max(250, graceMs + 250));
     forceExit?.unref();
     void cleanupRuntime(reason, graceMs).finally(() => {
       if (forceExit) clearTimeout(forceExit);
@@ -28623,42 +28769,60 @@ function installProcessCleanup() {
   };
   const shutdownOnBrokenStdio = (reason) => (error2) => {
     if (isBrokenStdioError(error2)) {
-      shutdown(reason, 0, 500);
+      shutdown(reason, 0, 250);
       return;
     }
     logger.error(`${reason}.error`, { error: errorForLog(error2) });
   };
   process.once("SIGINT", () => shutdown("SIGINT", 130));
   process.once("SIGTERM", () => shutdown("SIGTERM", 143));
-  process.stdin.once("close", () => shutdown("stdin_close", 0, 500));
-  process.stdin.once("end", () => shutdown("stdin_end", 0, 500));
+  process.stdin.once("close", () => shutdown("stdin_close", 0, 250));
+  process.stdin.once("end", () => shutdown("stdin_end", 0, 250));
   process.stdin.once("error", shutdownOnBrokenStdio("stdin"));
   process.stdout.once("error", shutdownOnBrokenStdio("stdout"));
   process.stderr.once("error", shutdownOnBrokenStdio("stderr"));
-  return shutdown;
+  return {
+    shutdown,
+    isShuttingDown: () => shutdownStarted,
+    exitCode: () => requestedExitCode
+  };
 }
 async function main() {
-  const shutdown = installProcessCleanup();
+  const shutdownController = installProcessCleanup();
+  installOrphanWatchdog(shutdownController);
   process.on("unhandledRejection", (error2) => {
+    if (shutdownController.isShuttingDown()) return;
     if (isBrokenStdioError(error2)) {
-      shutdown("unhandled_broken_stdio", 0, 500);
+      shutdownController.shutdown("unhandled_broken_stdio", 0, 250);
       return;
     }
     logger.error("process.unhandled_rejection", { error: errorForLog(error2) });
   });
   process.on("uncaughtException", (error2) => {
+    if (shutdownController.isShuttingDown()) {
+      process.exit(shutdownController.exitCode() ?? 1);
+    }
     if (isBrokenStdioError(error2)) {
-      shutdown("uncaught_broken_stdio", 0, 500);
+      shutdownController.shutdown("uncaught_broken_stdio", 0, 250);
       return;
     }
     logger.error("process.uncaught_exception", { error: errorForLog(error2) });
-    shutdown("uncaught_exception", 1, 500);
+    shutdownController.shutdown("uncaught_exception", 1, 500);
   });
   logger.info("server.starting", {
     logging: loggingDiagnostics()
   });
   const transport = new StdioServerTransport();
-  installTransportLogging(transport, shutdown);
+  registerCleanupHandler(async () => {
+    try {
+      await transport.close();
+    } catch (error2) {
+      if (!isBrokenStdioError(error2)) {
+        logger.error("mcp.transport.close_failed", { error: errorForLog(error2) });
+      }
+    }
+  });
+  installTransportLogging(transport, shutdownController.shutdown, shutdownController.isShuttingDown);
   await server.connect(transport);
   logger.info("server.connected", { transport: "stdio" });
 }

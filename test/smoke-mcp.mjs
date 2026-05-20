@@ -111,8 +111,18 @@ try {
   const status = await readJsonResource("codex://status");
   assert(status.ok, "codex://status failed", status);
   assert(status.defaultTools?.includes("codex_followup"), "codex://status should advertise native tools", status);
+  assert(
+    status.processes?.pluginProcesses?.some((process) => process.pid === status.processes.currentPid),
+    "codex://status should include plugin process diagnostics",
+    status.processes,
+  );
   const doctor = await readJsonResource("codex://doctor");
   assert(doctor.ok, "codex://doctor failed", doctor);
+  assert(
+    doctor.checks?.some((check) => check.name === "stale_processes"),
+    "codex://doctor should include stale process diagnostics",
+    doctor,
+  );
   const usage = await client.readResource({ uri: "codex://usage" });
   assert(
     usage.contents[0].text.includes("Use codex_followup when Claude already has a session_id"),
