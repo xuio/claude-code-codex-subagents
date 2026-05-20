@@ -495,6 +495,7 @@ export class CodexSessionManager {
   ): Promise<{
     session?: CodexSessionSnapshot;
     turn?: CodexSessionTurnSnapshot;
+    result?: AgentRunResult;
     completed?: boolean;
     timeoutReason?: SessionWaitTimeoutReason;
     error?: string;
@@ -520,9 +521,11 @@ export class CodexSessionManager {
       const turn = turnId ? this.findTurn(session, turnId) : undefined;
       const completed = turn ? terminal(turn.status) : !session.controller && session.queuedTurns.length === 0;
       if (completed) {
+        const result = turn ? turn.result : session.lastResult;
         return {
           session: snapshot(session),
           turn: turn ? turnSnapshot(turn) : undefined,
+          result,
           completed: true,
         };
       }
@@ -562,6 +565,7 @@ export class CodexSessionManager {
     return {
       session: snapshot(session),
       turn: turn ? turnSnapshot(turn) : undefined,
+      result: turn ? turn.result : session.lastResult,
       completed: false,
       timeoutReason: "wait_timeout",
     };
@@ -969,6 +973,7 @@ export class CodexSessionManager {
   ): void {
     session.turns += 1;
     session.lastResult = result;
+    session.partial = undefined;
     session.codexThreadId = result.eventSummary.threadId ?? session.codexThreadId;
     session.projectDir = result.cwd;
     session.cwd = result.cwd;

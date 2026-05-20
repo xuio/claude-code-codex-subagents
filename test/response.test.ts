@@ -132,4 +132,20 @@ describe("MCP response compaction", () => {
     expect((compact.recentTurns as unknown[])).toHaveLength(20);
     expect(JSON.stringify(compact).length).toBeLessThan(60_000);
   });
+
+  it("reports idle instead of active when a session has no running turn", () => {
+    const compact = compactSessionSnapshotForMcp({
+      id: "session-idle",
+      status: "active",
+      active: false,
+    } as {
+      id: string;
+      status: string;
+      active: boolean;
+      lastResult?: unknown;
+      partial?: unknown;
+    });
+
+    expect(compact.status).toBe("idle");
+  });
 });

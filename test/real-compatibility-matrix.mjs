@@ -68,7 +68,13 @@ async function checkContract(codexBin) {
       await access(path.join(out, name));
     }
     const turnSteer = JSON.parse(await readFile(path.join(out, "v2/TurnSteerParams.json"), "utf8"));
+    const turnStart = JSON.parse(await readFile(path.join(out, "v2/TurnStartParams.json"), "utf8"));
     const threadResume = JSON.parse(await readFile(path.join(out, "v2/ThreadResumeParams.json"), "utf8"));
+    assert(
+      turnStart.properties?.outputSchema,
+      "turn/start schema lost outputSchema",
+      { codexBin, properties: Object.keys(turnStart.properties ?? {}) },
+    );
     assert(
       threadResume.required?.includes("threadId"),
       "thread/resume schema lost threadId",

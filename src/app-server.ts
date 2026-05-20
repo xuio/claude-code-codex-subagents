@@ -427,10 +427,11 @@ export class CodexAppServerSession {
     let timeoutReason: AgentRunResult["timeoutReason"];
 
     const prompt = `${this.preparedSubagents.promptPrefix}${options.prompt}`;
+    const outputSchema = schemaForOutputContract(options.outputContract, options.outputSchema);
     this.acceptingStartNotifications = true;
     let turnResponse: { turn?: { id?: string } };
     try {
-      turnResponse = await this.request("turn/start", {
+      const turnStartParams: JsonObject = {
         threadId: this.threadId,
         input: [userText(prompt)],
         cwd: this.cwd,
@@ -440,7 +441,13 @@ export class CodexAppServerSession {
         serviceTier: options.serviceTier ?? null,
         effort: reasoningEffort,
         summary: reasoningSummary ?? null,
-      }, options.spawnTimeoutMs ?? 30_000) as { turn?: { id?: string } };
+      };
+      if (outputSchema) turnStartParams.outputSchema = outputSchema;
+      turnResponse = await this.request(
+        "turn/start",
+        turnStartParams,
+        options.spawnTimeoutMs ?? 30_000,
+      ) as { turn?: { id?: string } };
     } catch (error) {
       this.acceptingStartNotifications = false;
       this.pendingStartNotifications = [];
@@ -468,8 +475,7 @@ export class CodexAppServerSession {
     const finish = (status: AgentRunResult["status"], error?: string): AgentRunResult => {
       const final = truncate(redactSensitiveText(summary.lastAgentMessage ?? ""), maxOutputChars);
       const wantsStructuredOutput = Boolean(
-        schemaForOutputContract(options.outputContract, options.outputSchema) ||
-          (options.outputContract && options.outputContract !== "freeform"),
+        outputSchema || (options.outputContract && options.outputContract !== "freeform"),
       );
       const structured =
         wantsStructuredOutput
@@ -507,7 +513,7 @@ export class CodexAppServerSession {
         eventSummary: cloneSummary(summary),
         structuredOutput: structured.value === undefined ? undefined : redactJsonValue(structured.value),
         structuredOutputError: structured.error,
-        commandPreview: [this.codexBinary.path, "app-server", "--listen", "stdio://", "turn/start"],
+        commandPreview: [this.codexBinary.path, "app-server", "--listen", "stdio://"],
         timeoutReason,
         codexSubagents: {
           customAgents: this.preparedSubagents.names,
@@ -967,7 +973,7 @@ export class CodexAppServerSession {
       eventSummary: cloneSummary(active.summary),
       structuredOutput: structured.value === undefined ? undefined : redactJsonValue(structured.value),
       structuredOutputError: structured.error,
-      commandPreview: [this.codexBinary.path, "app-server", "--listen", "stdio://", "turn/start"],
+      commandPreview: [this.codexBinary.path, "app-server", "--listen", "stdio://"],
       timeoutReason: active.timeoutReason,
       codexSubagents: {
         customAgents: this.preparedSubagents.names,

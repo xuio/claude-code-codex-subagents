@@ -21207,14 +21207,14 @@ var reviewFindingsSchema = {
       items: {
         type: "object",
         additionalProperties: false,
-        required: ["severity", "title", "description"],
+        required: ["severity", "title", "description", "file", "line", "recommendation"],
         properties: {
           severity: { type: "string", enum: ["critical", "high", "medium", "low", "info"] },
           title: { type: "string" },
           description: { type: "string" },
-          file: { type: "string" },
-          line: { type: "integer" },
-          recommendation: { type: "string" }
+          file: { type: ["string", "null"] },
+          line: { type: ["integer", "null"] },
+          recommendation: { type: ["string", "null"] }
         }
       }
     }
@@ -21231,12 +21231,12 @@ var planSchema = {
       items: {
         type: "object",
         additionalProperties: false,
-        required: ["title", "description"],
+        required: ["title", "description", "status", "files"],
         properties: {
           title: { type: "string" },
           description: { type: "string" },
-          status: { type: "string" },
-          files: { type: "array", items: { type: "string" } }
+          status: { type: ["string", "null"] },
+          files: { type: ["array", "null"], items: { type: "string" } }
         }
       }
     }
@@ -21253,13 +21253,13 @@ var riskMatrixSchema = {
       items: {
         type: "object",
         additionalProperties: false,
-        required: ["risk", "likelihood", "impact", "mitigation"],
+        required: ["risk", "likelihood", "impact", "mitigation", "owner"],
         properties: {
           risk: { type: "string" },
           likelihood: { type: "string", enum: ["low", "medium", "high"] },
           impact: { type: "string", enum: ["low", "medium", "high"] },
           mitigation: { type: "string" },
-          owner: { type: "string" }
+          owner: { type: ["string", "null"] }
         }
       }
     }
@@ -21276,13 +21276,13 @@ var patchSuggestionsSchema = {
       items: {
         type: "object",
         additionalProperties: false,
-        required: ["file", "description"],
+        required: ["file", "description", "line", "suggested_change", "rationale"],
         properties: {
           file: { type: "string" },
-          line: { type: "integer" },
+          line: { type: ["integer", "null"] },
           description: { type: "string" },
-          suggested_change: { type: "string" },
-          rationale: { type: "string" }
+          suggested_change: { type: ["string", "null"] },
+          rationale: { type: ["string", "null"] }
         }
       }
     }
@@ -23601,13 +23601,16 @@ function compactSessionTurns(value) {
   return value.slice(0, 20).map(compactSessionTurn);
 }
 function compactSessionSnapshotForMcp(session) {
+  const sessionRecord = session;
+  const status = sessionRecord.status === "active" && sessionRecord.active === false ? "idle" : sessionRecord.status;
   return {
     ...session,
+    status,
     lastResult: compactRunValue(session.lastResult),
     partial: isPartial(session.partial) ? compactPartialForMcp(session.partial) : compactUnknown(session.partial, 2e3),
-    activeTurn: compactSessionTurn(session.activeTurn),
-    queuedTurns: compactSessionTurns(session.queuedTurns),
-    recentTurns: compactSessionTurns(session.recentTurns)
+    activeTurn: compactSessionTurn(sessionRecord.activeTurn),
+    queuedTurns: compactSessionTurns(sessionRecord.queuedTurns),
+    recentTurns: compactSessionTurns(sessionRecord.recentTurns)
   };
 }
 function compactRunValue(value) {
@@ -23964,10 +23967,11 @@ var CodexAppServerSession = class _CodexAppServerSession {
     let timedOut = false;
     let timeoutReason;
     const prompt = `${this.preparedSubagents.promptPrefix}${options.prompt}`;
+    const outputSchema = schemaForOutputContract(options.outputContract, options.outputSchema);
     this.acceptingStartNotifications = true;
     let turnResponse;
     try {
-      turnResponse = await this.request("turn/start", {
+      const turnStartParams = {
         threadId: this.threadId,
         input: [userText(prompt)],
         cwd: this.cwd,
@@ -23977,7 +23981,13 @@ var CodexAppServerSession = class _CodexAppServerSession {
         serviceTier: options.serviceTier ?? null,
         effort: reasoningEffort,
         summary: reasoningSummary ?? null
-      }, options.spawnTimeoutMs ?? 3e4);
+      };
+      if (outputSchema) turnStartParams.outputSchema = outputSchema;
+      turnResponse = await this.request(
+        "turn/start",
+        turnStartParams,
+        options.spawnTimeoutMs ?? 3e4
+      );
     } catch (error2) {
       this.acceptingStartNotifications = false;
       this.pendingStartNotifications = [];
@@ -24005,7 +24015,7 @@ var CodexAppServerSession = class _CodexAppServerSession {
     const finish = (status, error2) => {
       const final = truncate2(redactSensitiveText(summary.lastAgentMessage ?? ""), maxOutputChars);
       const wantsStructuredOutput = Boolean(
-        schemaForOutputContract(options.outputContract, options.outputSchema) || options.outputContract && options.outputContract !== "freeform"
+        outputSchema || options.outputContract && options.outputContract !== "freeform"
       );
       const structured = wantsStructuredOutput ? parseStructuredOutput(summary.lastAgentMessage ?? "") : { value: void 0, error: void 0 };
       const resultStatus = status === "completed" && structured.error ? "failed" : status;
@@ -24040,7 +24050,7 @@ var CodexAppServerSession = class _CodexAppServerSession {
         eventSummary: cloneSummary(summary),
         structuredOutput: structured.value === void 0 ? void 0 : redactJsonValue(structured.value),
         structuredOutputError: structured.error,
-        commandPreview: [this.codexBinary.path, "app-server", "--listen", "stdio://", "turn/start"],
+        commandPreview: [this.codexBinary.path, "app-server", "--listen", "stdio://"],
         timeoutReason,
         codexSubagents: {
           customAgents: this.preparedSubagents.names,
@@ -24459,7 +24469,7 @@ var CodexAppServerSession = class _CodexAppServerSession {
       eventSummary: cloneSummary(active.summary),
       structuredOutput: structured.value === void 0 ? void 0 : redactJsonValue(structured.value),
       structuredOutputError: structured.error,
-      commandPreview: [this.codexBinary.path, "app-server", "--listen", "stdio://", "turn/start"],
+      commandPreview: [this.codexBinary.path, "app-server", "--listen", "stdio://"],
       timeoutReason: active.timeoutReason,
       codexSubagents: {
         customAgents: this.preparedSubagents.names,
@@ -24955,9 +24965,11 @@ var CodexSessionManager = class {
       const turn2 = turnId ? this.findTurn(session, turnId) : void 0;
       const completed = turn2 ? terminal(turn2.status) : !session.controller && session.queuedTurns.length === 0;
       if (completed) {
+        const result = turn2 ? turn2.result : session.lastResult;
         return {
           session: snapshot2(session),
           turn: turn2 ? turnSnapshot(turn2) : void 0,
+          result,
           completed: true
         };
       }
@@ -24995,6 +25007,7 @@ var CodexSessionManager = class {
     return {
       session: snapshot2(session),
       turn: turn ? turnSnapshot(turn) : void 0,
+      result: turn ? turn.result : session.lastResult,
       completed: false,
       timeoutReason: "wait_timeout"
     };
@@ -25354,6 +25367,7 @@ var CodexSessionManager = class {
   completeTurn(session, turn, result) {
     session.turns += 1;
     session.lastResult = result;
+    session.partial = void 0;
     session.codexThreadId = result.eventSummary.threadId ?? session.codexThreadId;
     session.projectDir = result.cwd;
     session.cwd = result.cwd;
@@ -25872,6 +25886,13 @@ function stringifyResultValue(value, fallback = "") {
     return String(value);
   }
 }
+function summarizeResultValue(value, fallbackText, fallback) {
+  if (value && typeof value === "object" && !Array.isArray(value)) {
+    const summary = value.summary;
+    if (typeof summary === "string" && summary.trim()) return firstUsefulLine(summary, fallback);
+  }
+  return firstUsefulLine(stringifyResultValue(value, fallbackText), fallback);
+}
 function suggestedActionForAgent(result, recovery) {
   if (recovery?.recommendedAction) return recovery.recommendedAction;
   if (result.ok) return "Use the result directly, or ask a follow-up Codex task only if more independent analysis is needed.";
@@ -25887,12 +25908,16 @@ function nativeTextResult(value, isError = false) {
 }
 function nativeErrorPayload(error2, context = "tool_call") {
   const recovery = recoveryForError(error2, context);
+  const message = redactSensitiveText(error2 instanceof Error ? error2.message : String(error2));
+  const result = recovery.recommendedAction ? `${message}
+
+Next: ${recovery.recommendedAction}` : message;
   return {
     ok: false,
-    summary: "Codex task failed.",
-    result: "",
+    summary: `Codex task failed: ${firstUsefulLine(message, "unknown error")}`,
+    result,
     error: {
-      message: redactSensitiveText(error2 instanceof Error ? error2.message : String(error2)),
+      message,
       recoverable: recovery.recoverable,
       kind: recovery.reason,
       retry_after_ms: recovery.retryAfterMs
@@ -25914,7 +25939,8 @@ function diagnosticsForAgent(agent) {
     artifact_paths: agent.outputArtifacts,
     event_summary: agent.eventSummary,
     stderr_tail: agent.stderr || void 0,
-    stdout_tail: agent.stdoutTail || void 0
+    stdout_tail: agent.stdoutTail || void 0,
+    structured_output_error: agent.structuredOutputError || void 0
   };
 }
 function nativeAgentPayload(result, context) {
@@ -25922,18 +25948,22 @@ function nativeAgentPayload(result, context) {
   const recovery = recoveryForAgentResult(result);
   const resultValue = agent.structuredOutput ?? agent.finalMessage;
   const answer = stringifyResultValue(resultValue, agent.finalMessage);
+  const structuredOutputError = typeof agent.structuredOutputError === "string" ? agent.structuredOutputError : void 0;
+  const visibleAnswer = !agent.ok && structuredOutputError ? `${answer}
+
+Structured output parse failed: ${structuredOutputError}` : answer;
   const sessionId = context.session && typeof context.session === "object" ? context.session.id : void 0;
   return {
     ok: agent.ok,
     status: agent.status,
-    summary: firstUsefulLine(answer, `Codex task ${agent.status}`),
-    result: answer,
+    summary: summarizeResultValue(resultValue, visibleAnswer, `Codex task ${agent.status}`),
+    result: visibleAnswer,
     session_id: sessionId,
     turn: context.turn,
     structured: agent.structuredOutput,
     hint: recovery?.recommendedAction ?? suggestedActionForAgent(agent, recovery),
     error: recovery ? {
-      message: agent.eventSummary.errors[0] ?? agent.stderr ?? `Codex task ${agent.status}`,
+      message: structuredOutputError ? `Structured output parse failed: ${structuredOutputError}` : agent.eventSummary.errors[0] ?? agent.stderr ?? `Codex task ${agent.status}`,
       recoverable: recovery.recoverable,
       kind: recovery.reason,
       retry_after_ms: recovery.retryAfterMs
@@ -25954,7 +25984,7 @@ function nativeTaskGroupResponse(runs) {
         name: agent.name ?? run.task.name ?? run.task.description ?? `codex-task-${index + 1}`,
         ok: agent.ok,
         status: agent.status,
-        summary: firstUsefulLine(answer, `Codex task ${agent.status}`),
+        summary: summarizeResultValue(agent.structuredOutput ?? agent.finalMessage, answer, `Codex task ${agent.status}`),
         result: answer,
         session_id: run.session?.id,
         structured: agent.structuredOutput,
@@ -26957,11 +26987,10 @@ registerTool(
           }
           const compactSession2 = compactSessionSnapshotForMcp(waited.session);
           const recovery = recoveryForWait("codex_session", waited.timeoutReason);
-          const lastResult = compactSession2.lastResult;
-          const resultText = lastResult && typeof lastResult === "object" ? stringifyResultValue(
-            lastResult.structuredOutput ?? lastResult.finalMessage,
-            lastResult.finalMessage ?? ""
-          ) : "";
+          const waitResult = waited.result ? compactAgentResultForMcp(waited.result) : compactSession2.lastResult;
+          const waitValue = waitResult && typeof waitResult === "object" ? waitResult.structuredOutput ?? waitResult.finalMessage : void 0;
+          const waitFallback = waitResult && typeof waitResult === "object" ? waitResult.finalMessage ?? "" : "";
+          const resultText = waitResult && typeof waitResult === "object" ? stringifyResultValue(waitValue, waitFallback) : "";
           const completed = Boolean(waited.completed);
           return nativeTextResult(
             {
@@ -26969,7 +26998,7 @@ registerTool(
               status: completed ? "completed" : "running",
               completed,
               timeoutReason: waited.timeoutReason,
-              summary: completed ? "Codex session is ready." : waited.timeoutReason === "wait_timeout" ? "Codex session is still running." : "Codex session wait was cancelled.",
+              summary: completed ? summarizeResultValue(waitValue, resultText, "Codex session is ready.") : waited.timeoutReason === "wait_timeout" ? "Codex session is still running." : "Codex session wait was cancelled.",
               result: resultText || (completed ? "Codex session is idle." : "Codex session is still running."),
               session_id: args.session_id,
               turn: waited.turn,

@@ -165,14 +165,26 @@ function compactSessionTurns(value: unknown): unknown {
 }
 
 export function compactSessionSnapshotForMcp<T extends { lastResult?: unknown; partial?: unknown }>(session: T): T {
+  const sessionRecord = session as T & {
+    active?: boolean;
+    status?: unknown;
+    activeTurn?: unknown;
+    queuedTurns?: unknown;
+    recentTurns?: unknown;
+  };
+  const status =
+    sessionRecord.status === "active" && sessionRecord.active === false
+      ? "idle"
+      : sessionRecord.status;
   return {
     ...session,
+    status,
     lastResult: compactRunValue(session.lastResult),
     partial: isPartial(session.partial) ? compactPartialForMcp(session.partial) : compactUnknown(session.partial, 2_000),
-    activeTurn: compactSessionTurn((session as { activeTurn?: unknown }).activeTurn),
-    queuedTurns: compactSessionTurns((session as { queuedTurns?: unknown }).queuedTurns),
-    recentTurns: compactSessionTurns((session as { recentTurns?: unknown }).recentTurns),
-  };
+    activeTurn: compactSessionTurn(sessionRecord.activeTurn),
+    queuedTurns: compactSessionTurns(sessionRecord.queuedTurns),
+    recentTurns: compactSessionTurns(sessionRecord.recentTurns),
+  } as T;
 }
 
 export function compactRunValue(value: unknown): unknown {

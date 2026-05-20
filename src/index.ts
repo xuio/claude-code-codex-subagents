@@ -569,6 +569,14 @@ function stringifyResultValue(value: unknown, fallback = ""): string {
   }
 }
 
+function summarizeResultValue(value: unknown, fallbackText: string, fallback: string): string {
+  if (value && typeof value === "object" && !Array.isArray(value)) {
+    const summary = (value as { summary?: unknown }).summary;
+    if (typeof summary === "string" && summary.trim()) return firstUsefulLine(summary, fallback);
+  }
+  return firstUsefulLine(stringifyResultValue(value, fallbackText), fallback);
+}
+
 function suggestedActionForAgent(result: { ok: boolean; status: string }, recovery?: { recommendedAction?: string }): string {
   if (recovery?.recommendedAction) return recovery.recommendedAction;
   if (result.ok) return "Use the result directly, or ask a follow-up Codex task only if more independent analysis is needed.";
@@ -591,12 +599,16 @@ function nativeTextResult(value: Record<string, unknown>, isError = false): Call
 
 function nativeErrorPayload(error: unknown, context = "tool_call"): Record<string, unknown> {
   const recovery = recoveryForError(error, context);
+  const message = redactSensitiveText(error instanceof Error ? error.message : String(error));
+  const result = recovery.recommendedAction
+    ? `${message}\n\nNext: ${recovery.recommendedAction}`
+    : message;
   return {
     ok: false,
-    summary: "Codex task failed.",
-    result: "",
+    summary: `Codex task failed: ${firstUsefulLine(message, "unknown error")}`,
+    result,
     error: {
-      message: redactSensitiveText(error instanceof Error ? error.message : String(error)),
+      message,
       recoverable: recovery.recoverable,
       kind: recovery.reason,
       retry_after_ms: recovery.retryAfterMs,
@@ -621,6 +633,7 @@ function diagnosticsForAgent(agent: ReturnType<typeof compactAgentResultForMcp>)
     event_summary: agent.eventSummary,
     stderr_tail: agent.stderr || undefined,
     stdout_tail: agent.stdoutTail || undefined,
+    structured_output_error: agent.structuredOutputError || undefined,
   };
 }
 
@@ -638,19 +651,26 @@ function nativeAgentPayload(
   const recovery = recoveryForAgentResult(result);
   const resultValue = agent.structuredOutput ?? agent.finalMessage;
   const answer = stringifyResultValue(resultValue, agent.finalMessage);
+  const structuredOutputError = typeof agent.structuredOutputError === "string" ? agent.structuredOutputError : undefined;
+  const visibleAnswer =
+    !agent.ok && structuredOutputError
+      ? `${answer}\n\nStructured output parse failed: ${structuredOutputError}`
+      : answer;
   const sessionId = context.session && typeof context.session === "object" ? (context.session as { id?: string }).id : undefined;
   return {
     ok: agent.ok,
     status: agent.status,
-    summary: firstUsefulLine(answer, `Codex task ${agent.status}`),
-    result: answer,
+    summary: summarizeResultValue(resultValue, visibleAnswer, `Codex task ${agent.status}`),
+    result: visibleAnswer,
     session_id: sessionId,
     turn: context.turn,
     structured: agent.structuredOutput,
     hint: recovery?.recommendedAction ?? suggestedActionForAgent(agent, recovery),
     error: recovery
       ? {
-          message: agent.eventSummary.errors[0] ?? agent.stderr ?? `Codex task ${agent.status}`,
+          message: structuredOutputError
+            ? `Structured output parse failed: ${structuredOutputError}`
+            : agent.eventSummary.errors[0] ?? agent.stderr ?? `Codex task ${agent.status}`,
           recoverable: recovery.recoverable,
           kind: recovery.reason,
           retry_after_ms: recovery.retryAfterMs,
@@ -688,7 +708,7 @@ function nativeParallelResponse(
       name: agent.name ?? task.name ?? `codex-task-${index + 1}`,
       ok: agent.ok,
       status: agent.status,
-      summary: firstUsefulLine(answer, `Codex task ${agent.status}`),
+      summary: summarizeResultValue(agent.structuredOutput ?? agent.finalMessage, answer, `Codex task ${agent.status}`),
       result: answer,
       session_id: task.session_id,
       structured: agent.structuredOutput,
@@ -735,7 +755,7 @@ function nativeTaskGroupResponse(runs: NativeTaskGroupRun[]): CallToolResult {
         name: agent.name ?? run.task.name ?? run.task.description ?? `codex-task-${index + 1}`,
         ok: agent.ok,
         status: agent.status,
-        summary: firstUsefulLine(answer, `Codex task ${agent.status}`),
+        summary: summarizeResultValue(agent.structuredOutput ?? agent.finalMessage, answer, `Codex task ${agent.status}`),
         result: answer,
         session_id: run.session?.id,
         structured: agent.structuredOutput,
@@ -2074,14 +2094,21 @@ registerTool(
           }
           const compactSession = compactSessionSnapshotForMcp(waited.session);
           const recovery = recoveryForWait("codex_session", waited.timeoutReason);
-          const lastResult = (compactSession as { lastResult?: unknown }).lastResult;
+          const waitResult = waited.result
+            ? compactAgentResultForMcp(waited.result)
+            : (compactSession as { lastResult?: unknown }).lastResult;
+          const waitValue =
+            waitResult && typeof waitResult === "object"
+              ? (waitResult as { structuredOutput?: unknown; finalMessage?: string }).structuredOutput ??
+                (waitResult as { finalMessage?: string }).finalMessage
+              : undefined;
+          const waitFallback =
+            waitResult && typeof waitResult === "object"
+              ? (waitResult as { finalMessage?: string }).finalMessage ?? ""
+              : "";
           const resultText =
-            lastResult && typeof lastResult === "object"
-              ? stringifyResultValue(
-                  (lastResult as { structuredOutput?: unknown; finalMessage?: string }).structuredOutput ??
-                    (lastResult as { finalMessage?: string }).finalMessage,
-                  (lastResult as { finalMessage?: string }).finalMessage ?? "",
-                )
+            waitResult && typeof waitResult === "object"
+              ? stringifyResultValue(waitValue, waitFallback)
               : "";
           const completed = Boolean(waited.completed);
           return nativeTextResult(
@@ -2091,7 +2118,7 @@ registerTool(
               completed,
               timeoutReason: waited.timeoutReason,
               summary: completed
-                ? "Codex session is ready."
+                ? summarizeResultValue(waitValue, resultText, "Codex session is ready.")
                 : waited.timeoutReason === "wait_timeout"
                   ? "Codex session is still running."
                   : "Codex session wait was cancelled.",

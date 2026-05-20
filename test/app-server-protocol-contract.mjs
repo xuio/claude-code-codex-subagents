@@ -60,6 +60,7 @@ try {
   assert(required(turnStart).has("input"), "turn/start must require input", turnStart.required);
   assert(turnStart.properties?.sandboxPolicy, "turn/start must keep sandboxPolicy override support");
   assert(turnStart.properties?.effort, "turn/start must keep effort override support");
+  assert(turnStart.properties?.outputSchema, "turn/start must keep structured output schema support");
 
   const threadResume = await readSchema(out, "v2/ThreadResumeParams.json");
   assert(required(threadResume).has("threadId"), "thread/resume must require threadId", threadResume.required);

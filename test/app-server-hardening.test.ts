@@ -99,17 +99,26 @@ describe("app-server hardening", () => {
   it("parses requested structured output for app-server sessions", async () => {
     const manager = new CodexSessionManager();
     const projectDir = await tempDir("codex-subagents-app-structured-project-");
+    const recordDir = await tempDir("codex-subagents-app-structured-record-");
 
     const valid = await manager.start({
       prompt: "JSON_FINAL=review_findings",
       projectDir,
       codexBin: fakeCodex,
       outputContract: "review_findings",
+      env: {
+        FAKE_CODEX_RECORD_DIR: recordDir,
+      },
     });
     expect(valid.result.ok).toBe(true);
     expect((valid.result.structuredOutput as { findings?: Array<{ title?: string }> })?.findings?.[0]?.title).toBe(
       "Fake finding",
     );
+    expect(valid.result.commandPreview).toEqual([fakeCodex, "app-server", "--listen", "stdio://"]);
+
+    const calls = await recordedCalls(recordDir);
+    const turnStart = calls.find((call) => call.method === "turn/start");
+    expect((turnStart?.outputSchema as { required?: string[] } | undefined)?.required).toContain("summary");
 
     const invalid = await manager.start({
       prompt: "not structured json",

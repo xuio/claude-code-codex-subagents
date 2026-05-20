@@ -126,6 +126,45 @@ describe("CodexSessionManager", () => {
     manager.cancel(session.id);
   });
 
+  it("clears stale partial snapshots after turns complete", async () => {
+    const manager = new CodexSessionManager();
+    const projectDir = await tempDir("codex-subagents-session-project-");
+
+    const started = await manager.start({
+      prompt: "session partial cleanup DELAY_MS=20",
+      projectDir,
+      codexBin: fakeCodex,
+    });
+
+    expect(started.result.ok).toBe(true);
+    expect(started.session.active).toBe(false);
+    expect(started.session.partial).toBeUndefined();
+    manager.cancel(started.session.id);
+  });
+
+  it("returns the requested turn result when waiting by turn id", async () => {
+    const manager = new CodexSessionManager();
+    const projectDir = await tempDir("codex-subagents-session-project-");
+
+    const started = await manager.start({
+      prompt: "session wait first A_DONE",
+      projectDir,
+      codexBin: fakeCodex,
+    });
+    const firstTurnId = started.session.recentTurns.at(-1)?.id;
+    expect(firstTurnId).toBeTruthy();
+
+    const followUp = await manager.send(started.session.id, "session wait second B_DONE");
+    expect(followUp.result?.finalMessage).toContain("B_DONE");
+
+    const waited = await manager.wait(started.session.id, 2_000, firstTurnId);
+    expect(waited.completed).toBe(true);
+    expect(waited.turn?.id).toBe(firstTurnId);
+    expect(waited.result?.finalMessage).toContain("A_DONE");
+    expect(waited.session?.lastResult?.finalMessage).toContain("B_DONE");
+    manager.cancel(started.session.id);
+  });
+
   it("does not carry full-access bypass into later exec session prompts", async () => {
     process.env.CODEX_SUBAGENTS_SESSION_PROTOCOL = "exec";
     const manager = new CodexSessionManager();

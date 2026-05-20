@@ -118,6 +118,18 @@ try {
     usage.contents[0].text,
   );
 
+  const missingSession = await callTool("codex_followup", {
+    session_id: "session-does-not-exist-smoke",
+    mode: "wait",
+    wait_timeout_ms: 10,
+  });
+  assert(missingSession.isError, "missing session should return an MCP error", missingSession);
+  assert(
+    missingSession.content?.[0]?.text?.includes("Unknown session_id: session-does-not-exist-smoke"),
+    "native error text should include the underlying failure",
+    missingSession,
+  );
+
   const single = await callTool("codex_task", {
     description: "Single smoke",
     prompt: "single smoke RUN_COMMAND_EVENT",
@@ -135,6 +147,24 @@ try {
     single.structuredContent,
   );
 
+  const structured = await callTool("codex_task", {
+    description: "Structured smoke",
+    prompt: "structured smoke JSON_FINAL=review_findings",
+    project_dir: projectDir,
+    advanced: { output_contract: "review_findings" },
+  });
+  assert(structured.structuredContent?.ok, "app-server output_contract should produce ok structured output", structured.structuredContent);
+  assert(
+    structured.structuredContent?.summary === "fake structured review",
+    "structured output should summarize from the structured summary field",
+    structured.structuredContent,
+  );
+  assert(
+    structured.structuredContent?.structured?.findings?.[0]?.title === "Fake finding",
+    "app-server output_contract should parse structured output",
+    structured.structuredContent,
+  );
+
   const followup = await callTool("codex_followup", {
     session_id: single.structuredContent.session_id,
     prompt: "single follow-up smoke",
@@ -145,6 +175,19 @@ try {
       followup.structuredContent?.session_id === single.structuredContent.session_id,
     "codex_followup should preserve session context",
     followup.structuredContent,
+  );
+  const waitedFirstTurn = await callTool("codex_followup", {
+    session_id: single.structuredContent.session_id,
+    mode: "wait",
+    turn_id: single.structuredContent.turn?.id,
+    wait_timeout_ms: 5_000,
+  });
+  assert(waitedFirstTurn.structuredContent?.completed === true, "turn-specific wait should complete", waitedFirstTurn.structuredContent);
+  assert(
+    waitedFirstTurn.structuredContent?.result?.includes("single smoke RUN_COMMAND_EVENT") &&
+      !waitedFirstTurn.structuredContent?.result?.includes("single follow-up smoke"),
+    "turn-specific wait should return the requested turn result, not session.lastResult",
+    waitedFirstTurn.structuredContent,
   );
 
   const background = await callTool("codex_task", {
@@ -173,6 +216,16 @@ try {
     wait_timeout_ms: 5_000,
   });
   assert(waited.structuredContent?.completed === true, "codex_followup mode wait should collect completion", waited.structuredContent);
+  assert(
+    waited.structuredContent?.diagnostics?.session?.partial === undefined,
+    "completed session diagnostics should not expose stale running partial state",
+    waited.structuredContent,
+  );
+  assert(
+    waited.structuredContent?.diagnostics?.session?.status === "idle",
+    "completed session diagnostics should use idle status when no turn is running",
+    waited.structuredContent,
+  );
 
   const group = await callTool("codex_task_group", {
     tasks: [
