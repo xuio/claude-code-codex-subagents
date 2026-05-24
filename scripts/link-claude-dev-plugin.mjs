@@ -1,4 +1,4 @@
-import { lstat, mkdir, readFile, realpath, rename, rm, symlink, writeFile } from "node:fs/promises";
+import { copyFile, lstat, mkdir, readFile, realpath, rename, rm, symlink, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -11,7 +11,12 @@ const manifest = JSON.parse(await readFile(manifestPath, "utf8"));
 const marketplace = "codex-subagents-local";
 const pluginName = manifest.name;
 const version = manifest.version;
+const backupStamp = new Date().toISOString().replace(/[-:TZ.]/g, "").slice(0, 14);
 const installedPluginsPath = path.join(claudeHome, "plugins", "installed_plugins.json");
+const backupRoot = path.join(claudeHome, "backups", `codex-subagents-legacy-${backupStamp}`);
+const desktopConfigPath =
+  process.env.CLAUDE_DESKTOP_CONFIG ??
+  path.join(os.homedir(), "Library", "Application Support", "Claude", "claude_desktop_config.json");
 const marketplacePluginPath = path.join(
   claudeHome,
   "plugins",
@@ -48,8 +53,7 @@ async function resolvedPath(targetPath) {
 }
 
 function backupPath(targetPath) {
-  const stamp = new Date().toISOString().replace(/[-:TZ.]/g, "").slice(0, 14);
-  return `${targetPath}.backup-${stamp}`;
+  return `${targetPath}.backup-${backupStamp}`;
 }
 
 async function replaceWithSymlink(linkPath, targetPath) {
@@ -112,12 +116,70 @@ async function ensureInstalledPluginsEntry() {
   return entry;
 }
 
+function legacyBackupName(targetPath) {
+  return targetPath
+    .slice(claudeHome.length)
+    .replace(/^[/\\]+/, "")
+    .replace(/[/:\\]+/g, "__");
+}
+
+async function moveLegacyPath(targetPath) {
+  assertSafePath(targetPath);
+  if (!(await pathExists(targetPath))) return false;
+  if (dryRun) return true;
+
+  await mkdir(backupRoot, { recursive: true });
+  await rename(targetPath, path.join(backupRoot, `${legacyBackupName(targetPath)}.old`));
+  return true;
+}
+
+async function removeLegacyClaudeDesktopServer() {
+  if (!(await pathExists(desktopConfigPath))) return false;
+
+  const data = JSON.parse(await readFile(desktopConfigPath, "utf8"));
+  const serverConfig = data.mcpServers?.[pluginName];
+  if (!serverConfig) return false;
+
+  const command = typeof serverConfig.command === "string" ? serverConfig.command : "";
+  const isLegacyCodexSubagents =
+    command === path.join(root, "dist", "index.js") ||
+    command.endsWith("/claude-code-codex-subagents/dist/index.js") ||
+    command.includes("codex-subagents");
+  if (!isLegacyCodexSubagents) return false;
+
+  if (!dryRun) {
+    await mkdir(backupRoot, { recursive: true });
+    await copyFile(desktopConfigPath, path.join(backupRoot, "claude_desktop_config.json.before"));
+    delete data.mcpServers[pluginName];
+    await writeFile(desktopConfigPath, `${JSON.stringify(data, null, 2)}\n`);
+  }
+  return true;
+}
+
+async function cleanupLegacyInstallSurfaces() {
+  const removed = [];
+  for (const targetPath of [
+    path.join(claudeHome, "plugins", pluginName),
+    path.join(claudeHome, "commands", `${pluginName}.md`),
+    path.join(claudeHome, "plugins", "data", `${pluginName}-inline`),
+  ]) {
+    if (await moveLegacyPath(targetPath)) removed.push(targetPath);
+  }
+  if (await removeLegacyClaudeDesktopServer()) removed.push(desktopConfigPath);
+  return removed;
+}
+
 const marketplaceLink = await replaceWithSymlink(marketplacePluginPath, root);
 const cacheLink = await replaceWithSymlink(installPath, root);
 const entry = await ensureInstalledPluginsEntry();
+const removedLegacyPaths = await cleanupLegacyInstallSurfaces();
 
 console.log(`Marketplace plugin path: ${marketplaceLink.path} -> ${root}`);
 console.log(`Installed plugin path: ${cacheLink.path} -> ${root}`);
 console.log(`Installed plugin entry: ${entry.installPath}`);
+if (removedLegacyPaths.length > 0) {
+  console.log(`Removed legacy Codex subagents install surfaces: ${removedLegacyPaths.join(", ")}`);
+  if (!dryRun) console.log(`Legacy backups: ${backupRoot}`);
+}
 if (dryRun) console.log("Dry run only; no Claude plugin files were modified.");
 console.log("Claude Code CLI and Claude Desktop CLI share this ~/.claude plugin install.");

@@ -28,7 +28,7 @@ Prefer the native Claude-like tools for normal use:
 - For independent tasks that can run concurrently, call `codex_task_group` with one task object per workstream. Split by ownership such as API flow, tests, security, performance, UI, docs, or migration risk. Keep tasks concrete and bounded, and set `max_parallel` to the smaller of the useful agent count and `4` unless the user asks for more.
 - For multi-turn Codex work, call `codex_task` for the initial prompt and preserve the returned `session_id`. Use `codex_followup` with `mode: "queue"` for ordinary follow-ups, `mode: "wait"` when Claude needs completion, and `mode: "steer"` for active redirection.
 - Use `codex_followup` mode `steer` only when the user wants to redirect active work now. It delivers real live steering with Codex `turn/steer` when app-server support is active. Set `interrupt_current: true` only when the active turn should be cancelled and redirected.
-- If unsure which path fits, read `codex://usage` before delegating.
+- If unsure which path fits, call `codex_task` or `codex_followup` first; use MCP resources only for diagnostics or when a tool response explicitly says to inspect a resource.
 
 Legacy tools such as `ask_codex`, `run_agent`, and old session names are hidden by default. They are exposed only when `CODEX_SUBAGENTS_ENABLE_LEGACY_TOOLS=1` is set for older clients. Tool-callable diagnostics are hidden unless `CODEX_SUBAGENTS_ENABLE_DEBUG_TOOLS=1`; use resources `codex://status`, `codex://doctor`, and `codex://usage` for normal diagnostics.
 
@@ -55,6 +55,8 @@ Use `advanced.mcp_config_policy: "explicit"` with `advanced.codex_mcp_servers` w
 Do not use Codex for simple file reads, simple grep/search, or tiny local commands that Claude can do directly faster.
 
 Read `codex://doctor` or `codex://status` only when diagnosing installation, binary resolution, defaults, or after a failed Codex tool call. Normal delegation should start with `codex_task`, `codex_task_group`, or `codex_followup`.
+
+When using Claude's generic `ReadMcpResourceTool`, the server id for this plugin is `plugin:codex-subagents:codex-subagents`. Do not convert the tool prefix `mcp__plugin_codex-subagents_codex-subagents__...` into `plugin_codex-subagents_codex-subagents`; that underscore form is not a server id. Do not use a plain `codex-subagents` server id if Claude also lists the plugin server, because that indicates a stale direct MCP entry and session resources will not line up with plugin tool calls.
 
 Example `codex_task` arguments for a retained session:
 
