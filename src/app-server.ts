@@ -344,7 +344,6 @@ export class CodexAppServerSession {
             approvalPolicy: "never",
             sandbox: sandboxMode(options),
             config: appServerConfig(options, reasoningEffort),
-            excludeTurns: true,
           }, options.spawnTimeoutMs ?? 30_000) as { thread?: { id?: string }; cwd?: string }
         : await session.request("thread/start", {
             cwd,

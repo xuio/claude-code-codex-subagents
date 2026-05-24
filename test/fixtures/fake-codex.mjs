@@ -294,6 +294,13 @@ if (args[0] === "app-server") {
         send({ id, error: { code: -32000, message: "fake thread resume error" } });
         return;
       }
+      if (hasMode("THREAD_RESUME_EXCLUDE_TURNS_REQUIRES_EXPERIMENTAL") && params?.excludeTurns) {
+        send({
+          id,
+          error: { code: -32600, message: "thread/resume.excludeTurns requires experimentalApi capability" },
+        });
+        return;
+      }
       threadId = params?.threadId ?? threadId;
       recordCall({ protocol: "app-server", method, threadId, cwd: params?.cwd ?? process.cwd() });
       const sendResume = () => send({

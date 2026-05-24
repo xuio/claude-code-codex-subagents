@@ -24345,8 +24345,7 @@ var CodexAppServerSession = class _CodexAppServerSession {
         serviceTier: options.serviceTier ?? null,
         approvalPolicy: "never",
         sandbox: sandboxMode(options),
-        config: appServerConfig(options, reasoningEffort),
-        excludeTurns: true
+        config: appServerConfig(options, reasoningEffort)
       }, options.spawnTimeoutMs ?? 3e4) : await session.request("thread/start", {
         cwd,
         model,

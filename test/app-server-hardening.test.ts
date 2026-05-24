@@ -547,6 +547,39 @@ describe("app-server hardening", () => {
     }
   });
 
+  it("does not require experimental thread/resume fields for recovery", async () => {
+    const stateDir = await tempDir("codex-subagents-resume-stable-state-");
+    const stateFile = path.join(stateDir, "sessions.json");
+    const projectDir = await tempDir("codex-subagents-resume-stable-project-");
+    const recordDir = await tempDir("codex-subagents-resume-stable-record-");
+    const firstManager = new CodexSessionManager({ persist: true, stateFile });
+    const previousRecordDir = process.env.FAKE_CODEX_RECORD_DIR;
+    const previousMode = process.env.FAKE_CODEX_APP_SERVER_MODE;
+
+    try {
+      process.env.FAKE_CODEX_RECORD_DIR = recordDir;
+      const started = await firstManager.start({
+        prompt: "stable resume first",
+        projectDir,
+        codexBin: fakeCodex,
+      });
+
+      process.env.FAKE_CODEX_APP_SERVER_MODE = "THREAD_RESUME_EXCLUDE_TURNS_REQUIRES_EXPERIMENTAL";
+      const secondManager = new CodexSessionManager({ persist: true, stateFile });
+      const recovered = await secondManager.recover(started.session.id);
+      expect(recovered.recovered).toBe(true);
+
+      const calls = await recordedCalls(recordDir);
+      expect(calls.some((call) => call.method === "thread/resume" && call.threadId === started.session.codexThreadId)).toBe(true);
+      await Promise.all([firstManager.shutdown("test_cleanup"), secondManager.shutdown("test_cleanup")]);
+    } finally {
+      if (previousRecordDir === undefined) delete process.env.FAKE_CODEX_RECORD_DIR;
+      else process.env.FAKE_CODEX_RECORD_DIR = previousRecordDir;
+      if (previousMode === undefined) delete process.env.FAKE_CODEX_APP_SERVER_MODE;
+      else process.env.FAKE_CODEX_APP_SERVER_MODE = previousMode;
+    }
+  });
+
   it("persists recoverable sessions as active across MCP runtime shutdown", async () => {
     const stateDir = await tempDir("codex-subagents-shutdown-state-");
     const stateFile = path.join(stateDir, "sessions.json");
