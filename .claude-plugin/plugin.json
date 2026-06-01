@@ -1,12 +1,24 @@
 {
   "name": "codex-subagents",
   "version": "0.3.0",
-  "description": "Launch OpenAI Codex agents, Spark agents, parallel Codex subagents, and native follow-up sessions from Claude Code through a daemonless MCP server with read-only defaults and explicit full-access mode.",
+  "description": "Claude Code plugin for OpenAI Codex subagents, Codex Spark, parallel code review, adversarial review, and native follow-up sessions through a daemonless MCP server with read-only defaults and explicit full-access mode.",
   "author": {
     "name": "xuio"
   },
   "license": "MIT",
-  "keywords": ["codex", "subagents", "mcp", "parallel"],
+  "keywords": [
+    "claude-code",
+    "claude-code-plugin",
+    "codex",
+    "openai-codex",
+    "codex-spark",
+    "subagents",
+    "mcp",
+    "mcp-server",
+    "parallel",
+    "code-review",
+    "adversarial-review"
+  ],
   "mcpServers": "./.claude-plugin/mcp.json",
   "skills": "./skills"
 }

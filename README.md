@@ -4,27 +4,39 @@
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![Node >=20](https://img.shields.io/badge/node-%3E%3D20-339933.svg)](package.json)
 
-Run OpenAI Codex agents from Claude Code through a daemonless MCP plugin.
+**Claude Code plugin for OpenAI Codex subagents.** Run Codex, Codex Spark,
+parallel code-review agents, and long-running Codex sessions from Claude Code
+through a daemonless Model Context Protocol (MCP) server.
 
-`claude-code-codex-subagents` lets Claude Code ask Codex, an independent
-frontier model like Claude, for read-only reviews, parallel investigations, Spark
-checks, native follow-ups, live steering, and explicit full-access Codex work
-when the user asks for it. It is especially useful when Claude needs a more
-technical subagent for deep codebase work, server/deployment tasks, difficult
-debugging, or adversarial review.
+`claude-code-codex-subagents` lets Claude Code delegate to Codex, an independent
+frontier model like Claude, for read-only code reviews, adversarial reviews,
+parallel codebase investigations, server/deployment checks, difficult debugging,
+native follow-ups, live steering, and explicit full-access Codex work when the
+user asks for it. If you are looking for a Claude Code Codex plugin, an OpenAI
+Codex MCP server, or Codex subagents for Claude, this is the integration.
 
 ![Terminal demo of Claude launching parallel Codex reviewers](docs/assets/demo.svg)
 
 ## Why Use It?
 
-- **Native Claude Code workflow:** Claude gets a small Task-like MCP surface: `codex_task`, `codex_task_group`, `codex_followup`, and `codex_wait_any`.
-- **Frontier-model second opinion:** Codex gives Claude an independent technical reviewer for adversarial checks and hard engineering work.
+- **Native Claude Code plugin workflow:** Claude gets a small Task-like MCP surface: `codex_task`, `codex_task_group`, `codex_followup`, and `codex_wait_any`.
+- **OpenAI Codex second opinion:** Codex gives Claude an independent frontier-model reviewer for adversarial checks and hard engineering work.
 - **Read-only by default:** Codex starts with `--sandbox read-only` and non-interactive approvals.
-- **No daemon:** Claude launches the MCP server over stdio for the active session.
+- **Daemonless MCP server:** Claude launches the MCP server over stdio for the active session.
 - **Fast parallel review:** Claude can launch several independent Codex agents with bounded concurrency.
+- **Codex Spark support:** Claude can request quick focused Spark checks without remembering model slugs.
 - **Persistent sessions:** App-server sessions keep Codex context across prompts and support live steering.
 - **Codex desktop friendly:** The plugin prefers the Codex binary shipped inside `Codex.app` and creates normal Codex threads with task names for Desktop history.
 - **Debuggable:** Verbose JSONL logging, diagnostics bundles, progress events, per-session resources, and recovery hints are built in.
+
+## Best For
+
+- Claude Code users who want OpenAI Codex as a native-feeling subagent.
+- Independent adversarial review before merging high-risk code.
+- Parallel codebase analysis across API, tests, security, performance, docs, or deployment paths.
+- Long-running Codex sessions that preserve context across follow-up prompts.
+- Codex Spark side checks for fast focused technical passes.
+- Read-only-by-default delegation with explicit opt-in for full local Codex capabilities.
 
 ## Quick Start
 

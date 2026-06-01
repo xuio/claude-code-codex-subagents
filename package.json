@@ -1,7 +1,7 @@
 {
   "name": "claude-code-codex-subagents",
   "version": "0.3.0",
-  "description": "Claude Code plugin that launches OpenAI Codex agents through a daemonless stdio MCP server.",
+  "description": "Claude Code plugin for OpenAI Codex subagents, Codex Spark, parallel code review, and long-running Codex sessions through a daemonless MCP server.",
   "type": "module",
   "private": true,
   "author": "xuio",
@@ -52,10 +52,22 @@
     "test:claude-desktop": "node test/claude-desktop-cli.mjs"
   },
   "keywords": [
+    "claude",
     "claude-code",
+    "claude-code-plugin",
     "codex",
+    "openai",
+    "openai-codex",
+    "codex-cli",
+    "codex-spark",
     "mcp",
-    "subagents"
+    "mcp-server",
+    "model-context-protocol",
+    "subagents",
+    "ai-agents",
+    "code-review",
+    "adversarial-review",
+    "developer-tools"
   ],
   "license": "MIT",
   "dependencies": {
