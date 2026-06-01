@@ -4,6 +4,11 @@ import { errorForLog, logger } from "./logging.js";
 
 export type ToolExtra = RequestHandlerExtra<ServerRequest, ServerNotification>;
 
+function progressNotificationsEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
+  const raw = env.CODEX_SUBAGENTS_ENABLE_PROGRESS_NOTIFICATIONS?.trim().toLowerCase();
+  return ["1", "true", "yes", "on"].includes(raw ?? "");
+}
+
 function progressSendTimeoutMs(env: NodeJS.ProcessEnv = process.env): number {
   const parsed = Number(env.CODEX_SUBAGENTS_PROGRESS_SEND_TIMEOUT_MS);
   if (!Number.isFinite(parsed) || parsed <= 0) return 1_000;
@@ -31,9 +36,10 @@ function progressMinIntervalMs(env: NodeJS.ProcessEnv = process.env): number {
 
 export function createProgressReporter(
   extra: ToolExtra | undefined,
-  options: { sendTimeoutMs?: number; minIntervalMs?: number } = {},
+  options: { sendTimeoutMs?: number; minIntervalMs?: number; enabled?: boolean } = {},
 ) {
   const progressToken = extra?._meta?.progressToken;
+  const enabled = options.enabled ?? progressNotificationsEnabled();
   const sendTimeoutMs = options.sendTimeoutMs ?? progressSendTimeoutMs();
   const minIntervalMs = options.minIntervalMs ?? progressMinIntervalMs();
   let progress = 0;
@@ -50,7 +56,7 @@ export function createProgressReporter(
     | undefined;
 
   function queueSend(message: string, progressOptions: ProgressOptions = {}) {
-    if (progressToken === undefined || !extra) return;
+    if (!enabled || progressToken === undefined || !extra) return;
     pending = pending
       .catch(() => {})
       .then(async () => {
@@ -115,10 +121,11 @@ export function createProgressReporter(
   async function send(message: string, progressOptions: ProgressOptions = {}) {
     logger.rawDebug("mcp.progress", {
       hasProgressToken: progressToken !== undefined,
+      enabled,
       message,
       options: progressOptions,
     });
-    if (progressToken === undefined || !extra || disabled) return;
+    if (!enabled || progressToken === undefined || !extra || disabled) return;
 
     const elapsed = Date.now() - lastSentAt;
     if (progressOptions.force || minIntervalMs === 0 || lastSentAt === 0 || elapsed >= minIntervalMs) {
@@ -137,7 +144,7 @@ export function createProgressReporter(
   }
 
   async function flush() {
-    if (progressToken === undefined || !extra) return;
+    if (!enabled || progressToken === undefined || !extra) return;
     if (throttleTimer) {
       clearTimeout(throttleTimer);
       throttleTimer = undefined;

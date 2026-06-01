@@ -8,7 +8,7 @@ describe("progress reporter", () => {
         _meta: { progressToken: "p" },
         sendNotification: () => new Promise(() => {}),
       } as never,
-      { sendTimeoutMs: 5 },
+      { sendTimeoutMs: 5, enabled: true },
     );
 
     const started = Date.now();
@@ -27,7 +27,7 @@ describe("progress reporter", () => {
           events.push(message.params);
         },
       } as never,
-      { sendTimeoutMs: 50 },
+      { sendTimeoutMs: 50, enabled: true },
     );
 
     await reporter.send("one", { total: 2 });
@@ -48,7 +48,7 @@ describe("progress reporter", () => {
           events.push(message.params);
         },
       } as never,
-      { sendTimeoutMs: 50, minIntervalMs: 1_000 },
+      { sendTimeoutMs: 50, minIntervalMs: 1_000, enabled: true },
     );
 
     await reporter.send("first");
@@ -57,5 +57,30 @@ describe("progress reporter", () => {
     await reporter.flush();
 
     expect(events.map((event) => event.message)).toEqual(["first", "third"]);
+  });
+
+  it("suppresses MCP progress notifications by default", async () => {
+    const previous = process.env.CODEX_SUBAGENTS_ENABLE_PROGRESS_NOTIFICATIONS;
+    delete process.env.CODEX_SUBAGENTS_ENABLE_PROGRESS_NOTIFICATIONS;
+    const events: unknown[] = [];
+    try {
+      const reporter = createProgressReporter(
+        {
+          _meta: { progressToken: "p" },
+          sendNotification: async (message: unknown) => {
+            events.push(message);
+          },
+        } as never,
+        { sendTimeoutMs: 50 },
+      );
+
+      await reporter.send("hidden by default");
+      await reporter.flush();
+
+      expect(events).toEqual([]);
+    } finally {
+      if (previous === undefined) delete process.env.CODEX_SUBAGENTS_ENABLE_PROGRESS_NOTIFICATIONS;
+      else process.env.CODEX_SUBAGENTS_ENABLE_PROGRESS_NOTIFICATIONS = previous;
+    }
   });
 });

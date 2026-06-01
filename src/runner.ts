@@ -230,7 +230,14 @@ export function resolveRequestedModel(
   options: Pick<AgentRunOptions, "model" | "modelPreset">,
   env: NodeJS.ProcessEnv = process.env,
 ): string | undefined {
-  return options.model?.trim() || modelForPreset(options.modelPreset) || defaultModel(env);
+  return normalizeRequestedModel(options.model) || modelForPreset(options.modelPreset) || defaultModel(env);
+}
+
+export function normalizeRequestedModel(model: string | undefined): string | undefined {
+  const value = model?.trim();
+  if (!value) return undefined;
+  if (value === "gpt-5.5-codex") return "gpt-5.5";
+  return value;
 }
 
 export class RunValidationError extends Error {

@@ -360,6 +360,7 @@ servers should not be loaded for the run.
 | `CODEX_SUBAGENTS_LOG_FILE` | Optional JSONL log file path |
 | `CODEX_SUBAGENTS_LOG_FILE_MAX_BYTES` | Rotate the log file after this size |
 | `CODEX_SUBAGENTS_LOG_MAX_STRING_CHARS` | Maximum retained string payload per log field |
+| `CODEX_SUBAGENTS_ENABLE_PROGRESS_NOTIFICATIONS` | Set `1` to emit MCP progress notifications; disabled by default for Claude Code compatibility |
 | `CODEX_SUBAGENTS_PROGRESS_HEARTBEAT_MS` | Progress heartbeat interval |
 | `CODEX_SUBAGENTS_PROGRESS_MIN_INTERVAL_MS` | Minimum delay between progress notifications; rapid updates are coalesced |
 | `CODEX_SUBAGENTS_ENABLE_DEBUG_TOOLS` | Set `1` to expose tool-callable diagnostics |

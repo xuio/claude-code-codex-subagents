@@ -203,6 +203,25 @@ describe("app-server hardening", () => {
     manager.cancel(session.id);
   });
 
+  it("surfaces failed turn errors when Codex sends no final message", async () => {
+    const manager = new CodexSessionManager();
+    const projectDir = await tempDir("codex-subagents-app-failed-project-");
+
+    const { result, session } = await manager.start({
+      prompt: "APP_TURN_FAILED_NO_MESSAGE",
+      projectDir,
+      codexBin: fakeCodex,
+      timeoutMs: 500,
+    });
+
+    expect(result.ok).toBe(false);
+    expect(result.status).toBe("failed");
+    expect(result.finalMessage).toBe("");
+    expect(result.eventSummary.errors.join("\n")).toContain("fake failed");
+    expect(result.stderr).toContain("fake failed");
+    manager.cancel(session.id);
+  });
+
   it("resumes queued work on a fresh app-server after no-completion timeout", async () => {
     const manager = new CodexSessionManager();
     const projectDir = await tempDir("codex-subagents-app-timeout-resume-project-");

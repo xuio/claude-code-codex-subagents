@@ -114,6 +114,12 @@ if (args[0] === "app-server") {
     if (!activeTurn) return;
     const turnId = activeTurn;
     const exitAfterTurn = hasMode("APP_EXIT_AFTER_TURN");
+    if (hasMode("APP_TURN_FAILED_NO_MESSAGE")) {
+      sendTurnCompleted(turnId, "failed");
+      activeTurn = undefined;
+      activePrompt = "";
+      return;
+    }
     let finalMessage = `fake app-server result for: ${activePrompt.trim()}${
       activeSteers.length ? ` | steers: ${activeSteers.join(" | ")}` : ""
     }`;

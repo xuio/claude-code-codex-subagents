@@ -100,6 +100,7 @@ const usageGuide = [
   "- If a response mentions outputArtifacts, use the artifact paths for full retained output instead of asking Codex to resend huge stdout/stderr.",
   "- Do not use model_preset \"spark\" by default. Use Spark only when the user asks for Spark or when a quick focused sidecar check is clearly more appropriate than the default Codex model.",
   "- Use reasoning \"medium\" by default, \"low\" for simple checks, and \"high\" only for difficult normal analysis. Use advanced.reasoning \"xhigh\" only when the user explicitly asks for maximum reasoning.",
+  "- For the current strongest ChatGPT-backed Codex model, use advanced.model \"gpt-5.5\" or omit advanced.model. Do not invent a \"-codex\" suffix for GPT-5.5.",
   "- Do not combine model_preset \"spark\" with reasoning_summary values other than \"none\"; Spark does not support reasoning.summary.",
   "- Do not set service_tier by default. Let Codex use its normal account/default service tier unless the user explicitly asks for a service tier.",
   "- Pass project_dir whenever Claude knows the active project directory so Codex works in the same tree as Claude Code.",
@@ -544,7 +545,9 @@ const advancedInputSchema = z
       .trim()
       .min(1)
       .optional()
-      .describe("Exact Codex model. Use gpt-5.3-codex-spark only when the user explicitly asks for Codex Spark."),
+      .describe(
+        "Exact Codex model. Use gpt-5.5 for the current strongest ChatGPT-backed model; do not add a -codex suffix to GPT-5.5. Use gpt-5.3-codex-spark only when the user explicitly asks for Codex Spark.",
+      ),
     model_preset: modelPresetSchema
       .optional()
       .describe("Compatibility preset. Prefer advanced.model for new calls."),
@@ -2596,6 +2599,11 @@ registerTool(
           const waitResult = waited.result
             ? compactAgentResultForMcp(waited.result)
             : (compactSession as { lastResult?: unknown }).lastResult;
+          const waitAgent =
+            waitResult && typeof waitResult === "object" && "ok" in waitResult && "status" in waitResult
+              ? (waitResult as ReturnType<typeof compactAgentResultForMcp>)
+              : undefined;
+          const waitAgentRecovery = waitAgent ? recoveryForAgentResult(waitAgent) : undefined;
           const waitValue =
             waitResult && typeof waitResult === "object"
               ? (waitResult as { structuredOutput?: unknown; finalMessage?: string }).structuredOutput ??
@@ -2606,22 +2614,31 @@ registerTool(
               ? (waitResult as { finalMessage?: string }).finalMessage ?? ""
               : "";
           const resultText =
-            waitResult && typeof waitResult === "object"
+            waitAgent
+              ? visibleAgentAnswer(waitAgent, waitAgentRecovery)
+              : waitResult && typeof waitResult === "object"
               ? stringifyResultValue(waitValue, waitFallback)
               : "";
           const completed = Boolean(waited.completed);
+          const terminalStatus =
+            waitAgent?.status ??
+            (completed ? sessionResourceStatus(waited.session) : "running");
+          const ok =
+            waited.timeoutReason !== "wait_cancelled" &&
+            (!completed || !waitAgent || Boolean(waitAgent.ok)) &&
+            terminalStatus !== "failed";
           const progressPayload = sessionProgressPayload(compactSession, waitResult);
           const payload: Record<string, unknown> = {
-            ok: waited.timeoutReason !== "wait_cancelled",
+            ok,
             completed,
-            status: completed ? "completed" : "running",
-            result: resultText || (completed ? "Codex session is idle." : "Codex session is still running."),
+            status: terminalStatus,
+            result: resultText || (completed ? `Codex session ${terminalStatus}.` : "Codex session is still running."),
             session_id: args.session_id,
             last_milestone_seq: waited.session.lastMilestoneSeq,
             elapsed_ms: progressPayload.elapsed_ms,
             ...waitTimeoutFields(waitTimeout),
             summary: completed
-              ? summarizeResultValue(waitValue, resultText, "Codex session is ready.")
+              ? summarizeResultValue(waitValue, resultText, `Codex session ${terminalStatus}.`)
               : waited.timeoutReason === "wait_timeout"
                 ? "Codex session is still running."
                 : "Codex session wait was cancelled.",
@@ -2634,6 +2651,10 @@ registerTool(
           }
           if (recovery) {
             payload.error = {
+              message:
+                waitAgent && !waitAgent.ok
+                  ? agentFallbackErrorText(waitAgent, waitAgentRecovery) ?? `Codex task ${waitAgent.status}`
+                  : undefined,
               recoverable: recovery.recoverable,
               kind: recovery.reason,
               retry_after_ms: recovery.retryAfterMs,
@@ -2646,7 +2667,7 @@ registerTool(
               ...progressPayload,
             };
           }
-          return nativeTextResult(payload, waited.timeoutReason === "wait_cancelled");
+          return nativeTextResult(payload, waited.timeoutReason === "wait_cancelled" || (completed && !ok));
         }
 
         if (mode === "cancel") {
@@ -2945,9 +2966,10 @@ registerTool(
         }
 
         const compactResult = waited.result ? compactAgentResultForMcp(waited.result) : undefined;
+        const recovery = waited.result ? recoveryForAgentResult(waited.result) : undefined;
         const resultValue = compactResult?.structuredOutput ?? compactResult?.finalMessage;
         const resultText = compactResult
-          ? stringifyResultValue(resultValue, compactResult.finalMessage)
+          ? visibleAgentAnswer(compactResult, recovery)
           : waited.session.error ?? `Codex session ${sessionResourceStatus(waited.session)}`;
         const status =
           compactResult?.status ??
@@ -2958,7 +2980,7 @@ registerTool(
               : "completed");
         await progress.send(`Codex session ${waited.session.id} finished`, { force: true });
         await progress.flush();
-        return nativeTextResult({
+        const payload: Record<string, unknown> = {
           ok: status === "completed",
           status,
           completed: true,
@@ -2969,7 +2991,16 @@ registerTool(
           last_milestone_seq: waited.session.lastMilestoneSeq,
           ...waitTimeoutFields(waitTimeout),
           hint: "Call codex_wait_any again with remaining_session_ids to collect the next finisher.",
-        });
+        };
+        if (compactResult && recovery) {
+          payload.error = {
+            message: agentFallbackErrorText(compactResult, recovery) ?? `Codex task ${status}`,
+            recoverable: recovery.recoverable,
+            kind: recovery.reason,
+            retry_after_ms: recovery.retryAfterMs,
+          };
+        }
+        return nativeTextResult(payload, status === "failed" || status === "cancelled");
       } catch (error) {
         await progress.flush();
         logger.error("codex_wait_any.failed", { error: errorForLog(error) });

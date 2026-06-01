@@ -212,6 +212,13 @@ function cloneSummary(summary: CodexEventSummary): CodexEventSummary {
   });
 }
 
+function summaryErrorText(summary: Pick<CodexEventSummary, "errors">): string {
+  return summary.errors
+    .map((error) => String(error).trim())
+    .filter(Boolean)
+    .join("\n");
+}
+
 function truncate(text: string, maxChars: number): { text: string; truncatedChars: number } {
   if (text.length <= maxChars) return { text, truncatedChars: 0 };
   return { text: text.slice(0, maxChars), truncatedChars: text.length - maxChars };
@@ -547,7 +554,7 @@ export class CodexAppServerSession {
         exitCode: status === "completed" ? 0 : null,
         signal: null,
         finalMessage: final.text,
-        stderr: redactSensitiveText(stderr.text() || error || ""),
+        stderr: redactSensitiveText(stderr.text() || summaryErrorText(summary) || error || ""),
         stdoutTail: redactSensitiveText(stdout.text()),
         truncated: {
           stdoutChars: stdout.truncated(),
@@ -1007,7 +1014,7 @@ export class CodexAppServerSession {
       exitCode: status === "completed" ? 0 : null,
       signal: null,
       finalMessage: final.text,
-      stderr: redactSensitiveText(active.stderr.text()),
+      stderr: redactSensitiveText(active.stderr.text() || summaryErrorText(active.summary)),
       stdoutTail: redactSensitiveText(active.stdout.text()),
       truncated: {
         stdoutChars: active.stdout.truncated(),

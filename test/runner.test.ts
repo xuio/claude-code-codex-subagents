@@ -5,6 +5,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import {
   buildCodexExecArgs,
   defaultReasoningEffort,
+  normalizeRequestedModel,
   probeCodexVersion,
   resolveWorkingDirectory,
   runAgent,
@@ -118,6 +119,21 @@ describe("buildCodexExecArgs", () => {
     expect(args).toContain('service_tier="flex"');
     expect(args).toContain('model_verbosity="low"');
     expect(args).toContain('model_reasoning_summary="concise"');
+  });
+
+  it("normalizes Claude-invented GPT-5.5 Codex suffixes before spawning Codex", () => {
+    expect(normalizeRequestedModel(" gpt-5.5-codex ")).toBe("gpt-5.5");
+
+    const args = buildCodexExecArgs(
+      {
+        cwd: "/repo",
+        model: "gpt-5.5-codex",
+      },
+      "/tmp/out.md",
+      {},
+    );
+
+    expect(args[args.indexOf("--model") + 1]).toBe("gpt-5.5");
   });
 
   it("maps model presets and subagent runtime options into Codex exec args", () => {

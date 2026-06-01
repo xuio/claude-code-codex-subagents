@@ -22298,7 +22298,13 @@ function defaultModel(env = process.env) {
   return value;
 }
 function resolveRequestedModel(options, env = process.env) {
-  return options.model?.trim() || modelForPreset(options.modelPreset) || defaultModel(env);
+  return normalizeRequestedModel(options.model) || modelForPreset(options.modelPreset) || defaultModel(env);
+}
+function normalizeRequestedModel(model) {
+  const value = model?.trim();
+  if (!value) return void 0;
+  if (value === "gpt-5.5-codex") return "gpt-5.5";
+  return value;
 }
 var RunValidationError = class extends Error {
   constructor(message) {
@@ -23754,6 +23760,10 @@ function recoveryForWait(kind, timeoutReason) {
 }
 
 // src/progress.ts
+function progressNotificationsEnabled(env = process.env) {
+  const raw = env.CODEX_SUBAGENTS_ENABLE_PROGRESS_NOTIFICATIONS?.trim().toLowerCase();
+  return ["1", "true", "yes", "on"].includes(raw ?? "");
+}
 function progressSendTimeoutMs(env = process.env) {
   const parsed = Number(env.CODEX_SUBAGENTS_PROGRESS_SEND_TIMEOUT_MS);
   if (!Number.isFinite(parsed) || parsed <= 0) return 1e3;
@@ -23775,6 +23785,7 @@ function progressMinIntervalMs(env = process.env) {
 }
 function createProgressReporter(extra, options = {}) {
   const progressToken = extra?._meta?.progressToken;
+  const enabled = options.enabled ?? progressNotificationsEnabled();
   const sendTimeoutMs = options.sendTimeoutMs ?? progressSendTimeoutMs();
   const minIntervalMs = options.minIntervalMs ?? progressMinIntervalMs();
   let progress = 0;
@@ -23785,7 +23796,7 @@ function createProgressReporter(extra, options = {}) {
   let throttleTimer;
   let pendingThrottled;
   function queueSend(message, progressOptions = {}) {
-    if (progressToken === void 0 || !extra) return;
+    if (!enabled || progressToken === void 0 || !extra) return;
     pending = pending.catch(() => {
     }).then(async () => {
       if (disabled) return;
@@ -23841,10 +23852,11 @@ function createProgressReporter(extra, options = {}) {
   async function send(message, progressOptions = {}) {
     logger.rawDebug("mcp.progress", {
       hasProgressToken: progressToken !== void 0,
+      enabled,
       message,
       options: progressOptions
     });
-    if (progressToken === void 0 || !extra || disabled) return;
+    if (!enabled || progressToken === void 0 || !extra || disabled) return;
     const elapsed = Date.now() - lastSentAt;
     if (progressOptions.force || minIntervalMs === 0 || lastSentAt === 0 || elapsed >= minIntervalMs) {
       if (progressOptions.force && throttleTimer) {
@@ -23861,7 +23873,7 @@ function createProgressReporter(extra, options = {}) {
     });
   }
   async function flush() {
-    if (progressToken === void 0 || !extra) return;
+    if (!enabled || progressToken === void 0 || !extra) return;
     if (throttleTimer) {
       clearTimeout(throttleTimer);
       throttleTimer = void 0;
@@ -24217,6 +24229,9 @@ function cloneSummary(summary) {
     events: summary.events ? [...summary.events] : void 0
   });
 }
+function summaryErrorText(summary) {
+  return summary.errors.map((error2) => String(error2).trim()).filter(Boolean).join("\n");
+}
 function truncate2(text, maxChars) {
   if (text.length <= maxChars) return { text, truncatedChars: 0 };
   return { text: text.slice(0, maxChars), truncatedChars: text.length - maxChars };
@@ -24532,7 +24547,7 @@ var CodexAppServerSession = class _CodexAppServerSession {
         exitCode: status === "completed" ? 0 : null,
         signal: null,
         finalMessage: final.text,
-        stderr: redactSensitiveText(stderr.text() || error2 || ""),
+        stderr: redactSensitiveText(stderr.text() || summaryErrorText(summary) || error2 || ""),
         stdoutTail: redactSensitiveText(stdout.text()),
         truncated: {
           stdoutChars: stdout.truncated(),
@@ -24951,7 +24966,7 @@ var CodexAppServerSession = class _CodexAppServerSession {
       exitCode: status === "completed" ? 0 : null,
       signal: null,
       finalMessage: final.text,
-      stderr: redactSensitiveText(active.stderr.text()),
+      stderr: redactSensitiveText(active.stderr.text() || summaryErrorText(active.summary)),
       stdoutTail: redactSensitiveText(active.stdout.text()),
       truncated: {
         stdoutChars: active.stdout.truncated(),
@@ -26463,6 +26478,7 @@ var usageGuide = [
   "- If a response mentions outputArtifacts, use the artifact paths for full retained output instead of asking Codex to resend huge stdout/stderr.",
   '- Do not use model_preset "spark" by default. Use Spark only when the user asks for Spark or when a quick focused sidecar check is clearly more appropriate than the default Codex model.',
   '- Use reasoning "medium" by default, "low" for simple checks, and "high" only for difficult normal analysis. Use advanced.reasoning "xhigh" only when the user explicitly asks for maximum reasoning.',
+  '- For the current strongest ChatGPT-backed Codex model, use advanced.model "gpt-5.5" or omit advanced.model. Do not invent a "-codex" suffix for GPT-5.5.',
   '- Do not combine model_preset "spark" with reasoning_summary values other than "none"; Spark does not support reasoning.summary.',
   "- Do not set service_tier by default. Let Codex use its normal account/default service tier unless the user explicitly asks for a service tier.",
   "- Pass project_dir whenever Claude knows the active project directory so Codex works in the same tree as Claude Code.",
@@ -26727,7 +26743,9 @@ var codexRoleDefaults = {
   }
 };
 var advancedInputSchema = external_exports.object({
-  model: external_exports.string().trim().min(1).optional().describe("Exact Codex model. Use gpt-5.3-codex-spark only when the user explicitly asks for Codex Spark."),
+  model: external_exports.string().trim().min(1).optional().describe(
+    "Exact Codex model. Use gpt-5.5 for the current strongest ChatGPT-backed model; do not add a -codex suffix to GPT-5.5. Use gpt-5.3-codex-spark only when the user explicitly asks for Codex Spark."
+  ),
   model_preset: modelPresetSchema.optional().describe("Compatibility preset. Prefer advanced.model for new calls."),
   reasoning: reasoningEffortSchema.optional().describe("Advanced reasoning effort, including xhigh. Minimal is still rejected by this server."),
   reasoning_effort: reasoningEffortSchema.optional().describe("Compatibility alias for advanced.reasoning."),
@@ -28217,21 +28235,25 @@ registerTool(
           const compactSession2 = compactSessionSnapshotForMcp(waited.session);
           const recovery = recoveryForWait("codex_session", waited.timeoutReason);
           const waitResult = waited.result ? compactAgentResultForMcp(waited.result) : compactSession2.lastResult;
+          const waitAgent = waitResult && typeof waitResult === "object" && "ok" in waitResult && "status" in waitResult ? waitResult : void 0;
+          const waitAgentRecovery = waitAgent ? recoveryForAgentResult(waitAgent) : void 0;
           const waitValue = waitResult && typeof waitResult === "object" ? waitResult.structuredOutput ?? waitResult.finalMessage : void 0;
           const waitFallback = waitResult && typeof waitResult === "object" ? waitResult.finalMessage ?? "" : "";
-          const resultText = waitResult && typeof waitResult === "object" ? stringifyResultValue(waitValue, waitFallback) : "";
+          const resultText = waitAgent ? visibleAgentAnswer(waitAgent, waitAgentRecovery) : waitResult && typeof waitResult === "object" ? stringifyResultValue(waitValue, waitFallback) : "";
           const completed = Boolean(waited.completed);
+          const terminalStatus = waitAgent?.status ?? (completed ? sessionResourceStatus(waited.session) : "running");
+          const ok = waited.timeoutReason !== "wait_cancelled" && (!completed || !waitAgent || Boolean(waitAgent.ok)) && terminalStatus !== "failed";
           const progressPayload = sessionProgressPayload(compactSession2, waitResult);
           const payload2 = {
-            ok: waited.timeoutReason !== "wait_cancelled",
+            ok,
             completed,
-            status: completed ? "completed" : "running",
-            result: resultText || (completed ? "Codex session is idle." : "Codex session is still running."),
+            status: terminalStatus,
+            result: resultText || (completed ? `Codex session ${terminalStatus}.` : "Codex session is still running."),
             session_id: args.session_id,
             last_milestone_seq: waited.session.lastMilestoneSeq,
             elapsed_ms: progressPayload.elapsed_ms,
             ...waitTimeoutFields(waitTimeout2),
-            summary: completed ? summarizeResultValue(waitValue, resultText, "Codex session is ready.") : waited.timeoutReason === "wait_timeout" ? "Codex session is still running." : "Codex session wait was cancelled."
+            summary: completed ? summarizeResultValue(waitValue, resultText, `Codex session ${terminalStatus}.`) : waited.timeoutReason === "wait_timeout" ? "Codex session is still running." : "Codex session wait was cancelled."
           };
           if (waited.timeoutReason) payload2.timeoutReason = waited.timeoutReason;
           if (!completed && waited.timeoutReason === "wait_timeout") {
@@ -28239,6 +28261,7 @@ registerTool(
           }
           if (recovery) {
             payload2.error = {
+              message: waitAgent && !waitAgent.ok ? agentFallbackErrorText(waitAgent, waitAgentRecovery) ?? `Codex task ${waitAgent.status}` : void 0,
               recoverable: recovery.recoverable,
               kind: recovery.reason,
               retry_after_ms: recovery.retryAfterMs
@@ -28251,7 +28274,7 @@ registerTool(
               ...progressPayload
             };
           }
-          return nativeTextResult(payload2, waited.timeoutReason === "wait_cancelled");
+          return nativeTextResult(payload2, waited.timeoutReason === "wait_cancelled" || completed && !ok);
         }
         if (mode === "cancel") {
           await progress.send(`Cancelling Codex session ${args.session_id}`);
@@ -28499,12 +28522,13 @@ registerTool(
           });
         }
         const compactResult = waited.result ? compactAgentResultForMcp(waited.result) : void 0;
+        const recovery = waited.result ? recoveryForAgentResult(waited.result) : void 0;
         const resultValue = compactResult?.structuredOutput ?? compactResult?.finalMessage;
-        const resultText = compactResult ? stringifyResultValue(resultValue, compactResult.finalMessage) : waited.session.error ?? `Codex session ${sessionResourceStatus(waited.session)}`;
+        const resultText = compactResult ? visibleAgentAnswer(compactResult, recovery) : waited.session.error ?? `Codex session ${sessionResourceStatus(waited.session)}`;
         const status = compactResult?.status ?? (waited.session.status === "cancelled" ? "cancelled" : waited.session.status === "failed" ? "failed" : "completed");
         await progress.send(`Codex session ${waited.session.id} finished`, { force: true });
         await progress.flush();
-        return nativeTextResult({
+        const payload = {
           ok: status === "completed",
           status,
           completed: true,
@@ -28515,7 +28539,16 @@ registerTool(
           last_milestone_seq: waited.session.lastMilestoneSeq,
           ...waitTimeoutFields(waitTimeout),
           hint: "Call codex_wait_any again with remaining_session_ids to collect the next finisher."
-        });
+        };
+        if (compactResult && recovery) {
+          payload.error = {
+            message: agentFallbackErrorText(compactResult, recovery) ?? `Codex task ${status}`,
+            recoverable: recovery.recoverable,
+            kind: recovery.reason,
+            retry_after_ms: recovery.retryAfterMs
+          };
+        }
+        return nativeTextResult(payload, status === "failed" || status === "cancelled");
       } catch (error2) {
         await progress.flush();
         logger.error("codex_wait_any.failed", { error: errorForLog(error2) });

@@ -83,9 +83,10 @@ long-running work.
 
 ## Progress, Backpressure, And Retention
 
-The server emits MCP progress notifications when the client supplies a progress
-token. Long waits include heartbeat progress so Claude Code can keep the request
-alive.
+MCP progress notifications are disabled by default because current Claude Code
+builds can close the stdio transport when they receive progress for a token they
+no longer track. Set `CODEX_SUBAGENTS_ENABLE_PROGRESS_NOTIFICATIONS=1` only when
+the client is known to accept MCP progress notifications reliably.
 
 Background Codex sessions also expose `codex://sessions/{session_id}` resources.
 Each resource carries a small in-memory milestone ring buffer and a compact

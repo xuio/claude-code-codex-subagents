@@ -533,6 +533,25 @@ try {
     waitAnyUnknown,
   );
 
+  const waitAnyFailure = await callTool("codex_task", {
+    description: "Wait any failure",
+    prompt: "wait-any-failure APP_TURN_FAILED_NO_MESSAGE",
+    project_dir: projectDir,
+    background: true,
+  });
+  const waitAnyFailed = await callTool("codex_wait_any", {
+    session_ids: [waitAnyFailure.structuredContent.session_id],
+    wait_timeout_ms: 5_000,
+  });
+  assert(waitAnyFailed.isError, "codex_wait_any should mark failed Codex sessions as MCP errors", waitAnyFailed);
+  assert(
+    waitAnyFailed.structuredContent?.status === "failed" &&
+      String(waitAnyFailed.structuredContent?.result ?? "").includes("fake failed") &&
+      String(waitAnyFailed.structuredContent?.error?.message ?? "").includes("fake failed"),
+    "codex_wait_any should surface the underlying Codex failure text",
+    waitAnyFailed.structuredContent,
+  );
+
   const alreadyCompletedCancel = await callTool("codex_followup", {
     session_id: single.structuredContent.session_id,
     mode: "cancel",
