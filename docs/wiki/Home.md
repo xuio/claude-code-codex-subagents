@@ -14,12 +14,12 @@ parallel Codex code review, and adversarial Codex review.
 
 ## Start Here
 
-- [Quick Start](Quick-Start.md)
-- [Tool Guide](Tool-Guide.md)
-- [Architecture](Architecture.md)
-- [Troubleshooting](Troubleshooting.md)
-- [Known Limitations](Known-Limitations.md)
-- [Release Notes](Release-Notes.md)
+- [Quick Start](https://github.com/xuio/claude-code-codex-subagents/wiki/Quick-Start)
+- [Tool Guide](https://github.com/xuio/claude-code-codex-subagents/wiki/Tool-Guide)
+- [Architecture](https://github.com/xuio/claude-code-codex-subagents/wiki/Architecture)
+- [Troubleshooting](https://github.com/xuio/claude-code-codex-subagents/wiki/Troubleshooting)
+- [Known Limitations](https://github.com/xuio/claude-code-codex-subagents/wiki/Known-Limitations)
+- [Release Notes](https://github.com/xuio/claude-code-codex-subagents/wiki/Release-Notes)
 
 ## Useful Repository Links
 
