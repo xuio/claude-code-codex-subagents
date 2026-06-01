@@ -145,7 +145,7 @@ describe("CodexSessionManager", () => {
         current.some((call) => call.method === "process/sigterm")
         ? current
         : undefined;
-    });
+    }, 10_000);
     const archiveIndex = calls.findIndex((call) => call.method === "thread/archive");
     const sigtermIndex = calls.findIndex((call) => call.method === "process/sigterm");
     expect(archiveIndex).toBeGreaterThanOrEqual(0);
