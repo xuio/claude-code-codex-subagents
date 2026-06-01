@@ -235,12 +235,45 @@ try {
         "capped wait should return before Claude Desktop's inactivity watchdog could fire",
         cappedWait.structuredContent,
       );
+      const slowForeground = await callToolOn(cappedClient, "codex_task", {
+        description: "Foreground handoff smoke",
+        prompt: "foreground handoff smoke DELAY_MS=500",
+        project_dir: projectDir,
+      });
+      assert(
+        !slowForeground.isError &&
+          slowForeground.structuredContent?.completed === false &&
+          slowForeground.structuredContent?.status === "running" &&
+          slowForeground.structuredContent?.session_id &&
+          slowForeground.structuredContent?.effective_wait_timeout_ms === 50,
+        "slow foreground codex_task should hand back a running session instead of hitting the client timeout",
+        slowForeground.structuredContent,
+      );
+      let foregroundCompleted;
+      for (let attempt = 0; attempt < 20; attempt += 1) {
+        foregroundCompleted = await callToolOn(cappedClient, "codex_followup", {
+          session_id: slowForeground.structuredContent.session_id,
+          mode: "wait",
+          wait_timeout_ms: 2_000,
+        });
+        if (foregroundCompleted.structuredContent?.completed) break;
+      }
+      assert(
+        foregroundCompleted.structuredContent?.completed === true &&
+          foregroundCompleted.structuredContent?.status === "completed",
+        "foreground handoff session should be collectable with codex_followup wait",
+        foregroundCompleted.structuredContent,
+      );
       const cancelled = await callToolOn(cappedClient, "codex_followup", {
         session_id: slow.structuredContent.session_id,
         mode: "cancel",
         reason: "capped wait smoke cleanup",
       });
-      assert(cancelled.structuredContent?.status === "cancelled", "capped wait smoke cleanup should cancel the session", cancelled);
+      assert(
+        ["cancelled", "already_completed"].includes(cancelled.structuredContent?.status),
+        "capped wait smoke cleanup should leave the session terminal",
+        cancelled,
+      );
     },
   );
 

@@ -26470,6 +26470,7 @@ var usageGuide = [
   "- Keep sandbox read-only unless the user explicitly asks for a different sandbox.",
   "- If the user explicitly asks for non-sandbox/full local capabilities, set full_access true. This maps to Codex's --dangerously-bypass-approvals-and-sandbox flag and allows DNS/network plus unrestricted file and git writes.",
   "- Approvals are non-interactive; do not expect Codex to ask permission.",
+  `- Foreground codex_task calls are also capped to ${defaultBlockingWaitTimeoutMs}ms by default before they hand back a live session_id. If completed is false, the Codex task is still running; use codex_followup mode wait, steer, or cancel.`,
   '- If codex_followup mode wait returns completed false with timeoutReason "wait_timeout", the session is still running unless its status says otherwise.',
   `- Blocking wait tools are capped to ${defaultBlockingWaitTimeoutMs}ms by default so Claude stays responsive. If a wait returns completed false, call codex_followup mode wait or codex_wait_any again, or read codex://sessions/{session_id}.`,
   "- Use codex_wait_any after launching several background Codex tasks to harvest whichever one finishes first without busy-polling.",
@@ -27297,6 +27298,28 @@ function codexLiveProgressMessage(sessionId, fallback) {
   const activeStatus = session?.activeTurn?.status ?? session?.status;
   return activeStatus ? `Codex session ${sessionId} ${activeStatus}` : fallback;
 }
+function foregroundTaskStillRunningPayload(args, session, turn, waitTimeout, timeoutReason) {
+  const progressPayload = sessionProgressPayload(session);
+  const partial2 = sessionPartialMessage(session);
+  return {
+    ok: true,
+    completed: false,
+    status: "running",
+    summary: "Codex task is still running.",
+    result: partial2 || `Codex task "${args.description}" is still running.`,
+    session_id: session.id,
+    turn,
+    last_milestone_seq: session.lastMilestoneSeq,
+    elapsed_ms: progressPayload.elapsed_ms,
+    ...waitTimeoutFields(waitTimeout),
+    timeoutReason,
+    hint: "Use codex_followup mode wait to collect the result, mode steer to redirect the running task, or mode cancel to stop it.",
+    diagnostics: args.advanced?.include_diagnostics ? {
+      session,
+      ...progressPayload
+    } : void 0
+  };
+}
 function toRunOptions(args) {
   return {
     prompt: args.prompt,
@@ -27882,49 +27905,96 @@ registerTool(
         await progress.send(`Starting Codex task: ${args.description}`);
         if (args.background || args.advanced?.wait_for_completion === false) {
           throwIfRequestAborted(extra);
-          const { session: session2, turn } = sessionManager.startAsync(runOptions, { sessionName: args.session_name });
+          const { session, turn: turn2 } = sessionManager.startAsync(runOptions, { sessionName: args.session_name });
           await progress.flush();
-          const compactSession2 = compactSessionSnapshotForMcp(session2);
+          const compactSession = compactSessionSnapshotForMcp(session);
           const payload = {
             ok: true,
             status: "running",
             summary: `Started Codex task: ${args.description}`,
-            result: `Codex task started in the background. Session: ${session2.id}`,
-            session_id: session2.id,
-            turn,
+            result: `Codex task started in the background. Session: ${session.id}`,
+            session_id: session.id,
+            turn: turn2,
             hint: "Use codex_wait_any for parallel background tasks, or codex_followup mode wait, steer, or cancel with this session_id."
           };
           if (args.advanced?.include_diagnostics) {
             payload.diagnostics = {
-              session: compactSession2,
-              ...sessionProgressPayload(compactSession2)
+              session: compactSession,
+              ...sessionProgressPayload(compactSession)
             };
           }
           return nativeTextResult(payload);
         }
-        const { session, result } = await withProgressHeartbeat(
-          progress,
-          `Still running Codex task: ${args.description}`,
-          () => sessionManager.start(withRequestAbort(runOptions, extra), {
-            sessionName: args.session_name,
-            onMilestone: (milestone) => {
-              const message = formatMilestoneProgress(milestone);
-              if (message) void progress.send(message);
-            }
-          })
-        );
-        await reportAgentResult(progress, result);
-        await progress.flush();
-        const compactSession = compactSessionSnapshotForMcp(session);
-        return nativeAgentResponse(result, {
-          description: args.description,
-          prompt: args.prompt,
-          tool: "codex_task",
-          session: compactSession,
-          turn: compactSession.recentTurns?.at(-1),
-          includeDiagnostics: Boolean(args.advanced?.include_diagnostics),
-          includeSessionId: Boolean(args.keep_session)
+        const waitTimeout = capBlockingWaitTimeout(void 0);
+        const { session: startedSession, turn } = sessionManager.startAsync(runOptions, {
+          sessionName: args.session_name
         });
+        const abortHandler = () => {
+          logger.warn("codex_task.foreground_request_cancelled", {
+            sessionId: startedSession.id,
+            turnId: turn.id
+          });
+          sessionManager.cancel(startedSession.id, "MCP request was cancelled by the client.");
+        };
+        extra?.signal?.addEventListener("abort", abortHandler, { once: true });
+        const unsubscribeMilestones = sessionManager.subscribeMilestones(startedSession.id, (milestone) => {
+          const message = formatMilestoneProgress(milestone);
+          if (message) void progress.send(message);
+        });
+        try {
+          if (extra?.signal?.aborted) abortHandler();
+          const waited = await withProgressHeartbeat(
+            progress,
+            () => codexLiveProgressMessage(startedSession.id, `Still running Codex task: ${args.description}`),
+            () => sessionManager.wait(startedSession.id, waitTimeout.effectiveMs, turn.id, extra?.signal)
+          );
+          await progress.flush();
+          if (waited.error || !waited.session) {
+            return nativeErrorResult(new Error(waited.error ?? "Codex session was not found."), "codex_task");
+          }
+          const compactSession = compactSessionSnapshotForMcp(waited.session);
+          if (waited.completed && !waited.result) {
+            const turnError = waited.turn?.error ?? compactSession.error ?? `Codex session turn did not produce a result: ${turn.id}`;
+            return nativeErrorResult(new Error(turnError), "codex_task");
+          }
+          if (!waited.completed) {
+            logger.warn("codex_task.foreground_wait_timeout", {
+              sessionId: startedSession.id,
+              turnId: turn.id,
+              timeoutReason: waited.timeoutReason,
+              requestedMs: waitTimeout.requestedMs,
+              effectiveMs: waitTimeout.effectiveMs
+            });
+            return nativeTextResult(
+              foregroundTaskStillRunningPayload(
+                args,
+                compactSession,
+                waited.turn ?? turn,
+                waitTimeout,
+                waited.timeoutReason ?? "wait_timeout"
+              ),
+              waited.timeoutReason === "wait_cancelled"
+            );
+          }
+          const result = waited.result;
+          if (!result) {
+            return nativeErrorResult(new Error(`Codex session turn did not produce a result: ${turn.id}`), "codex_task");
+          }
+          await reportAgentResult(progress, result);
+          await progress.flush();
+          return nativeAgentResponse(result, {
+            description: args.description,
+            prompt: args.prompt,
+            tool: "codex_task",
+            session: compactSession,
+            turn: waited.turn ?? compactSession.recentTurns?.at(-1),
+            includeDiagnostics: Boolean(args.advanced?.include_diagnostics),
+            includeSessionId: Boolean(args.keep_session)
+          });
+        } finally {
+          unsubscribeMilestones();
+          extra?.signal?.removeEventListener("abort", abortHandler);
+        }
       } catch (error2) {
         await progress.flush();
         logger.error("codex_task.failed", { error: errorForLog(error2) });
