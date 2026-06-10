@@ -2,6 +2,7 @@ import { mkdtemp, readFile, realpath, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
+import { SessionStateStore, type DurableSessionState } from "../src/session-state.js";
 import { CodexSessionManager } from "../src/sessions.js";
 
 const fakeCodex = path.resolve("test/fixtures/fake-codex.mjs");
@@ -346,6 +347,34 @@ describe("CodexSessionManager", () => {
     expect(waited.completed).toBe(false);
     expect(waited.error).toBe("Unknown session_id: session-missing");
     expect(manager.stats().waiters).toBe(0);
+  });
+
+  it("fails fast when waiting on a recovered idle session with no local result", async () => {
+    const stateDir = await tempDir("codex-subagents-idle-wait-state-");
+    const stateFile = path.join(stateDir, "sessions.json");
+    const now = new Date().toISOString();
+    const state: DurableSessionState = {
+      id: "session-recovered-idle",
+      status: "active",
+      createdAt: now,
+      updatedAt: now,
+      codexThreadId: "thread-recovered-idle",
+      protocol: "app-server",
+      turns: 0,
+      baseOptions: { projectDir: stateDir },
+    };
+    new SessionStateStore(stateFile).save([state]);
+    const manager = new CodexSessionManager({ persist: true, stateFile });
+
+    const startedAt = Date.now();
+    const waitedAny = await manager.waitAny([state.id], 1_000);
+    const waitedOne = await manager.wait(state.id, 1_000);
+
+    expect(Date.now() - startedAt).toBeLessThan(500);
+    expect(waitedAny.completed).toBe(false);
+    expect(waitedAny.error).toContain("idle recovered context");
+    expect(waitedOne.completed).toBe(false);
+    expect(waitedOne.error).toContain("idle recovered context");
   });
 
   it("redacts milestone text and does not persist milestones", async () => {

@@ -633,6 +633,31 @@ describe("app-server hardening", () => {
     await secondManager.shutdown("test_cleanup");
   });
 
+  it("does not refresh idle recovered sessions during shutdown", async () => {
+    const stateDir = await tempDir("codex-subagents-idle-shutdown-state-");
+    const stateFile = path.join(stateDir, "sessions.json");
+    const oldUpdatedAt = new Date(Date.now() - 3_600_000).toISOString();
+    const state: DurableSessionState = {
+      id: "session-idle-recovered",
+      status: "active",
+      createdAt: oldUpdatedAt,
+      updatedAt: oldUpdatedAt,
+      codexThreadId: "thread-idle-recovered",
+      protocol: "app-server",
+      turns: 0,
+      baseOptions: { projectDir: stateDir },
+    };
+    new SessionStateStore(stateFile).save([state]);
+
+    const manager = new CodexSessionManager({ persist: true, stateFile });
+    expect(manager.get(state.id)?.durable?.recovered).toBe(true);
+
+    await manager.shutdown("stdin_close");
+
+    const persisted = new SessionStateStore(stateFile).load().find((session) => session.id === state.id);
+    expect(persisted?.updatedAt).toBe(oldUpdatedAt);
+  });
+
   it("keeps explicit session cancellation cancelled after reload", async () => {
     const stateDir = await tempDir("codex-subagents-cancel-state-");
     const stateFile = path.join(stateDir, "sessions.json");

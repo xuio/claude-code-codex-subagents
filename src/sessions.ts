@@ -224,6 +224,26 @@ function terminal(status: SessionTurnStatus): boolean {
   return status === "completed" || status === "failed" || status === "cancelled";
 }
 
+function hasLocalSessionWork(session: CodexSessionRecord): boolean {
+  return Boolean(
+    session.controller ||
+      session.activeTurn ||
+      session.draining ||
+      session.appServerStarting ||
+      session.appServer ||
+      session.queuedTurns.length > 0,
+  );
+}
+
+function idleWithoutWaitableResult(session: CodexSessionRecord): boolean {
+  return session.status === "active" && !hasLocalSessionWork(session) && !session.lastResult;
+}
+
+function idleWaitError(session: CodexSessionRecord): string {
+  const recovered = session.recovered ? " recovered" : "";
+  return `Codex session ${session.id} is an idle${recovered} context with no running turn or result in this MCP process; send a follow-up prompt to continue it instead of waiting.`;
+}
+
 function defaultSessionProtocol(env: NodeJS.ProcessEnv = process.env): SessionProtocol {
   return env.CODEX_SUBAGENTS_SESSION_PROTOCOL === "exec" ? "exec" : "app-server";
 }
@@ -712,6 +732,9 @@ export class CodexSessionManager {
     if (turnId && !this.findTurn(session, turnId)) {
       return { session: snapshot(session), completed: false, error: `Unknown turn_id: ${turnId}` };
     }
+    if (!turnId && idleWithoutWaitableResult(session)) {
+      return { session: snapshot(session), completed: false, error: idleWaitError(session) };
+    }
     if (abortSignal?.aborted) {
       const turn = turnId ? this.findTurn(session, turnId) : undefined;
       return {
@@ -794,6 +817,10 @@ export class CodexSessionManager {
     for (const id of uniqueIds) {
       if (!this.sessions.has(id)) return { completed: false, error: `Unknown session_id: ${id}` };
     }
+    const idleSession = uniqueIds
+      .map((id) => this.sessions.get(id))
+      .find((session): session is CodexSessionRecord => Boolean(session && idleWithoutWaitableResult(session)));
+    if (idleSession) return { completed: false, error: idleWaitError(idleSession) };
 
     const winner = (): CodexSessionRecord | undefined => {
       this.prune();
@@ -967,6 +994,10 @@ export class CodexSessionManager {
     const now = new Date().toISOString();
 
     for (const session of this.sessions.values()) {
+      if (!hasLocalSessionWork(session)) {
+        snapshots.push(snapshot(session));
+        continue;
+      }
       const recoverable = Boolean(session.codexThreadId) && !session.cancelRequested && session.status !== "cancelled";
       session.runtimeShutdownRecoverable = recoverable;
       session.cancelRequested = !recoverable;
