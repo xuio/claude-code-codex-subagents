@@ -43,7 +43,13 @@ import {
 import { detectPluginProcesses } from "./processes.js";
 import { recoveryForAgentResult, recoveryForError, recoveryForWait } from "./recovery.js";
 import { redactJsonValue, redactSensitiveText } from "./redaction.js";
-import { createProgressReporter, type ProgressOptions, type ProgressReporter, type ToolExtra } from "./progress.js";
+import {
+  createProgressReporter,
+  progressNotificationsAvailable,
+  type ProgressOptions,
+  type ProgressReporter,
+  type ToolExtra,
+} from "./progress.js";
 import { isBrokenStdioError, updateOrphanWatchdogState } from "./stdio.js";
 import {
   capBlockingWaitTimeout,
@@ -419,20 +425,28 @@ const frontDoorInputSchema = {
   subagent_runtime: commonInputSchema.subagent_runtime,
 };
 
-const codexRoleSchema = z.enum([
+const advertisedCodexRoleValues = [
   "general-purpose",
   "code-reviewer",
   "security-reviewer",
-  "reviewer",
   "explorer",
+  "planner",
+  "patcher",
+  "docs",
+] as const;
+const codexRoleAliasValues = [
+  "reviewer",
   "security",
   "performance",
   "tests",
-  "planner",
   "risk",
-  "patcher",
-  "docs",
   "ui",
+] as const;
+const advertisedCodexRoleSchema = z.enum(advertisedCodexRoleValues);
+
+const codexRoleSchema = z.enum([
+  ...advertisedCodexRoleValues,
+  ...codexRoleAliasValues,
 ]);
 
 type CodexRole = z.infer<typeof codexRoleSchema>;
@@ -547,11 +561,11 @@ const advancedInputSchema = z
       .min(1)
       .optional()
       .describe(
-        "Exact Codex model. Use gpt-5.5 for the current strongest ChatGPT-backed model; do not add a -codex suffix to GPT-5.5. Use gpt-5.3-codex-spark only when the user explicitly asks for Codex Spark.",
+        "Exact Codex model, or alias `spark` / `codex`. Omit by default; use `spark` only when the user asks for Codex Spark or a quick focused sidecar check.",
       ),
     model_preset: modelPresetSchema
       .optional()
-      .describe("Compatibility preset. Prefer advanced.model for new calls."),
+      .describe("Compatibility preset retained for older callers. Prefer advanced.model for new calls."),
     reasoning: reasoningEffortSchema
       .optional()
       .describe("Advanced reasoning effort, including xhigh. Minimal is still rejected by this server."),
@@ -600,6 +614,10 @@ const advancedInputSchema = z
     "DO NOT USE unless the user explicitly asked for exact model, timeout, diagnostics, custom MCP sharing, nested Codex subagents, or another uncommon Codex setting.",
   );
 
+const advertisedAdvancedInputSchema = looseRecordSchema.describe(
+  "Power-user Codex settings object. Usually omit. Common keys: model (`spark`, `codex`, or exact model), reasoning (`xhigh` only when explicitly requested), timeout_ms, include_diagnostics, sandbox, codex_bin, output_contract, output_schema, codex_subagents, subagent_tasks, subagent_runtime, and MCP sharing options. The server validates this object strictly at runtime.",
+);
+
 const nativeBaseInputSchema = {
   project_dir: commonInputSchema.project_dir.describe(
     "Project directory for Codex. Defaults to CLAUDE_PROJECT_DIR from Claude Code; usually omit this unless the user specified a directory.",
@@ -611,7 +629,7 @@ const nativeBaseInputSchema = {
     .boolean()
     .default(false)
     .describe("Allow Codex to write files, use network/DNS, and modify git. Only true when the user explicitly asks for non-sandbox execution."),
-  advanced: advancedInputSchema.optional(),
+  advanced: advertisedAdvancedInputSchema.optional(),
 };
 
 function toCodexSubagents(
@@ -797,9 +815,11 @@ function suggestedActionForAgent(result: { ok: boolean; status: string }, recove
   return "Inspect the Codex result details and retry only if the failure looks transient.";
 }
 
-function nativeTextResult(value: Record<string, unknown>, isError = false): CallToolResult {
+function nativeTextResult(value: Record<string, unknown>, isError = false, textOverride?: string): CallToolResult {
   const text =
-    typeof value.result === "string" && value.result.trim()
+    typeof textOverride === "string" && textOverride.trim()
+      ? textOverride
+      : typeof value.result === "string" && value.result.trim()
       ? value.result
       : typeof value.summary === "string"
         ? value.summary
@@ -965,11 +985,11 @@ function nativeParallelResponse(
       ok,
       status: ok ? "completed" : "failed",
       summary: `${results.filter((result) => result.ok).length}/${results.length} Codex tasks completed successfully.`,
-      result: resultText,
       results: normalized,
       hint: firstRecovery?.recommendedAction ?? "Use the per-task results directly, or ask focused follow-up tasks for any gaps.",
     },
     !ok,
+    resultText,
   );
 }
 
@@ -977,7 +997,7 @@ type NativeTaskGroupRun = {
   result?: AgentRunResult;
   error?: unknown;
   session?: { id?: string };
-  task: { name?: string; description?: string; prompt?: string; keep_session?: boolean; advanced?: { include_diagnostics?: boolean } };
+  task: { name?: string; description?: string; prompt?: string; keep_session?: boolean; advanced?: unknown };
 };
 
 function nativeTaskGroupResponse(runs: NativeTaskGroupRun[]): CallToolResult {
@@ -1004,7 +1024,7 @@ function nativeTaskGroupResponse(runs: NativeTaskGroupRun[]): CallToolResult {
           retry_after_ms: recovery.retryAfterMs,
         };
       }
-      if (run.task.advanced?.include_diagnostics) item.diagnostics = diagnosticsForAgent(agent);
+      if (includeDiagnostics(run.task.advanced)) item.diagnostics = diagnosticsForAgent(agent);
       return item;
     }
 
@@ -1024,7 +1044,7 @@ function nativeTaskGroupResponse(runs: NativeTaskGroupRun[]): CallToolResult {
         kind: recovery.reason,
         retry_after_ms: recovery.retryAfterMs,
       },
-      diagnostics: run.task.advanced?.include_diagnostics ? {} : undefined,
+      diagnostics: includeDiagnostics(run.task.advanced) ? {} : undefined,
     };
   });
   const ok = normalized.every((result) => result.ok);
@@ -1035,11 +1055,11 @@ function nativeTaskGroupResponse(runs: NativeTaskGroupRun[]): CallToolResult {
       ok,
       status: ok ? "completed" : "failed",
       summary: `${normalized.filter((result) => result.ok).length}/${normalized.length} Codex tasks completed successfully.`,
-      result: resultText,
       results: normalized,
       hint: firstFailed ? "Retry only the failed task if it is still needed." : undefined,
     },
     !ok,
+    resultText,
   );
 }
 
@@ -1241,6 +1261,12 @@ function waitTimeoutFields(waitTimeout: BlockingWaitTimeout): Record<string, unk
   return fields;
 }
 
+function capToolBlockingWaitTimeout(requestedMs: number | undefined, extra: ToolExtra | undefined): BlockingWaitTimeout {
+  return capBlockingWaitTimeout(requestedMs, process.env, {
+    progress: progressNotificationsAvailable(extra),
+  });
+}
+
 function logCappedWait(tool: string, waitTimeout: BlockingWaitTimeout, fields: Record<string, unknown> = {}): void {
   if (!waitTimeout.capped) return;
   logger.warn(`${tool}.wait_timeout_capped`, {
@@ -1350,7 +1376,7 @@ function foregroundTaskStillRunningPayload(
     timeoutReason,
     hint:
       "Use codex_followup mode wait to collect the result, mode steer to redirect the running task, or mode cancel to stop it.",
-    diagnostics: args.advanced?.include_diagnostics
+    diagnostics: includeDiagnostics(args.advanced)
       ? {
           session,
           ...progressPayload,
@@ -1636,7 +1662,7 @@ type NativeBaseInput = {
   project_dir?: string;
   reasoning?: PublicReasoning;
   full_access?: boolean;
-  advanced?: Partial<AdvancedInput>;
+  advanced?: unknown;
 };
 type NativeTaskV3Input = NativeBaseInput & {
   description: string;
@@ -1682,10 +1708,24 @@ function publicModel(model: string | undefined): string | undefined {
   return value;
 }
 
+function parseAdvancedInput(value: unknown): Partial<AdvancedInput> {
+  if (value === undefined) return {};
+  return advancedInputSchema.parse(value);
+}
+
+function advancedRecord(value: unknown): Record<string, unknown> {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return {};
+  return value as Record<string, unknown>;
+}
+
+function includeDiagnostics(value: unknown): boolean {
+  return parseAdvancedInput(value).include_diagnostics === true;
+}
+
 function publicRunOptions(
   args: NativeBaseInput & { description?: string; prompt: string; subagent_type?: CodexRole; name?: string },
 ) {
-  const advanced: Partial<AdvancedInput> = args.advanced ?? {};
+  const advanced = parseAdvancedInput(args.advanced);
   const roleKey = codexRoleForPrompt(args);
   const role = roleKey ? codexRoleDefaults[roleKey] : undefined;
   const fullAccess = Boolean(args.full_access ?? advanced.dangerously_bypass_approvals_and_sandbox);
@@ -1734,7 +1774,7 @@ function publicGroupRunOptions(args: NativeTaskGroupV3Input) {
       publicRunOptions({
         ...args,
         ...task,
-        advanced: { ...(args.advanced ?? {}), ...(task.advanced ?? {}) },
+        advanced: { ...advancedRecord(args.advanced), ...advancedRecord(task.advanced) },
         project_dir: task.project_dir ?? args.project_dir,
         reasoning: task.reasoning ?? args.reasoning,
         full_access: task.full_access ?? args.full_access,
@@ -2168,8 +2208,7 @@ registerTool(
         .describe(
           "Self-contained Codex task prompt. Include scope, read-only expectation, output shape, and file/line reference requirements when reviewing code.",
         ),
-      subagent_type: z
-        .enum(codexRoleSchema.options)
+      subagent_type: advertisedCodexRoleSchema
         .optional()
         .describe("Claude-style Codex persona. Prefer general-purpose, explorer, planner, code-reviewer, or security-reviewer. Defaults to general-purpose."),
       background: z
@@ -2193,7 +2232,8 @@ registerTool(
           ephemeral: false,
         };
         await progress.send(`Starting Codex task: ${args.description}`);
-        if (args.background || args.advanced?.wait_for_completion === false) {
+        const advanced = parseAdvancedInput(args.advanced);
+        if (args.background || advanced.wait_for_completion === false) {
           throwIfRequestAborted(extra);
           const { session, turn } = sessionManager.startAsync(runOptions, { sessionName: args.session_name });
           await progress.flush();
@@ -2207,7 +2247,7 @@ registerTool(
             turn,
             hint: "Use codex_wait_any for parallel background tasks, or codex_followup mode wait, steer, or cancel with this session_id.",
           };
-          if (args.advanced?.include_diagnostics) {
+          if (advanced.include_diagnostics) {
             payload.diagnostics = {
               session: compactSession,
               ...sessionProgressPayload(compactSession),
@@ -2215,7 +2255,7 @@ registerTool(
           }
           return nativeTextResult(payload);
         }
-        const waitTimeout = capBlockingWaitTimeout(undefined);
+        const waitTimeout = capToolBlockingWaitTimeout(undefined, extra);
         const { session: startedSession, turn } = sessionManager.startAsync(runOptions, {
           sessionName: args.session_name,
         });
@@ -2275,15 +2315,17 @@ registerTool(
           }
           await reportAgentResult(progress, result);
           await progress.flush();
-          return nativeAgentResponse(result, {
+          const response = nativeAgentResponse(result, {
             description: args.description,
             prompt: args.prompt,
             tool: "codex_task",
             session: compactSession,
             turn: waited.turn ?? compactSession.recentTurns?.at(-1),
-            includeDiagnostics: Boolean(args.advanced?.include_diagnostics),
+            includeDiagnostics: Boolean(advanced.include_diagnostics),
             includeSessionId: Boolean(args.keep_session),
           });
+          if (result.ok && !args.keep_session) sessionManager.dispose(startedSession.id, "one_shot_completed");
+          return response;
         } finally {
           unsubscribeMilestones();
           extra?.signal?.removeEventListener("abort", abortHandler);
@@ -2508,7 +2550,7 @@ const nativeTaskGroupTaskSchema = z.object({
     .describe(
       "Self-contained Codex prompt for this independent task. Keep overlap low across parallel tasks.",
     ),
-  subagent_type: codexRoleSchema
+  subagent_type: advertisedCodexRoleSchema
     .optional()
     .describe("Claude-style Codex persona. Prefer general-purpose, explorer, planner, code-reviewer, or security-reviewer."),
   name: z.string().trim().min(1).optional().describe("Optional stable label for this Codex task."),
@@ -2559,7 +2601,7 @@ registerTool(
             mapWithConcurrency(group.tasks, group.maxParallel, async (runOptions, index) => {
               const task = args.tasks[index];
               if (!task) throw new Error(`Missing Codex task at index ${index}.`);
-              const responseTask = { ...task, advanced: { ...(args.advanced ?? {}), ...(task.advanced ?? {}) } };
+              const responseTask = { ...task, advanced: { ...advancedRecord(args.advanced), ...advancedRecord(task.advanced) } };
               try {
                 const { session, result } = await sessionManager.start(withRequestAbort({
                   ...runOptions,
@@ -2574,7 +2616,9 @@ registerTool(
                     : `Codex task group finished with errors (${completed}/${args.tasks.length})`
                   : `${result.ok ? "Completed" : "Finished"} ${task.name ?? task.description} (${completed}/${args.tasks.length})`;
                 await progress.send(message, last ? { progress: total, total } : { total, reserveFinal: true });
-                return { result, session: compactSessionSnapshotForMcp(session), task: responseTask };
+                const compactSession = compactSessionSnapshotForMcp(session);
+                if (result.ok && !task.keep_session) sessionManager.dispose(session.id, "task_group_one_shot_completed");
+                return { result, session: compactSession, task: responseTask };
               } catch (error) {
                 completed += 1;
                 failed += 1;
@@ -2661,7 +2705,7 @@ registerTool(
         }
 
         if (mode === "wait") {
-          const waitTimeout = capBlockingWaitTimeout(args.wait_timeout_ms);
+          const waitTimeout = capToolBlockingWaitTimeout(args.wait_timeout_ms, extra);
           logCappedWait("codex_followup", waitTimeout, { sessionId: args.session_id, mode });
           await progress.send(`Waiting for Codex session ${args.session_id}`);
           const waited = await withProgressHeartbeat(
@@ -2731,18 +2775,26 @@ registerTool(
               ? "This wait returned at the server responsiveness cap. Call codex_followup mode wait again, or read codex://sessions/<session_id> for current progress."
               : "Call codex_followup mode wait again, or read codex://sessions/<session_id> for current progress.";
           }
-          if (recovery) {
+          const payloadRecovery =
+            waited.timeoutReason === "wait_cancelled"
+              ? recovery
+              : completed && waitAgent && !waitAgent.ok
+                ? waitAgentRecovery
+                : undefined;
+          if (payloadRecovery) {
             payload.error = {
               message:
                 waitAgent && !waitAgent.ok
                   ? agentFallbackErrorText(waitAgent, waitAgentRecovery) ?? `Codex task ${waitAgent.status}`
-                  : undefined,
-              recoverable: recovery.recoverable,
-              kind: recovery.reason,
-              retry_after_ms: recovery.retryAfterMs,
+                  : waited.timeoutReason === "wait_cancelled"
+                    ? "Codex wait was cancelled by the MCP client."
+                    : undefined,
+              recoverable: payloadRecovery.recoverable,
+              kind: payloadRecovery.reason,
+              retry_after_ms: payloadRecovery.retryAfterMs,
             };
           }
-          if (args.advanced?.include_diagnostics) {
+          if (includeDiagnostics(args.advanced)) {
             payload.turn = waited.turn;
             payload.diagnostics = {
               session: compactSession,
@@ -2778,7 +2830,7 @@ registerTool(
               result: resultText || "Codex session had already completed.",
               session_id: args.session_id,
               elapsed_ms: sessionProgressPayload(compactSession, compactResult).elapsed_ms,
-              diagnostics: args.advanced?.include_diagnostics
+              diagnostics: includeDiagnostics(args.advanced)
                 ? { session: compactSession, result: compactResult }
                 : undefined,
               hint: "The session had already completed. Start a new codex_task if more work is needed.",
@@ -2812,7 +2864,7 @@ registerTool(
             session_id: args.session_id,
             cancelled_turn: activeTurn ? { ...activeTurn, status: "cancelled" } : undefined,
             elapsed_ms: elapsedMs,
-            diagnostics: args.advanced?.include_diagnostics
+            diagnostics: includeDiagnostics(args.advanced)
               ? {
                   session: compactSession,
                   ...sessionProgressPayload(compactSession),
@@ -2830,7 +2882,7 @@ registerTool(
         });
         const { prompt: runPrompt, ...overrides } = runOptions;
         const wait = !args.background;
-        const waitTimeout = capBlockingWaitTimeout(args.wait_timeout_ms);
+        const waitTimeout = capToolBlockingWaitTimeout(args.wait_timeout_ms, extra);
         if (wait) logCappedWait("codex_followup", waitTimeout, { sessionId: args.session_id, mode });
         await progress.send(
           mode === "steer"
@@ -2858,13 +2910,20 @@ registerTool(
           response.turn && typeof (response.turn as { id?: unknown }).id === "string"
             ? (response.turn as { id: string }).id
             : undefined;
-        if (wait && turnId) {
+        const activeTurnId =
+          delivery === "delivered_to_active_turn" &&
+          response.session.activeTurn &&
+          typeof response.session.activeTurn.id === "string"
+            ? response.session.activeTurn.id
+            : undefined;
+        const waitTurnId = activeTurnId ?? turnId;
+        if (wait && waitTurnId) {
           const waited = await withProgressHeartbeat(
             progress,
             () => codexLiveProgressMessage(args.session_id, `Still waiting for Codex session ${args.session_id}`),
             () =>
               withSessionMilestoneProgress(progress, args.session_id, () =>
-                sessionManager.wait(args.session_id, waitTimeout.effectiveMs, turnId, extra?.signal),
+                sessionManager.wait(args.session_id, waitTimeout.effectiveMs, waitTurnId, extra?.signal),
               ),
           );
           if (waited.error || !waited.session) {
@@ -2892,7 +2951,7 @@ registerTool(
               tool: "codex_followup",
               session: compactSession,
               turn: waited.turn ?? response.turn,
-              includeDiagnostics: Boolean(args.advanced?.include_diagnostics),
+              includeDiagnostics: includeDiagnostics(args.advanced),
               includeSessionId: true,
             });
           }
@@ -2915,7 +2974,7 @@ registerTool(
               ? "This wait returned at the server responsiveness cap. Call codex_followup mode wait again with this session_id and turn_id, or read codex://sessions/<session_id>."
               : "Call codex_followup mode wait again with this session_id and turn_id, or read codex://sessions/<session_id>.",
           };
-          if (args.advanced?.include_diagnostics) {
+          if (includeDiagnostics(args.advanced)) {
             payload.diagnostics = {
               session: compactSession,
               ...progressPayload,
@@ -2933,7 +2992,7 @@ registerTool(
             tool: "codex_followup",
             session: compactSession,
             turn: response.turn,
-            includeDiagnostics: Boolean(args.advanced?.include_diagnostics),
+            includeDiagnostics: includeDiagnostics(args.advanced),
             includeSessionId: true,
           });
         }
@@ -2953,7 +3012,7 @@ registerTool(
           delivery,
           hint: "Use codex_wait_any for parallel background tasks, or codex_followup mode wait, steer, or cancel with this session_id.",
         };
-        if (args.advanced?.include_diagnostics) {
+        if (includeDiagnostics(args.advanced)) {
           payload.diagnostics = {
             session: compactSession,
             ...sessionProgressPayload(compactSession),
@@ -2997,7 +3056,7 @@ registerTool(
       const progress = createProgressReporter(extra);
       const startedAt = Date.now();
       const sessionIds = [...new Set(args.session_ids)];
-      const waitTimeout = capBlockingWaitTimeout(args.wait_timeout_ms);
+      const waitTimeout = capToolBlockingWaitTimeout(args.wait_timeout_ms, extra);
       const unsubscribers: Array<() => void> = [];
       try {
         logCappedWait("codex_wait_any", waitTimeout, { sessionIds });
@@ -3705,7 +3764,7 @@ registerDebugTool(
     loggedToolCall("codex_session_wait", args, extra, async () => {
       const progress = createProgressReporter(extra);
       try {
-        const waitTimeout = capBlockingWaitTimeout(args.timeout_ms);
+        const waitTimeout = capToolBlockingWaitTimeout(args.timeout_ms, extra);
         logCappedWait("codex_session_wait", waitTimeout, { sessionId: args.session_id });
         await progress.send(`Waiting for Codex session ${args.session_id}`);
         const waited = await withProgressHeartbeat(
@@ -4327,7 +4386,7 @@ registerLegacyTool(
     loggedToolCall("wait_codex_session", args, extra, async () => {
       const progress = createProgressReporter(extra);
       try {
-        const waitTimeout = capBlockingWaitTimeout(args.timeout_ms);
+        const waitTimeout = capToolBlockingWaitTimeout(args.timeout_ms, extra);
         logCappedWait("wait_codex_session", waitTimeout, { sessionId: args.session_id });
         await progress.send(`Waiting for Codex session ${args.session_id}`);
         const waited = await withProgressHeartbeat(

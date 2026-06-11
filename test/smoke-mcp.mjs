@@ -101,6 +101,11 @@ try {
   await client.connect(transport);
 
   const toolList = await client.listTools();
+  assert(
+    JSON.stringify(toolList.tools).length < 26_000,
+    "default tool schema should stay compact enough for Claude to scan quickly",
+    { bytes: JSON.stringify(toolList.tools).length },
+  );
   const toolNames = new Set(toolList.tools.map((tool) => tool.name));
   assert(toolNames.has("codex_task"), "default tool surface should expose codex_task", toolList.tools);
   assert(toolNames.has("codex_task_group"), "default tool surface should expose codex_task_group", toolList.tools);
@@ -433,7 +438,8 @@ try {
   assert(
     followupTimedOut.structuredContent?.completed === false &&
       followupTimedOut.structuredContent?.timeoutReason === "wait_timeout" &&
-      followupTimedOut.structuredContent?.effective_wait_timeout_ms === 20,
+      followupTimedOut.structuredContent?.effective_wait_timeout_ms === 20 &&
+      followupTimedOut.structuredContent?.error === undefined,
     "foreground codex_followup should honor wait_timeout_ms instead of waiting indefinitely",
     followupTimedOut.structuredContent,
   );
@@ -503,6 +509,25 @@ try {
     completedBackgroundResource,
   );
   await client.unsubscribeResource({ uri: backgroundResourceUri });
+  const foregroundSteerStart = await callTool("codex_task", {
+    description: "Foreground steering session",
+    prompt: "foreground steering initial DELAY_MS=150",
+    project_dir: projectDir,
+    background: true,
+  });
+  const foregroundSteer = await callTool("codex_followup", {
+    session_id: foregroundSteerStart.structuredContent.session_id,
+    mode: "steer",
+    prompt: "foreground steering smoke",
+    wait_timeout_ms: 5_000,
+  });
+  assert(
+    foregroundSteer.structuredContent?.ok &&
+      foregroundSteer.structuredContent?.session_id === foregroundSteerStart.structuredContent.session_id &&
+      foregroundSteer.structuredContent?.result?.includes("foreground steering smoke"),
+    "foreground codex_followup mode steer should wait on the active Codex turn result",
+    foregroundSteer.structuredContent,
+  );
   const waitedWithDiagnostics = await callTool("codex_followup", {
     session_id: background.structuredContent.session_id,
     mode: "wait",
@@ -640,6 +665,7 @@ try {
   });
   const results = group.structuredContent?.results;
   assert(group.structuredContent?.ok, "codex_task_group failed", group.structuredContent);
+  assert(!("result" in group.structuredContent), "codex_task_group structured content should avoid duplicate rollup text", group.structuredContent);
   assert(Array.isArray(results) && results.length === 2, "expected two group results", group.structuredContent);
   assert(
     results.every(

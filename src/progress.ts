@@ -4,9 +4,16 @@ import { errorForLog, logger } from "./logging.js";
 
 export type ToolExtra = RequestHandlerExtra<ServerRequest, ServerNotification>;
 
-function progressNotificationsEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
+export function progressNotificationsEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
   const raw = env.CODEX_SUBAGENTS_ENABLE_PROGRESS_NOTIFICATIONS?.trim().toLowerCase();
   return ["1", "true", "yes", "on"].includes(raw ?? "");
+}
+
+export function progressNotificationsAvailable(
+  extra: Pick<ToolExtra, "_meta"> | undefined,
+  env: NodeJS.ProcessEnv = process.env,
+): boolean {
+  return progressNotificationsEnabled(env) && extra?._meta?.progressToken !== undefined;
 }
 
 function progressSendTimeoutMs(env: NodeJS.ProcessEnv = process.env): number {

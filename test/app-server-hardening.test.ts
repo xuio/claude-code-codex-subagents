@@ -334,13 +334,15 @@ describe("app-server hardening", () => {
 
   it("keeps concurrent app-server sessions isolated", async () => {
     const manager = new CodexSessionManager();
-    const projectDir = await tempDir("codex-subagents-app-concurrent-project-");
+    const projectDirs = await Promise.all(
+      [0, 1, 2, 3].map(() => tempDir("codex-subagents-app-concurrent-project-")),
+    );
     const recordDir = await tempDir("codex-subagents-app-concurrent-record-");
 
     const sessions = [0, 1, 2, 3].map((index) =>
       manager.startAsync({
         prompt: `concurrent-${index} DELAY_MS=${index === 1 ? 10000 : 500}`,
-        projectDir,
+        projectDir: projectDirs[index],
         codexBin: fakeCodex,
         env: {
           FAKE_CODEX_RECORD_DIR: recordDir,

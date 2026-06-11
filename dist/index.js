@@ -23147,6 +23147,9 @@ function readPositiveInt(value, fallback, max) {
 function projectKeyForOptions(options) {
   return options.projectDir?.trim() || options.cwd?.trim() || process.env.CLAUDE_PROJECT_DIR?.trim() || "__default__";
 }
+function projectKeyForRunOptions(options) {
+  return projectKeyForOptions(options);
+}
 function statusFromAgentResult(result) {
   if (result.status === "cancelled") return "cancelled";
   return result.ok ? "completed" : "failed";
@@ -23764,6 +23767,9 @@ function progressNotificationsEnabled(env = process.env) {
   const raw = env.CODEX_SUBAGENTS_ENABLE_PROGRESS_NOTIFICATIONS?.trim().toLowerCase();
   return ["1", "true", "yes", "on"].includes(raw ?? "");
 }
+function progressNotificationsAvailable(extra, env = process.env) {
+  return progressNotificationsEnabled(env) && extra?._meta?.progressToken !== void 0;
+}
 function progressSendTimeoutMs(env = process.env) {
   const parsed = Number(env.CODEX_SUBAGENTS_PROGRESS_SEND_TIMEOUT_MS);
   if (!Number.isFinite(parsed) || parsed <= 0) return 1e3;
@@ -23921,16 +23927,22 @@ function updateOrphanWatchdogState(options) {
 // src/wait-timeout.ts
 var defaultBlockingWaitTimeoutMs = 3e5;
 var hardMaxBlockingWaitTimeoutMs = 3e5;
+var defaultProgressBlockingWaitTimeoutMs = 12e5;
+var hardMaxProgressBlockingWaitTimeoutMs = 12e5;
 var minBlockingWaitTimeoutMs = 25;
-function configuredMaxBlockingWaitMs(env = process.env) {
-  const parsed = Number(env.CODEX_SUBAGENTS_MAX_BLOCKING_WAIT_MS);
-  if (!Number.isFinite(parsed) || parsed <= 0) return defaultBlockingWaitTimeoutMs;
-  return Math.max(minBlockingWaitTimeoutMs, Math.min(Math.floor(parsed), hardMaxBlockingWaitTimeoutMs));
+function configuredMaxBlockingWaitMs(env = process.env, options = {}) {
+  const envKey = options.progress ? "CODEX_SUBAGENTS_MAX_PROGRESS_BLOCKING_WAIT_MS" : "CODEX_SUBAGENTS_MAX_BLOCKING_WAIT_MS";
+  const fallback = options.progress ? defaultProgressBlockingWaitTimeoutMs : defaultBlockingWaitTimeoutMs;
+  const hardMax = options.progress ? hardMaxProgressBlockingWaitTimeoutMs : hardMaxBlockingWaitTimeoutMs;
+  const parsed = Number(env[envKey]);
+  if (!Number.isFinite(parsed) || parsed <= 0) return fallback;
+  return Math.max(minBlockingWaitTimeoutMs, Math.min(Math.floor(parsed), hardMax));
 }
-function capBlockingWaitTimeout(requestedMs, env = process.env) {
-  const requested = requestedMs ?? configuredMaxBlockingWaitMs(env);
+function capBlockingWaitTimeout(requestedMs, env = process.env, options = {}) {
+  const configuredMax = configuredMaxBlockingWaitMs(env, options);
+  const requested = requestedMs ?? configuredMax;
   const normalized = Math.max(1, Math.floor(requested));
-  const effective = Math.min(normalized, configuredMaxBlockingWaitMs(env));
+  const effective = Math.min(normalized, configuredMax);
   return {
     requestedMs: normalized,
     effectiveMs: effective,
@@ -25146,6 +25158,7 @@ function durableRunOptions(options) {
 }
 
 // src/sessions.ts
+var maxRecentTurnsRetained = 50;
 function withoutUndefined(value) {
   return Object.fromEntries(
     Object.entries(value).filter(([, child]) => child !== void 0)
@@ -25157,6 +25170,16 @@ function sessionBaseOptions(options) {
     sandbox: options.dangerouslyBypassApprovalsAndSandbox ? "read-only" : options.sandbox,
     dangerouslyBypassApprovalsAndSandbox: false
   };
+}
+function sandboxCapability(options) {
+  if (options.dangerouslyBypassApprovalsAndSandbox || options.sandbox === "danger-full-access") return "danger-full-access";
+  if (options.sandbox === "workspace-write") return "workspace-write";
+  return "read-only";
+}
+function sandboxRank(sandbox) {
+  if (sandbox === "danger-full-access") return 2;
+  if (sandbox === "workspace-write") return 1;
+  return 0;
 }
 function turnSnapshot(turn) {
   return {
@@ -25450,6 +25473,8 @@ var CodexSessionManager = class {
       draining: false,
       cancelRequested: false,
       runtimeShutdownRecoverable: false,
+      sandboxCeiling: sandboxCapability(baseOptions),
+      allowSensitiveEnv: Boolean(baseOptions.forwardSensitiveEnv),
       waiters: /* @__PURE__ */ new Set(),
       milestones: [],
       milestoneSeq: 0,
@@ -25499,12 +25524,18 @@ var CodexSessionManager = class {
       overrides: summarizeRawTrafficForLog(overrides),
       options
     });
+    const cleanOverrides = {
+      ...withoutUndefined(overrides),
+      ephemeral: false
+    };
+    const escalationError = this.validateTurnOverrides(session, cleanOverrides);
+    if (escalationError) {
+      logger.warn("session.send_rejected_escalation", { sessionId: id, error: escalationError });
+      return { session: snapshot2(session), error: escalationError };
+    }
     const turn = this.enqueueTurn(session, {
       prompt,
-      overrides: {
-        ...withoutUndefined(overrides),
-        ephemeral: false
-      },
+      overrides: cleanOverrides,
       kind: options.kind ?? "prompt",
       priority: options.priority
     });
@@ -25555,6 +25586,7 @@ var CodexSessionManager = class {
             turn.resultOk = true;
             turn.resultStatus = "completed";
             turn.updatedAt = (/* @__PURE__ */ new Date()).toISOString();
+            this.trimRecentTurns(session);
             this.notifyTurn(turn);
             this.notifySession(session);
             const activeTurn = session.activeTurn;
@@ -25766,6 +25798,32 @@ var CodexSessionManager = class {
     this.persist();
     return snapshot2(session);
   }
+  dispose(id, reason = "disposed") {
+    const session = this.sessions.get(id);
+    if (!session) {
+      logger.warn("session.dispose_unknown", { sessionId: id, reason });
+      return void 0;
+    }
+    if (session.controller || session.draining || session.queuedTurns.length > 0) {
+      logger.warn("session.dispose_active_rejected", {
+        sessionId: id,
+        reason,
+        active: Boolean(session.controller),
+        queuedTurns: session.queuedTurns.length
+      });
+      return snapshot2(session);
+    }
+    const disposed = snapshot2(session);
+    logger.info("session.dispose", { sessionId: id, reason, status: session.status });
+    this.sessions.delete(id);
+    if (session.resourceNotifyTimer) clearTimeout(session.resourceNotifyTimer);
+    if (session.resourceNotifyMaxTimer) clearTimeout(session.resourceNotifyMaxTimer);
+    this.closeAppServer(session, "cancelled", reason);
+    this.notifySession(session);
+    this.emitSessionChanged(id);
+    this.persist();
+    return disposed;
+  }
   async recover(id) {
     this.prune();
     const session = this.sessions.get(id);
@@ -25916,6 +25974,29 @@ var CodexSessionManager = class {
     this.notifySession(session);
     this.persist();
     return turn;
+  }
+  validateTurnOverrides(session, overrides) {
+    const requestedSandbox = sandboxCapability({
+      sandbox: overrides.sandbox ?? session.baseOptions.sandbox,
+      dangerouslyBypassApprovalsAndSandbox: overrides.dangerouslyBypassApprovalsAndSandbox
+    });
+    if (sandboxRank(requestedSandbox) > sandboxRank(session.sandboxCeiling)) {
+      return `Session ${session.id} was created with ${session.sandboxCeiling} capability and cannot be escalated to ${requestedSandbox}; start a new codex_task with explicit full_access if higher privileges are required.`;
+    }
+    if (overrides.forwardSensitiveEnv && !session.allowSensitiveEnv) {
+      return `Session ${session.id} was not created with sensitive env forwarding and cannot enable it in a follow-up; start a new codex_task if env-based secrets are required.`;
+    }
+    return void 0;
+  }
+  trimRecentTurns(session) {
+    while (session.recentTurns.length > maxRecentTurnsRetained) {
+      const removableIndex = session.recentTurns.findIndex(
+        (candidate) => candidate !== session.activeTurn && !session.queuedTurns.includes(candidate) && terminal(candidate.status)
+      );
+      if (removableIndex < 0) return;
+      const [removed] = session.recentTurns.splice(removableIndex, 1);
+      removed?.waiters.clear();
+    }
   }
   recordSteerDelivery(session, prompt) {
     const turn = this.enqueueTurn(session, {
@@ -26075,22 +26156,34 @@ var CodexSessionManager = class {
   async runAppServerTurn(session, options, controller) {
     let appServerWasReady = false;
     try {
-      const appServer = await this.ensureAppServer(session, options);
-      appServerWasReady = true;
-      return await appServer.startTurn(
-        options,
-        controller.signal,
-        (partial2) => {
-          session.partial = partial2;
-          session.updatedAt = (/* @__PURE__ */ new Date()).toISOString();
-          this.recordPartialMilestones(session, partial2);
-          logger.rawDebug("session.turn.partial", {
-            sessionId: session.id,
-            partial: summarizeRawTrafficForLog(partial2)
-          });
+      const { value, queuedMs } = await agentRunQueue.enqueue(
+        async () => {
+          const appServer = await this.ensureAppServer(session, options);
+          appServerWasReady = true;
+          return appServer.startTurn(
+            options,
+            controller.signal,
+            (partial2) => {
+              session.partial = partial2;
+              session.updatedAt = (/* @__PURE__ */ new Date()).toISOString();
+              this.recordPartialMilestones(session, partial2);
+              logger.rawDebug("session.turn.partial", {
+                sessionId: session.id,
+                partial: summarizeRawTrafficForLog(partial2)
+              });
+            },
+            { sessionTurnId: session.activeTurn?.id }
+          );
         },
-        { sessionTurnId: session.activeTurn?.id }
+        {
+          signal: controller.signal,
+          projectKey: projectKeyForRunOptions(options)
+        }
       );
+      return {
+        ...value,
+        queue: { queuedMs }
+      };
     } catch (error2) {
       if (session.appServer?.status().closed) session.appServer = void 0;
       if (session.turns === 0 && !appServerWasReady && !session.appServer && shouldFallbackToExec(error2)) {
@@ -26155,6 +26248,7 @@ var CodexSessionManager = class {
     turn.resultStatus = result.status;
     turn.status = result.ok ? "completed" : result.status === "cancelled" ? "cancelled" : "failed";
     turn.updatedAt = (/* @__PURE__ */ new Date()).toISOString();
+    this.trimRecentTurns(session);
     session.status = result.ok ? "active" : result.status === "cancelled" && session.runtimeShutdownRecoverable && session.codexThreadId ? "active" : result.status === "cancelled" && session.queuedTurns.length > 0 && !session.cancelRequested ? "running" : result.status === "cancelled" ? "cancelled" : "failed";
     session.updatedAt = (/* @__PURE__ */ new Date()).toISOString();
     this.appendMilestones(session, [
@@ -26415,6 +26509,8 @@ var CodexSessionManager = class {
       draining: false,
       cancelRequested: state.status === "cancelled",
       runtimeShutdownRecoverable: false,
+      sandboxCeiling: sandboxCapability(state.baseOptions),
+      allowSensitiveEnv: Boolean(state.baseOptions.forwardSensitiveEnv),
       waiters: /* @__PURE__ */ new Set(),
       milestones: [],
       milestoneSeq: 0,
@@ -26669,20 +26765,27 @@ var frontDoorInputSchema = {
   subagent_tasks: commonInputSchema.subagent_tasks,
   subagent_runtime: commonInputSchema.subagent_runtime
 };
-var codexRoleSchema = external_exports.enum([
+var advertisedCodexRoleValues = [
   "general-purpose",
   "code-reviewer",
   "security-reviewer",
-  "reviewer",
   "explorer",
+  "planner",
+  "patcher",
+  "docs"
+];
+var codexRoleAliasValues = [
+  "reviewer",
   "security",
   "performance",
   "tests",
-  "planner",
   "risk",
-  "patcher",
-  "docs",
   "ui"
+];
+var advertisedCodexRoleSchema = external_exports.enum(advertisedCodexRoleValues);
+var codexRoleSchema = external_exports.enum([
+  ...advertisedCodexRoleValues,
+  ...codexRoleAliasValues
 ]);
 var codexRoleDefaults = {
   "general-purpose": {
@@ -26766,9 +26869,9 @@ var codexRoleDefaults = {
 };
 var advancedInputSchema = external_exports.object({
   model: external_exports.string().trim().min(1).optional().describe(
-    "Exact Codex model. Use gpt-5.5 for the current strongest ChatGPT-backed model; do not add a -codex suffix to GPT-5.5. Use gpt-5.3-codex-spark only when the user explicitly asks for Codex Spark."
+    "Exact Codex model, or alias `spark` / `codex`. Omit by default; use `spark` only when the user asks for Codex Spark or a quick focused sidecar check."
   ),
-  model_preset: modelPresetSchema.optional().describe("Compatibility preset. Prefer advanced.model for new calls."),
+  model_preset: modelPresetSchema.optional().describe("Compatibility preset retained for older callers. Prefer advanced.model for new calls."),
   reasoning: reasoningEffortSchema.optional().describe("Advanced reasoning effort, including xhigh. Minimal is still rejected by this server."),
   reasoning_effort: reasoningEffortSchema.optional().describe("Compatibility alias for advanced.reasoning."),
   sandbox: sandboxModeSchema.optional().describe("Advanced sandbox override. Leave unset for normal read-only Codex delegation."),
@@ -26801,13 +26904,16 @@ var advancedInputSchema = external_exports.object({
 }).strict().describe(
   "DO NOT USE unless the user explicitly asked for exact model, timeout, diagnostics, custom MCP sharing, nested Codex subagents, or another uncommon Codex setting."
 );
+var advertisedAdvancedInputSchema = looseRecordSchema.describe(
+  "Power-user Codex settings object. Usually omit. Common keys: model (`spark`, `codex`, or exact model), reasoning (`xhigh` only when explicitly requested), timeout_ms, include_diagnostics, sandbox, codex_bin, output_contract, output_schema, codex_subagents, subagent_tasks, subagent_runtime, and MCP sharing options. The server validates this object strictly at runtime."
+);
 var nativeBaseInputSchema = {
   project_dir: commonInputSchema.project_dir.describe(
     "Project directory for Codex. Defaults to CLAUDE_PROJECT_DIR from Claude Code; usually omit this unless the user specified a directory."
   ),
   reasoning: publicReasoningSchema.optional().describe("Codex reasoning effort for normal use. Omit for medium; use high only for difficult analysis."),
   full_access: external_exports.boolean().default(false).describe("Allow Codex to write files, use network/DNS, and modify git. Only true when the user explicitly asks for non-sandbox execution."),
-  advanced: advancedInputSchema.optional()
+  advanced: advertisedAdvancedInputSchema.optional()
 };
 function toCodexSubagents(agents) {
   return agents?.map((agent) => ({
@@ -26933,8 +27039,8 @@ function suggestedActionForAgent(result, recovery) {
   if (result.ok) return void 0;
   return "Inspect the Codex result details and retry only if the failure looks transient.";
 }
-function nativeTextResult(value, isError = false) {
-  const text = typeof value.result === "string" && value.result.trim() ? value.result : typeof value.summary === "string" ? value.summary : JSON.stringify(value, null, 2);
+function nativeTextResult(value, isError = false, textOverride) {
+  const text = typeof textOverride === "string" && textOverride.trim() ? textOverride : typeof value.result === "string" && value.result.trim() ? value.result : typeof value.summary === "string" ? value.summary : JSON.stringify(value, null, 2);
   return {
     structuredContent: value,
     isError,
@@ -27047,7 +27153,7 @@ function nativeTaskGroupResponse(runs) {
           retry_after_ms: recovery2.retryAfterMs
         };
       }
-      if (run.task.advanced?.include_diagnostics) item.diagnostics = diagnosticsForAgent(agent);
+      if (includeDiagnostics(run.task.advanced)) item.diagnostics = diagnosticsForAgent(agent);
       return item;
     }
     const recovery = recoveryForError(run.error ?? new Error("Codex task failed before producing a result."), "codex_task_group");
@@ -27068,7 +27174,7 @@ Next: ${recovery.recommendedAction}` : message;
         kind: recovery.reason,
         retry_after_ms: recovery.retryAfterMs
       },
-      diagnostics: run.task.advanced?.include_diagnostics ? {} : void 0
+      diagnostics: includeDiagnostics(run.task.advanced) ? {} : void 0
     };
   });
   const ok = normalized.every((result) => result.ok);
@@ -27080,11 +27186,11 @@ ${item.result || item.summary}`).join("\n\n");
       ok,
       status: ok ? "completed" : "failed",
       summary: `${normalized.filter((result) => result.ok).length}/${normalized.length} Codex tasks completed successfully.`,
-      result: resultText,
       results: normalized,
       hint: firstFailed ? "Retry only the failed task if it is still needed." : void 0
     },
-    !ok
+    !ok,
+    resultText
   );
 }
 function codexRoleForPrompt(args) {
@@ -27249,6 +27355,11 @@ function waitTimeoutFields(waitTimeout) {
   if (waitTimeout.capped) fields.wait_timeout_capped = true;
   return fields;
 }
+function capToolBlockingWaitTimeout(requestedMs, extra) {
+  return capBlockingWaitTimeout(requestedMs, process.env, {
+    progress: progressNotificationsAvailable(extra)
+  });
+}
 function logCappedWait(tool, waitTimeout, fields = {}) {
   if (!waitTimeout.capped) return;
   logger.warn(`${tool}.wait_timeout_capped`, {
@@ -27335,7 +27446,7 @@ function foregroundTaskStillRunningPayload(args, session, turn, waitTimeout, tim
     ...waitTimeoutFields(waitTimeout),
     timeoutReason,
     hint: "Use codex_followup mode wait to collect the result, mode steer to redirect the running task, or mode cancel to stop it.",
-    diagnostics: args.advanced?.include_diagnostics ? {
+    diagnostics: includeDiagnostics(args.advanced) ? {
       session,
       ...progressPayload
     } : void 0
@@ -27467,8 +27578,19 @@ function publicModel(model) {
   if (value === "codex") return "gpt-5.3-codex";
   return value;
 }
+function parseAdvancedInput(value) {
+  if (value === void 0) return {};
+  return advancedInputSchema.parse(value);
+}
+function advancedRecord(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return {};
+  return value;
+}
+function includeDiagnostics(value) {
+  return parseAdvancedInput(value).include_diagnostics === true;
+}
 function publicRunOptions(args) {
-  const advanced = args.advanced ?? {};
+  const advanced = parseAdvancedInput(args.advanced);
   const roleKey = codexRoleForPrompt(args);
   const role = roleKey ? codexRoleDefaults[roleKey] : void 0;
   const fullAccess = Boolean(args.full_access ?? advanced.dangerously_bypass_approvals_and_sandbox);
@@ -27516,7 +27638,7 @@ function publicGroupRunOptions(args) {
       (task) => publicRunOptions({
         ...args,
         ...task,
-        advanced: { ...args.advanced ?? {}, ...task.advanced ?? {} },
+        advanced: { ...advancedRecord(args.advanced), ...advancedRecord(task.advanced) },
         project_dir: task.project_dir ?? args.project_dir,
         reasoning: task.reasoning ?? args.reasoning,
         full_access: task.full_access ?? args.full_access,
@@ -27908,7 +28030,7 @@ registerTool(
       prompt: external_exports.string().trim().min(1).describe(
         "Self-contained Codex task prompt. Include scope, read-only expectation, output shape, and file/line reference requirements when reviewing code."
       ),
-      subagent_type: external_exports.enum(codexRoleSchema.options).optional().describe("Claude-style Codex persona. Prefer general-purpose, explorer, planner, code-reviewer, or security-reviewer. Defaults to general-purpose."),
+      subagent_type: advertisedCodexRoleSchema.optional().describe("Claude-style Codex persona. Prefer general-purpose, explorer, planner, code-reviewer, or security-reviewer. Defaults to general-purpose."),
       background: external_exports.boolean().default(false).describe("Equivalent to native run_in_background: return immediately with a session_id while Codex keeps working."),
       keep_session: external_exports.boolean().default(false).describe("Return session_id after a completed task so Claude can continue this Codex context. Leave false for one-shot native Task-like work."),
       session_name: external_exports.string().trim().min(1).optional().describe("Optional human label for the returned Codex session."),
@@ -27924,7 +28046,8 @@ registerTool(
           ephemeral: false
         };
         await progress.send(`Starting Codex task: ${args.description}`);
-        if (args.background || args.advanced?.wait_for_completion === false) {
+        const advanced = parseAdvancedInput(args.advanced);
+        if (args.background || advanced.wait_for_completion === false) {
           throwIfRequestAborted(extra);
           const { session, turn: turn2 } = sessionManager.startAsync(runOptions, { sessionName: args.session_name });
           await progress.flush();
@@ -27938,7 +28061,7 @@ registerTool(
             turn: turn2,
             hint: "Use codex_wait_any for parallel background tasks, or codex_followup mode wait, steer, or cancel with this session_id."
           };
-          if (args.advanced?.include_diagnostics) {
+          if (advanced.include_diagnostics) {
             payload.diagnostics = {
               session: compactSession,
               ...sessionProgressPayload(compactSession)
@@ -27946,7 +28069,7 @@ registerTool(
           }
           return nativeTextResult(payload);
         }
-        const waitTimeout = capBlockingWaitTimeout(void 0);
+        const waitTimeout = capToolBlockingWaitTimeout(void 0, extra);
         const { session: startedSession, turn } = sessionManager.startAsync(runOptions, {
           sessionName: args.session_name
         });
@@ -28003,15 +28126,17 @@ registerTool(
           }
           await reportAgentResult(progress, result);
           await progress.flush();
-          return nativeAgentResponse(result, {
+          const response = nativeAgentResponse(result, {
             description: args.description,
             prompt: args.prompt,
             tool: "codex_task",
             session: compactSession,
             turn: waited.turn ?? compactSession.recentTurns?.at(-1),
-            includeDiagnostics: Boolean(args.advanced?.include_diagnostics),
+            includeDiagnostics: Boolean(advanced.include_diagnostics),
             includeSessionId: Boolean(args.keep_session)
           });
+          if (result.ok && !args.keep_session) sessionManager.dispose(startedSession.id, "one_shot_completed");
+          return response;
         } finally {
           unsubscribeMilestones();
           extra?.signal?.removeEventListener("abort", abortHandler);
@@ -28206,7 +28331,7 @@ var nativeTaskGroupTaskSchema = external_exports.object({
   prompt: external_exports.string().trim().min(1).describe(
     "Self-contained Codex prompt for this independent task. Keep overlap low across parallel tasks."
   ),
-  subagent_type: codexRoleSchema.optional().describe("Claude-style Codex persona. Prefer general-purpose, explorer, planner, code-reviewer, or security-reviewer."),
+  subagent_type: advertisedCodexRoleSchema.optional().describe("Claude-style Codex persona. Prefer general-purpose, explorer, planner, code-reviewer, or security-reviewer."),
   name: external_exports.string().trim().min(1).optional().describe("Optional stable label for this Codex task."),
   keep_session: external_exports.boolean().default(false).describe("Return this task's session_id after completion so Claude can follow up. Leave false for native Task-like one-shot work."),
   ...nativeBaseInputSchema
@@ -28238,7 +28363,7 @@ registerTool(
           () => mapWithConcurrency(group.tasks, group.maxParallel, async (runOptions, index) => {
             const task = args.tasks[index];
             if (!task) throw new Error(`Missing Codex task at index ${index}.`);
-            const responseTask = { ...task, advanced: { ...args.advanced ?? {}, ...task.advanced ?? {} } };
+            const responseTask = { ...task, advanced: { ...advancedRecord(args.advanced), ...advancedRecord(task.advanced) } };
             try {
               const { session, result } = await sessionManager.start(withRequestAbort({
                 ...runOptions,
@@ -28249,7 +28374,9 @@ registerTool(
               const last = completed === args.tasks.length;
               const message = last ? failed === 0 ? `Codex task group completed (${completed}/${args.tasks.length})` : `Codex task group finished with errors (${completed}/${args.tasks.length})` : `${result.ok ? "Completed" : "Finished"} ${task.name ?? task.description} (${completed}/${args.tasks.length})`;
               await progress.send(message, last ? { progress: total, total } : { total, reserveFinal: true });
-              return { result, session: compactSessionSnapshotForMcp(session), task: responseTask };
+              const compactSession = compactSessionSnapshotForMcp(session);
+              if (result.ok && !task.keep_session) sessionManager.dispose(session.id, "task_group_one_shot_completed");
+              return { result, session: compactSession, task: responseTask };
             } catch (error2) {
               completed += 1;
               failed += 1;
@@ -28307,7 +28434,7 @@ registerTool(
           return nativeErrorResult(new Error(`codex_followup mode ${mode} requires prompt.`), "codex_followup");
         }
         if (mode === "wait") {
-          const waitTimeout2 = capBlockingWaitTimeout(args.wait_timeout_ms);
+          const waitTimeout2 = capToolBlockingWaitTimeout(args.wait_timeout_ms, extra);
           logCappedWait("codex_followup", waitTimeout2, { sessionId: args.session_id, mode });
           await progress.send(`Waiting for Codex session ${args.session_id}`);
           const waited = await withProgressHeartbeat(
@@ -28350,15 +28477,16 @@ registerTool(
           if (!completed && waited.timeoutReason === "wait_timeout") {
             payload2.hint = waitTimeout2.capped ? "This wait returned at the server responsiveness cap. Call codex_followup mode wait again, or read codex://sessions/<session_id> for current progress." : "Call codex_followup mode wait again, or read codex://sessions/<session_id> for current progress.";
           }
-          if (recovery) {
+          const payloadRecovery = waited.timeoutReason === "wait_cancelled" ? recovery : completed && waitAgent && !waitAgent.ok ? waitAgentRecovery : void 0;
+          if (payloadRecovery) {
             payload2.error = {
-              message: waitAgent && !waitAgent.ok ? agentFallbackErrorText(waitAgent, waitAgentRecovery) ?? `Codex task ${waitAgent.status}` : void 0,
-              recoverable: recovery.recoverable,
-              kind: recovery.reason,
-              retry_after_ms: recovery.retryAfterMs
+              message: waitAgent && !waitAgent.ok ? agentFallbackErrorText(waitAgent, waitAgentRecovery) ?? `Codex task ${waitAgent.status}` : waited.timeoutReason === "wait_cancelled" ? "Codex wait was cancelled by the MCP client." : void 0,
+              recoverable: payloadRecovery.recoverable,
+              kind: payloadRecovery.reason,
+              retry_after_ms: payloadRecovery.retryAfterMs
             };
           }
-          if (args.advanced?.include_diagnostics) {
+          if (includeDiagnostics(args.advanced)) {
             payload2.turn = waited.turn;
             payload2.diagnostics = {
               session: compactSession2,
@@ -28393,7 +28521,7 @@ registerTool(
               result: resultText || "Codex session had already completed.",
               session_id: args.session_id,
               elapsed_ms: sessionProgressPayload(compactSession3, compactResult).elapsed_ms,
-              diagnostics: args.advanced?.include_diagnostics ? { session: compactSession3, result: compactResult } : void 0,
+              diagnostics: includeDiagnostics(args.advanced) ? { session: compactSession3, result: compactResult } : void 0,
               hint: "The session had already completed. Start a new codex_task if more work is needed."
             });
           }
@@ -28417,7 +28545,7 @@ registerTool(
             session_id: args.session_id,
             cancelled_turn: activeTurn ? { ...activeTurn, status: "cancelled" } : void 0,
             elapsed_ms: elapsedMs,
-            diagnostics: args.advanced?.include_diagnostics ? {
+            diagnostics: includeDiagnostics(args.advanced) ? {
               session: compactSession2,
               ...sessionProgressPayload(compactSession2)
             } : void 0,
@@ -28432,7 +28560,7 @@ registerTool(
         });
         const { prompt: runPrompt, ...overrides } = runOptions;
         const wait = !args.background;
-        const waitTimeout = capBlockingWaitTimeout(args.wait_timeout_ms);
+        const waitTimeout = capToolBlockingWaitTimeout(args.wait_timeout_ms, extra);
         if (wait) logCappedWait("codex_followup", waitTimeout, { sessionId: args.session_id, mode });
         await progress.send(
           mode === "steer" ? `Steering Codex session ${args.session_id}` : `Sending follow-up to Codex session ${args.session_id}`
@@ -28452,14 +28580,16 @@ registerTool(
         }
         const delivery = "delivery" in response ? response.delivery : void 0;
         const turnId = response.turn && typeof response.turn.id === "string" ? response.turn.id : void 0;
-        if (wait && turnId) {
+        const activeTurnId = delivery === "delivered_to_active_turn" && response.session.activeTurn && typeof response.session.activeTurn.id === "string" ? response.session.activeTurn.id : void 0;
+        const waitTurnId = activeTurnId ?? turnId;
+        if (wait && waitTurnId) {
           const waited = await withProgressHeartbeat(
             progress,
             () => codexLiveProgressMessage(args.session_id, `Still waiting for Codex session ${args.session_id}`),
             () => withSessionMilestoneProgress(
               progress,
               args.session_id,
-              () => sessionManager.wait(args.session_id, waitTimeout.effectiveMs, turnId, extra?.signal)
+              () => sessionManager.wait(args.session_id, waitTimeout.effectiveMs, waitTurnId, extra?.signal)
             )
           );
           if (waited.error || !waited.session) {
@@ -28487,7 +28617,7 @@ registerTool(
               tool: "codex_followup",
               session: compactSession2,
               turn: waited.turn ?? response.turn,
-              includeDiagnostics: Boolean(args.advanced?.include_diagnostics),
+              includeDiagnostics: includeDiagnostics(args.advanced),
               includeSessionId: true
             });
           }
@@ -28508,7 +28638,7 @@ registerTool(
             ...waitTimeoutFields(waitTimeout),
             hint: waitTimeout.capped ? "This wait returned at the server responsiveness cap. Call codex_followup mode wait again with this session_id and turn_id, or read codex://sessions/<session_id>." : "Call codex_followup mode wait again with this session_id and turn_id, or read codex://sessions/<session_id>."
           };
-          if (args.advanced?.include_diagnostics) {
+          if (includeDiagnostics(args.advanced)) {
             payload2.diagnostics = {
               session: compactSession2,
               ...progressPayload
@@ -28526,7 +28656,7 @@ registerTool(
             tool: "codex_followup",
             session: compactSession,
             turn: response.turn,
-            includeDiagnostics: Boolean(args.advanced?.include_diagnostics),
+            includeDiagnostics: includeDiagnostics(args.advanced),
             includeSessionId: true
           });
         }
@@ -28540,7 +28670,7 @@ registerTool(
           delivery,
           hint: "Use codex_wait_any for parallel background tasks, or codex_followup mode wait, steer, or cancel with this session_id."
         };
-        if (args.advanced?.include_diagnostics) {
+        if (includeDiagnostics(args.advanced)) {
           payload.diagnostics = {
             session: compactSession,
             ...sessionProgressPayload(compactSession)
@@ -28572,7 +28702,7 @@ registerTool(
       const progress = createProgressReporter(extra);
       const startedAt = Date.now();
       const sessionIds = [...new Set(args.session_ids)];
-      const waitTimeout = capBlockingWaitTimeout(args.wait_timeout_ms);
+      const waitTimeout = capToolBlockingWaitTimeout(args.wait_timeout_ms, extra);
       const unsubscribers = [];
       try {
         logCappedWait("codex_wait_any", waitTimeout, { sessionIds });
@@ -29156,7 +29286,7 @@ registerDebugTool(
   async (args, extra) => loggedToolCall("codex_session_wait", args, extra, async () => {
     const progress = createProgressReporter(extra);
     try {
-      const waitTimeout = capBlockingWaitTimeout(args.timeout_ms);
+      const waitTimeout = capToolBlockingWaitTimeout(args.timeout_ms, extra);
       logCappedWait("codex_session_wait", waitTimeout, { sessionId: args.session_id });
       await progress.send(`Waiting for Codex session ${args.session_id}`);
       const waited = await withProgressHeartbeat(
@@ -29710,7 +29840,7 @@ registerLegacyTool(
   async (args, extra) => loggedToolCall("wait_codex_session", args, extra, async () => {
     const progress = createProgressReporter(extra);
     try {
-      const waitTimeout = capBlockingWaitTimeout(args.timeout_ms);
+      const waitTimeout = capToolBlockingWaitTimeout(args.timeout_ms, extra);
       logCappedWait("wait_codex_session", waitTimeout, { sessionId: args.session_id });
       await progress.send(`Waiting for Codex session ${args.session_id}`);
       const waited = await withProgressHeartbeat(

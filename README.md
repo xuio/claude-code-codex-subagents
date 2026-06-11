@@ -54,27 +54,14 @@ cd claude-code-codex-subagents
 npm run install:local
 ```
 
-Then, in any project where Claude Code should use Codex subagents, add the MCP
-server:
-
-```sh
-mkdir -p .claude
-cat > .claude/mcp.json <<'JSON'
-{
-  "mcpServers": {
-    "codex-subagents": { "command": "codex-subagents-mcp" }
-  }
-}
-JSON
-```
-
-Then ask Claude:
+Restart Claude Code, then ask Claude in any project:
 
 ```text
 Use Codex to review this PR for correctness, security, and deployment risks.
 ```
 
-For plugin development, run Claude directly against this checkout:
+For plugin development, run Claude directly against this checkout without
+installing a package:
 
 ```sh
 claude --plugin-dir .

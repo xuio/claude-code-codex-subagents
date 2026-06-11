@@ -1,5 +1,5 @@
 import { AppServerUnavailableError, CodexAppServerSession, type AppServerStatus } from "./app-server.js";
-import { BackpressureError, runQueuedAgent } from "./jobs.js";
+import { agentRunQueue, BackpressureError, projectKeyForRunOptions, runQueuedAgent } from "./jobs.js";
 import { errorForLog, logger, summarizeRawTrafficForLog } from "./logging.js";
 import { RunValidationError, type AgentRunOptions, type AgentRunPartial, type AgentRunResult } from "./runner.js";
 import { recordDiagnosticEvent } from "./diagnostics.js";
@@ -15,6 +15,7 @@ type SessionTurnKind = "prompt" | "steer";
 type SessionTurnStatus = "queued" | "running" | "completed" | "failed" | "cancelled";
 type SessionProtocol = "app-server" | "exec";
 type SessionWaitTimeoutReason = "wait_timeout" | "wait_cancelled";
+const maxRecentTurnsRetained = 50;
 export type SessionMilestoneKind =
   | "turn_started"
   | "turn_completed"
@@ -139,6 +140,8 @@ interface CodexSessionRecord {
   draining: boolean;
   cancelRequested: boolean;
   runtimeShutdownRecoverable: boolean;
+  sandboxCeiling: "read-only" | "workspace-write" | "danger-full-access";
+  allowSensitiveEnv: boolean;
   waiters: Set<() => void>;
   milestones: SessionMilestone[];
   milestoneSeq: number;
@@ -166,6 +169,20 @@ function sessionBaseOptions(
     sandbox: options.dangerouslyBypassApprovalsAndSandbox ? "read-only" : options.sandbox,
     dangerouslyBypassApprovalsAndSandbox: false,
   };
+}
+
+function sandboxCapability(
+  options: Pick<AgentRunOptions, "sandbox" | "dangerouslyBypassApprovalsAndSandbox">,
+): CodexSessionRecord["sandboxCeiling"] {
+  if (options.dangerouslyBypassApprovalsAndSandbox || options.sandbox === "danger-full-access") return "danger-full-access";
+  if (options.sandbox === "workspace-write") return "workspace-write";
+  return "read-only";
+}
+
+function sandboxRank(sandbox: CodexSessionRecord["sandboxCeiling"]): number {
+  if (sandbox === "danger-full-access") return 2;
+  if (sandbox === "workspace-write") return 1;
+  return 0;
 }
 
 function turnSnapshot(turn: CodexSessionTurnRecord): CodexSessionTurnSnapshot {
@@ -534,6 +551,8 @@ export class CodexSessionManager {
       draining: false,
       cancelRequested: false,
       runtimeShutdownRecoverable: false,
+      sandboxCeiling: sandboxCapability(baseOptions),
+      allowSensitiveEnv: Boolean(baseOptions.forwardSensitiveEnv),
       waiters: new Set(),
       milestones: [],
       milestoneSeq: 0,
@@ -596,12 +615,18 @@ export class CodexSessionManager {
       overrides: summarizeRawTrafficForLog(overrides),
       options,
     });
+    const cleanOverrides = {
+      ...withoutUndefined(overrides),
+      ephemeral: false,
+    };
+    const escalationError = this.validateTurnOverrides(session, cleanOverrides);
+    if (escalationError) {
+      logger.warn("session.send_rejected_escalation", { sessionId: id, error: escalationError });
+      return { session: snapshot(session), error: escalationError };
+    }
     const turn = this.enqueueTurn(session, {
       prompt,
-      overrides: {
-        ...withoutUndefined(overrides),
-        ephemeral: false,
-      },
+      overrides: cleanOverrides,
       kind: options.kind ?? "prompt",
       priority: options.priority,
     });
@@ -667,6 +692,7 @@ export class CodexSessionManager {
             turn.resultOk = true;
             turn.resultStatus = "completed";
             turn.updatedAt = new Date().toISOString();
+            this.trimRecentTurns(session);
             this.notifyTurn(turn);
             this.notifySession(session);
             const activeTurn = session.activeTurn;
@@ -925,6 +951,33 @@ export class CodexSessionManager {
     return snapshot(session);
   }
 
+  dispose(id: string, reason = "disposed"): CodexSessionSnapshot | undefined {
+    const session = this.sessions.get(id);
+    if (!session) {
+      logger.warn("session.dispose_unknown", { sessionId: id, reason });
+      return undefined;
+    }
+    if (session.controller || session.draining || session.queuedTurns.length > 0) {
+      logger.warn("session.dispose_active_rejected", {
+        sessionId: id,
+        reason,
+        active: Boolean(session.controller),
+        queuedTurns: session.queuedTurns.length,
+      });
+      return snapshot(session);
+    }
+    const disposed = snapshot(session);
+    logger.info("session.dispose", { sessionId: id, reason, status: session.status });
+    this.sessions.delete(id);
+    if (session.resourceNotifyTimer) clearTimeout(session.resourceNotifyTimer);
+    if (session.resourceNotifyMaxTimer) clearTimeout(session.resourceNotifyMaxTimer);
+    this.closeAppServer(session, "cancelled", reason);
+    this.notifySession(session);
+    this.emitSessionChanged(id);
+    this.persist();
+    return disposed;
+  }
+
   async recover(id: string): Promise<{ session?: CodexSessionSnapshot; recovered?: boolean; error?: string }> {
     this.prune();
     const session = this.sessions.get(id);
@@ -1086,6 +1139,37 @@ export class CodexSessionManager {
     this.notifySession(session);
     this.persist();
     return turn;
+  }
+
+  private validateTurnOverrides(
+    session: CodexSessionRecord,
+    overrides: Omit<AgentRunOptions, "prompt" | "abortSignal" | "onSnapshot">,
+  ): string | undefined {
+    const requestedSandbox = sandboxCapability({
+      sandbox: overrides.sandbox ?? session.baseOptions.sandbox,
+      dangerouslyBypassApprovalsAndSandbox: overrides.dangerouslyBypassApprovalsAndSandbox,
+    });
+    if (sandboxRank(requestedSandbox) > sandboxRank(session.sandboxCeiling)) {
+      return `Session ${session.id} was created with ${session.sandboxCeiling} capability and cannot be escalated to ${requestedSandbox}; start a new codex_task with explicit full_access if higher privileges are required.`;
+    }
+    if (overrides.forwardSensitiveEnv && !session.allowSensitiveEnv) {
+      return `Session ${session.id} was not created with sensitive env forwarding and cannot enable it in a follow-up; start a new codex_task if env-based secrets are required.`;
+    }
+    return undefined;
+  }
+
+  private trimRecentTurns(session: CodexSessionRecord): void {
+    while (session.recentTurns.length > maxRecentTurnsRetained) {
+      const removableIndex = session.recentTurns.findIndex(
+        (candidate) =>
+          candidate !== session.activeTurn &&
+          !session.queuedTurns.includes(candidate) &&
+          terminal(candidate.status),
+      );
+      if (removableIndex < 0) return;
+      const [removed] = session.recentTurns.splice(removableIndex, 1);
+      removed?.waiters.clear();
+    }
   }
 
   private recordSteerDelivery(session: CodexSessionRecord, prompt: string): CodexSessionTurnRecord {
@@ -1268,22 +1352,34 @@ export class CodexSessionManager {
   ): Promise<AgentRunResult> {
     let appServerWasReady = false;
     try {
-      const appServer = await this.ensureAppServer(session, options);
-      appServerWasReady = true;
-      return await appServer.startTurn(
-        options,
-        controller.signal,
-        (partial) => {
-          session.partial = partial;
-          session.updatedAt = new Date().toISOString();
-          this.recordPartialMilestones(session, partial);
-          logger.rawDebug("session.turn.partial", {
-            sessionId: session.id,
-            partial: summarizeRawTrafficForLog(partial),
-          });
+      const { value, queuedMs } = await agentRunQueue.enqueue(
+        async () => {
+          const appServer = await this.ensureAppServer(session, options);
+          appServerWasReady = true;
+          return appServer.startTurn(
+            options,
+            controller.signal,
+            (partial) => {
+              session.partial = partial;
+              session.updatedAt = new Date().toISOString();
+              this.recordPartialMilestones(session, partial);
+              logger.rawDebug("session.turn.partial", {
+                sessionId: session.id,
+                partial: summarizeRawTrafficForLog(partial),
+              });
+            },
+            { sessionTurnId: session.activeTurn?.id },
+          );
         },
-        { sessionTurnId: session.activeTurn?.id },
+        {
+          signal: controller.signal,
+          projectKey: projectKeyForRunOptions(options),
+        },
       );
+      return {
+        ...value,
+        queue: { queuedMs },
+      };
     } catch (error) {
       if (session.appServer?.status().closed) session.appServer = undefined;
       if (session.turns === 0 && !appServerWasReady && !session.appServer && shouldFallbackToExec(error)) {
@@ -1360,6 +1456,7 @@ export class CodexSessionManager {
     turn.resultStatus = result.status;
     turn.status = result.ok ? "completed" : result.status === "cancelled" ? "cancelled" : "failed";
     turn.updatedAt = new Date().toISOString();
+    this.trimRecentTurns(session);
     session.status = result.ok
       ? "active"
       : result.status === "cancelled" && session.runtimeShutdownRecoverable && session.codexThreadId
@@ -1674,6 +1771,8 @@ export class CodexSessionManager {
       draining: false,
       cancelRequested: state.status === "cancelled",
       runtimeShutdownRecoverable: false,
+      sandboxCeiling: sandboxCapability(state.baseOptions),
+      allowSensitiveEnv: Boolean(state.baseOptions.forwardSensitiveEnv),
       waiters: new Set(),
       milestones: [],
       milestoneSeq: 0,

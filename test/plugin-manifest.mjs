@@ -21,7 +21,12 @@ assert(manifest.mcpServers === "./.claude-plugin/mcp.json", "plugin manifest sho
 assert(manifest.skills === "./skills", "plugin manifest should point at the skills directory", manifest);
 
 const server = mcp.mcpServers?.["codex-subagents"];
-assert(server?.command === "${CLAUDE_PLUGIN_ROOT}/dist/index.js", "MCP command should use CLAUDE_PLUGIN_ROOT dist entry", mcp);
+assert(server?.command === "node", "MCP command should invoke Node explicitly", mcp);
+assert(
+  Array.isArray(server?.args) && server.args[0] === "${CLAUDE_PLUGIN_ROOT}/dist/index.js",
+  "MCP args should use CLAUDE_PLUGIN_ROOT dist entry",
+  mcp,
+);
 
 const distPath = path.join(root, "dist/index.js");
 await access(distPath);

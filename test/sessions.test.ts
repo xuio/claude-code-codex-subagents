@@ -262,6 +262,81 @@ describe("CodexSessionManager", () => {
     manager.cancel(started.session.id);
   });
 
+  it("can dispose completed one-shot app-server sessions without retaining child processes", async () => {
+    const manager = new CodexSessionManager();
+    const projectDir = await tempDir("codex-subagents-session-project-");
+    const recordDir = await tempDir("codex-subagents-session-record-");
+
+    const started = await manager.start({
+      prompt: "one shot dispose",
+      projectDir,
+      codexBin: fakeCodex,
+      env: {
+        FAKE_CODEX_RECORD_DIR: recordDir,
+      },
+    });
+
+    expect(started.result.ok).toBe(true);
+    expect(started.result.queue?.queuedMs).toEqual(expect.any(Number));
+    const disposed = manager.dispose(started.session.id, "test_one_shot_completed");
+    expect(disposed?.id).toBe(started.session.id);
+    expect(manager.get(started.session.id)).toBeUndefined();
+
+    const calls = await waitFor(async () => {
+      const current = await recordedCalls(recordDir);
+      return current.some((call) => call.method === "process/sigterm") ? current : undefined;
+    });
+    expect(calls.some((call) => call.method === "thread/archive" && call.threadId === started.session.codexThreadId)).toBe(true);
+  });
+
+  it("bounds retained full turn history for long-running sessions", async () => {
+    const manager = new CodexSessionManager();
+    const projectDir = await tempDir("codex-subagents-session-project-");
+
+    const started = await manager.start({
+      prompt: "history turn 0",
+      projectDir,
+      codexBin: fakeCodex,
+    });
+    const firstTurnId = started.session.recentTurns.at(-1)?.id;
+    expect(firstTurnId).toBeTruthy();
+
+    for (let index = 1; index <= 55; index += 1) {
+      const followUp = await manager.send(started.session.id, `history turn ${index}`);
+      expect(followUp.result?.ok).toBe(true);
+    }
+
+    const session = manager.get(started.session.id);
+    expect(session?.turns).toBe(56);
+    expect(session?.recentTurns.length).toBeLessThanOrEqual(20);
+    const oldTurn = await manager.wait(started.session.id, 10, firstTurnId);
+    expect(oldTurn.error).toContain("Unknown turn_id");
+    manager.cancel(started.session.id);
+  });
+
+  it("rejects follow-up sandbox escalation above the session creation ceiling", async () => {
+    const manager = new CodexSessionManager();
+    const projectDir = await tempDir("codex-subagents-session-project-");
+
+    const started = await manager.start({
+      prompt: "read only session",
+      projectDir,
+      codexBin: fakeCodex,
+    });
+
+    const escalated = await manager.send(
+      started.session.id,
+      "try full access",
+      { dangerouslyBypassApprovalsAndSandbox: true },
+      { wait: false },
+    );
+
+    expect(escalated.error).toContain("cannot be escalated");
+    expect(escalated.turn).toBeUndefined();
+    expect(manager.get(started.session.id)?.queuedTurns).toHaveLength(0);
+    manager.cancel(started.session.id);
+  });
+
   it("cancels active sessions, preserves partial output, and drains queued turns", async () => {
     const manager = new CodexSessionManager();
     const projectDir = await tempDir("codex-subagents-session-project-");

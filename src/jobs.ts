@@ -93,6 +93,10 @@ function projectKeyForOptions(options: Pick<AgentRunOptions, "projectDir" | "cwd
   return options.projectDir?.trim() || options.cwd?.trim() || process.env.CLAUDE_PROJECT_DIR?.trim() || "__default__";
 }
 
+export function projectKeyForRunOptions(options: Pick<AgentRunOptions, "projectDir" | "cwd">): string {
+  return projectKeyForOptions(options);
+}
+
 function statusFromAgentResult(result: AgentRunResult): JobStatus {
   if (result.status === "cancelled") return "cancelled";
   return result.ok ? "completed" : "failed";
