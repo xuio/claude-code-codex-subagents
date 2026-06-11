@@ -2,6 +2,7 @@ import { mkdtemp, readFile, realpath, rm, stat, writeFile } from "node:fs/promis
 import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
+import { runQueuedAgents } from "../src/jobs.js";
 import {
   buildCodexExecArgs,
   defaultReasoningEffort,
@@ -9,7 +10,6 @@ import {
   probeCodexVersion,
   resolveWorkingDirectory,
   runAgent,
-  runAgents,
 } from "../src/runner.js";
 
 const fakeCodex = path.resolve("test/fixtures/fake-codex.mjs");
@@ -545,11 +545,11 @@ describe("runAgent", () => {
   });
 });
 
-describe("runAgents", () => {
+describe("runQueuedAgents", () => {
   it("runs multiple fake Codex agents in parallel with the requested project_dir", async () => {
     const projectDir = await tempDir("codex-subagents-repo-");
     const recordDir = await tempDir("codex-subagents-record-");
-    const results = await runAgents({
+    const results = await runQueuedAgents({
       agents: [
         { name: "one", prompt: "agent one DELAY_MS=100", projectDir },
         { name: "two", prompt: "agent two DELAY_MS=100", projectDir },
@@ -577,7 +577,7 @@ describe("runAgents", () => {
   it("applies the no-sandbox bypass flag to parallel agents from shared options", async () => {
     const projectDir = await tempDir("codex-subagents-repo-");
     const recordDir = await tempDir("codex-subagents-record-");
-    const results = await runAgents({
+    const results = await runQueuedAgents({
       agents: [
         { name: "one", prompt: "agent one", projectDir },
         { name: "two", prompt: "agent two", projectDir },
@@ -605,7 +605,7 @@ describe("runAgents", () => {
   it("preserves partial parallel results when one agent cannot start", async () => {
     const projectDir = await tempDir("codex-subagents-repo-");
 
-    const results = await runAgents({
+    const results = await runQueuedAgents({
       agents: [
         { name: "bad", prompt: "bad project", projectDir: path.join(projectDir, "missing") },
         { name: "good", prompt: "good project", projectDir },

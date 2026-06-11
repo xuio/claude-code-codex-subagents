@@ -3,9 +3,15 @@
 ## 0.3.0
 
 - Refactored the default Claude-facing MCP surface to three native tools: `codex_task`, `codex_task_group`, and `codex_followup`.
-- Made every `codex_task` result return a `session_id` so Claude can continue or steer Codex context naturally.
+- Added `codex_wait_any` for native-style collection of whichever background Codex session finishes first.
+- Made `codex_task` return a `session_id` for background, retained, or failed runs so Claude can continue, steer, wait, or cancel Codex context naturally.
 - Moved uncommon settings under `advanced` and replaced the default full-access flag with `full_access`.
 - Hid debug and legacy tools by default; diagnostics are now available through `codex://usage`, `codex://status`, and `codex://doctor`.
+- Switched persistent sessions to the Codex app-server protocol by default, with live steering, session notifications, and best-effort Codex Desktop thread archiving when sessions are cancelled or pruned.
+- Added native cancellation through `codex_followup` mode `cancel`, including partial output preservation.
+- Closed successful one-shot app-server sessions that were not returned to Claude, bounded retained turn history, and routed app-server turns through the shared concurrency queue.
+- Slimmed advertised native tool schemas, simplified persona/model guidance, and removed duplicate group response text from structured MCP payloads.
+- Made the plugin manifest invoke Node explicitly for portable startup.
 - Updated the Claude skill, README, wiki, and validation scripts for the native follow-up flow.
 
 ## 0.2.0

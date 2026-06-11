@@ -21343,228 +21343,52 @@ var StdioServerTransport = class {
   }
 };
 
-// src/runner.ts
-import { spawn } from "node:child_process";
-import { mkdtemp as mkdtemp2, readFile as readFile2, rm as rm2, stat, writeFile as writeFile2 } from "node:fs/promises";
-import os4 from "node:os";
-import path5 from "node:path";
+// src/aggregate.ts
+function agentName(result, index) {
+  return result.name ?? `agent-${index + 1}`;
+}
+function structuredRecord(value) {
+  return value && typeof value === "object" && !Array.isArray(value) ? value : void 0;
+}
+function aggregateAgentResults(results) {
+  const failedAgents = results.map((result, index) => ({ result, name: agentName(result, index) })).filter(({ result }) => !result.ok).map(({ name }) => name);
+  const findings = [];
+  const summaries = [];
+  results.forEach((result, index) => {
+    const name = agentName(result, index);
+    const structured = structuredRecord(result.structuredOutput);
+    if (typeof structured?.summary === "string") {
+      summaries.push({ agent: name, summary: structured.summary });
+    } else if (result.finalMessage.trim()) {
+      summaries.push({ agent: name, summary: result.finalMessage.trim().slice(0, 1e3) });
+    }
+    const structuredFindings = Array.isArray(structured?.findings) ? structured.findings : Array.isArray(structured?.risks) ? structured.risks : Array.isArray(structured?.suggestions) ? structured.suggestions : [];
+    for (const finding of structuredFindings) {
+      if (finding && typeof finding === "object") {
+        findings.push({ agent: name, ...finding });
+      }
+    }
+  });
+  return {
+    ok: failedAgents.length === 0,
+    totalAgents: results.length,
+    completedAgents: results.filter((result) => result.ok).length,
+    failedAgents,
+    findings,
+    summaries,
+    recommendedNextAction: failedAgents.length > 0 ? `Inspect failed agents first: ${failedAgents.join(", ")}.` : findings.length > 0 ? "Review the aggregated findings and address the highest-severity concrete items first." : "Use the per-agent summaries to decide whether more focused follow-up is needed."
+  };
+}
 
-// src/binary.ts
-import { accessSync, constants, statSync } from "node:fs";
+// src/diagnostics.ts
+import { mkdir, mkdtemp, open, writeFile } from "node:fs/promises";
 import os from "node:os";
-import path from "node:path";
-function cleanOption(value) {
-  const trimmed = value?.trim();
-  if (!trimmed) return void 0;
-  if (trimmed.includes("${")) return void 0;
-  return trimmed;
-}
-function isExecutable(candidate) {
-  try {
-    if (!statSync(candidate).isFile()) return false;
-    accessSync(candidate, constants.X_OK);
-    return true;
-  } catch {
-    return false;
-  }
-}
-function desktopCodexCandidates(env = process.env, platform = process.platform, homedir = os.homedir()) {
-  if (platform !== "darwin") return [];
-  const candidates = [];
-  const appOverride = cleanOption(env.CODEX_DESKTOP_APP_PATH);
-  if (appOverride) {
-    candidates.push(
-      appOverride.endsWith(".app") ? path.join(appOverride, "Contents", "Resources", "codex") : appOverride
-    );
-  }
-  candidates.push(
-    "/Applications/Codex.app/Contents/Resources/codex",
-    path.join(homedir, "Applications", "Codex.app", "Contents", "Resources", "codex")
-  );
-  return candidates;
-}
-function findOnPath(command, env = process.env, existsExecutable = isExecutable) {
-  const pathEnv = env.PATH;
-  if (!pathEnv) return void 0;
-  const extensions = process.platform === "win32" ? (env.PATHEXT ?? ".EXE;.CMD;.BAT;.COM").split(";") : [""];
-  for (const directory of pathEnv.split(path.delimiter)) {
-    if (!directory) continue;
-    for (const extension of extensions) {
-      const candidate = path.join(directory, `${command}${extension}`);
-      if (existsExecutable(candidate)) return candidate;
-    }
-  }
-  return void 0;
-}
-function resolveCodexBinary(options = {}) {
-  const env = options.env ?? process.env;
-  const exists2 = options.existsExecutable ?? isExecutable;
-  const platform = options.platform ?? process.platform;
-  const homedir = options.homedir ?? os.homedir();
-  const explicit = cleanOption(options.explicitPath);
-  if (explicit) {
-    if (!exists2(explicit)) {
-      throw new Error(`Configured Codex binary is not executable: ${explicit}`);
-    }
-    return { path: explicit, source: "explicit" };
-  }
-  const pluginConfigured = cleanOption(env.CODEX_SUBAGENTS_CODEX_BIN);
-  if (pluginConfigured) {
-    if (!exists2(pluginConfigured)) {
-      throw new Error(
-        `CODEX_SUBAGENTS_CODEX_BIN is set but is not executable: ${pluginConfigured}`
-      );
-    }
-    return { path: pluginConfigured, source: "plugin-config" };
-  }
-  for (const candidate of desktopCodexCandidates(env, platform, homedir)) {
-    if (exists2(candidate)) return { path: candidate, source: "desktop-app" };
-  }
-  const envConfigured = cleanOption(env.CODEX_BIN);
-  if (envConfigured) {
-    if (!exists2(envConfigured)) {
-      throw new Error(`CODEX_BIN is set but is not executable: ${envConfigured}`);
-    }
-    return { path: envConfigured, source: "CODEX_BIN" };
-  }
-  const fromPath = findOnPath("codex", env, exists2);
-  if (fromPath) return { path: fromPath, source: "PATH" };
-  throw new Error(
-    "Could not find a Codex CLI binary. Install the Codex desktop app, install `codex` on PATH, or set CODEX_SUBAGENTS_CODEX_BIN."
-  );
-}
-
-// src/contracts.ts
-var outputContracts = [
-  "freeform",
-  "review_findings",
-  "plan",
-  "risk_matrix",
-  "patch_suggestions"
-];
-var reviewFindingsSchema = {
-  type: "object",
-  additionalProperties: false,
-  required: ["summary", "findings"],
-  properties: {
-    summary: { type: "string" },
-    findings: {
-      type: "array",
-      items: {
-        type: "object",
-        additionalProperties: false,
-        required: ["severity", "title", "description", "file", "line", "recommendation"],
-        properties: {
-          severity: { type: "string", enum: ["critical", "high", "medium", "low", "info"] },
-          title: { type: "string" },
-          description: { type: "string" },
-          file: { type: ["string", "null"] },
-          line: { type: ["integer", "null"] },
-          recommendation: { type: ["string", "null"] }
-        }
-      }
-    }
-  }
-};
-var planSchema = {
-  type: "object",
-  additionalProperties: false,
-  required: ["summary", "steps"],
-  properties: {
-    summary: { type: "string" },
-    steps: {
-      type: "array",
-      items: {
-        type: "object",
-        additionalProperties: false,
-        required: ["title", "description", "status", "files"],
-        properties: {
-          title: { type: "string" },
-          description: { type: "string" },
-          status: { type: ["string", "null"] },
-          files: { type: ["array", "null"], items: { type: "string" } }
-        }
-      }
-    }
-  }
-};
-var riskMatrixSchema = {
-  type: "object",
-  additionalProperties: false,
-  required: ["summary", "risks"],
-  properties: {
-    summary: { type: "string" },
-    risks: {
-      type: "array",
-      items: {
-        type: "object",
-        additionalProperties: false,
-        required: ["risk", "likelihood", "impact", "mitigation", "owner"],
-        properties: {
-          risk: { type: "string" },
-          likelihood: { type: "string", enum: ["low", "medium", "high"] },
-          impact: { type: "string", enum: ["low", "medium", "high"] },
-          mitigation: { type: "string" },
-          owner: { type: ["string", "null"] }
-        }
-      }
-    }
-  }
-};
-var patchSuggestionsSchema = {
-  type: "object",
-  additionalProperties: false,
-  required: ["summary", "suggestions"],
-  properties: {
-    summary: { type: "string" },
-    suggestions: {
-      type: "array",
-      items: {
-        type: "object",
-        additionalProperties: false,
-        required: ["file", "description", "line", "suggested_change", "rationale"],
-        properties: {
-          file: { type: "string" },
-          line: { type: ["integer", "null"] },
-          description: { type: "string" },
-          suggested_change: { type: ["string", "null"] },
-          rationale: { type: ["string", "null"] }
-        }
-      }
-    }
-  }
-};
-function schemaForOutputContract(contract, customSchema) {
-  if (customSchema) return customSchema;
-  switch (contract) {
-    case "review_findings":
-      return reviewFindingsSchema;
-    case "plan":
-      return planSchema;
-    case "risk_matrix":
-      return riskMatrixSchema;
-    case "patch_suggestions":
-      return patchSuggestionsSchema;
-    default:
-      return void 0;
-  }
-}
-function parseStructuredOutput(text) {
-  const trimmed = text.trim();
-  if (!trimmed) return { error: "Codex returned an empty final message." };
-  try {
-    return { value: JSON.parse(trimmed) };
-  } catch (error2) {
-    return {
-      error: error2 instanceof Error ? error2.message : String(error2)
-    };
-  }
-}
+import path2 from "node:path";
 
 // src/logging.ts
 import { createHash, randomUUID } from "node:crypto";
-import { appendFileSync, chmodSync, mkdirSync, renameSync, statSync as statSync2 } from "node:fs";
-import path2 from "node:path";
+import { appendFileSync, chmodSync, mkdirSync, renameSync, statSync } from "node:fs";
+import path from "node:path";
 
 // src/redaction.ts
 var privateKeyPattern = new RegExp(
@@ -21812,9 +21636,9 @@ function writeDefaultLog(line) {
   const logFile = process.env.CODEX_SUBAGENTS_LOG_FILE?.trim();
   if (!logFile) return;
   try {
-    mkdirSync(path2.dirname(logFile), { recursive: true });
+    mkdirSync(path.dirname(logFile), { recursive: true });
     try {
-      if (statSync2(logFile).size > logFileMaxBytes()) {
+      if (statSync(logFile).size > logFileMaxBytes()) {
         chmodSync(logFile, 384);
         const rotated = `${logFile}.1`;
         renameSync(logFile, rotated);
@@ -21831,6 +21655,304 @@ function writeDefaultLog(line) {
     lastLogFileError = void 0;
   } catch (error2) {
     lastLogFileError = error2 instanceof Error ? error2.message : String(error2);
+  }
+}
+
+// src/diagnostics.ts
+var events = [];
+function maxEvents(env = process.env) {
+  const parsed = Number(env.CODEX_SUBAGENTS_DIAGNOSTIC_EVENTS);
+  if (!Number.isInteger(parsed) || parsed < 1) return 100;
+  return Math.min(parsed, 1e3);
+}
+function makeId() {
+  return `diag-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
+}
+function recordDiagnosticEvent(event, env = process.env) {
+  const entry = {
+    id: makeId(),
+    ts: (/* @__PURE__ */ new Date()).toISOString(),
+    ...event,
+    message: redactSensitiveText(event.message),
+    recovery: event.recovery === void 0 ? void 0 : redactJsonValue(event.recovery),
+    detail: event.detail === void 0 ? void 0 : redactJsonValue(event.detail)
+  };
+  events.push(entry);
+  const limit = maxEvents(env);
+  while (events.length > limit) events.shift();
+  return entry;
+}
+function recentDiagnosticEvents(limit = 50) {
+  return events.slice(-Math.max(0, Math.min(limit, events.length)));
+}
+function diagnosticStats() {
+  return {
+    retainedEvents: events.length,
+    recentErrors: events.filter((event) => event.severity === "error").length,
+    newestEventAt: events.at(-1)?.ts
+  };
+}
+async function tailFile(file, maxBytes = 2e5) {
+  let handle;
+  try {
+    handle = await open(file, "r");
+    const stat3 = await handle.stat();
+    const length = Math.min(stat3.size, maxBytes);
+    const buffer = Buffer.alloc(length);
+    await handle.read(buffer, 0, length, stat3.size - length);
+    return buffer.toString("utf8");
+  } catch {
+    return void 0;
+  } finally {
+    await handle?.close().catch(() => {
+    });
+  }
+}
+async function createDebugBundle(input = {}) {
+  const env = input.env ?? process.env;
+  const base = path2.resolve(env.CODEX_SUBAGENTS_DEBUG_BUNDLE_DIR?.trim() || os.tmpdir());
+  await mkdir(base, { recursive: true });
+  const bundleDir = await mkdtemp(path2.join(base, "codex-subagents-debug-"));
+  const logFile = env.CODEX_SUBAGENTS_LOG_FILE?.trim();
+  const payload = redactJsonValue({
+    createdAt: (/* @__PURE__ */ new Date()).toISOString(),
+    pid: process.pid,
+    cwd: process.cwd(),
+    node: process.version,
+    platform: {
+      platform: process.platform,
+      arch: process.arch,
+      release: os.release()
+    },
+    envKeys: Object.keys(env).filter((key) => key.startsWith("CODEX_SUBAGENTS_") || key.startsWith("CLAUDE_")).sort(),
+    logging: loggingDiagnostics(env),
+    recentDiagnostics: recentDiagnosticEvents(100),
+    status: input.status,
+    session: input.session,
+    job: input.job,
+    notes: input.notes,
+    logTail: input.includeLogTail && logFile ? await tailFile(logFile) : void 0
+  });
+  const diagnosticsPath = path2.join(bundleDir, "diagnostics.json");
+  await writeFile(diagnosticsPath, JSON.stringify(payload, null, 2), "utf8");
+  return { bundleDir, diagnosticsPath };
+}
+
+// src/runner.ts
+import { spawn } from "node:child_process";
+import { mkdtemp as mkdtemp3, readFile as readFile2, rm as rm2, stat, writeFile as writeFile3 } from "node:fs/promises";
+import os5 from "node:os";
+import path6 from "node:path";
+
+// src/binary.ts
+import { accessSync, constants, statSync as statSync2 } from "node:fs";
+import os2 from "node:os";
+import path3 from "node:path";
+function cleanOption(value) {
+  const trimmed = value?.trim();
+  if (!trimmed) return void 0;
+  if (trimmed.includes("${")) return void 0;
+  return trimmed;
+}
+function isExecutable(candidate) {
+  try {
+    if (!statSync2(candidate).isFile()) return false;
+    accessSync(candidate, constants.X_OK);
+    return true;
+  } catch {
+    return false;
+  }
+}
+function desktopCodexCandidates(env = process.env, platform = process.platform, homedir = os2.homedir()) {
+  if (platform !== "darwin") return [];
+  const candidates = [];
+  const appOverride = cleanOption(env.CODEX_DESKTOP_APP_PATH);
+  if (appOverride) {
+    candidates.push(
+      appOverride.endsWith(".app") ? path3.join(appOverride, "Contents", "Resources", "codex") : appOverride
+    );
+  }
+  candidates.push(
+    "/Applications/Codex.app/Contents/Resources/codex",
+    path3.join(homedir, "Applications", "Codex.app", "Contents", "Resources", "codex")
+  );
+  return candidates;
+}
+function findOnPath(command, env = process.env, existsExecutable = isExecutable) {
+  const pathEnv = env.PATH;
+  if (!pathEnv) return void 0;
+  const extensions = process.platform === "win32" ? (env.PATHEXT ?? ".EXE;.CMD;.BAT;.COM").split(";") : [""];
+  for (const directory of pathEnv.split(path3.delimiter)) {
+    if (!directory) continue;
+    for (const extension of extensions) {
+      const candidate = path3.join(directory, `${command}${extension}`);
+      if (existsExecutable(candidate)) return candidate;
+    }
+  }
+  return void 0;
+}
+function resolveCodexBinary(options = {}) {
+  const env = options.env ?? process.env;
+  const exists2 = options.existsExecutable ?? isExecutable;
+  const platform = options.platform ?? process.platform;
+  const homedir = options.homedir ?? os2.homedir();
+  const explicit = cleanOption(options.explicitPath);
+  if (explicit) {
+    if (!exists2(explicit)) {
+      throw new Error(`Configured Codex binary is not executable: ${explicit}`);
+    }
+    return { path: explicit, source: "explicit" };
+  }
+  const pluginConfigured = cleanOption(env.CODEX_SUBAGENTS_CODEX_BIN);
+  if (pluginConfigured) {
+    if (!exists2(pluginConfigured)) {
+      throw new Error(
+        `CODEX_SUBAGENTS_CODEX_BIN is set but is not executable: ${pluginConfigured}`
+      );
+    }
+    return { path: pluginConfigured, source: "plugin-config" };
+  }
+  for (const candidate of desktopCodexCandidates(env, platform, homedir)) {
+    if (exists2(candidate)) return { path: candidate, source: "desktop-app" };
+  }
+  const envConfigured = cleanOption(env.CODEX_BIN);
+  if (envConfigured) {
+    if (!exists2(envConfigured)) {
+      throw new Error(`CODEX_BIN is set but is not executable: ${envConfigured}`);
+    }
+    return { path: envConfigured, source: "CODEX_BIN" };
+  }
+  const fromPath = findOnPath("codex", env, exists2);
+  if (fromPath) return { path: fromPath, source: "PATH" };
+  throw new Error(
+    "Could not find a Codex CLI binary. Install the Codex desktop app, install `codex` on PATH, or set CODEX_SUBAGENTS_CODEX_BIN."
+  );
+}
+
+// src/contracts.ts
+var outputContracts = [
+  "freeform",
+  "review_findings",
+  "plan",
+  "risk_matrix",
+  "patch_suggestions"
+];
+var reviewFindingsSchema = {
+  type: "object",
+  additionalProperties: false,
+  required: ["summary", "findings"],
+  properties: {
+    summary: { type: "string" },
+    findings: {
+      type: "array",
+      items: {
+        type: "object",
+        additionalProperties: false,
+        required: ["severity", "title", "description", "file", "line", "recommendation"],
+        properties: {
+          severity: { type: "string", enum: ["critical", "high", "medium", "low", "info"] },
+          title: { type: "string" },
+          description: { type: "string" },
+          file: { type: ["string", "null"] },
+          line: { type: ["integer", "null"] },
+          recommendation: { type: ["string", "null"] }
+        }
+      }
+    }
+  }
+};
+var planSchema = {
+  type: "object",
+  additionalProperties: false,
+  required: ["summary", "steps"],
+  properties: {
+    summary: { type: "string" },
+    steps: {
+      type: "array",
+      items: {
+        type: "object",
+        additionalProperties: false,
+        required: ["title", "description", "status", "files"],
+        properties: {
+          title: { type: "string" },
+          description: { type: "string" },
+          status: { type: ["string", "null"] },
+          files: { type: ["array", "null"], items: { type: "string" } }
+        }
+      }
+    }
+  }
+};
+var riskMatrixSchema = {
+  type: "object",
+  additionalProperties: false,
+  required: ["summary", "risks"],
+  properties: {
+    summary: { type: "string" },
+    risks: {
+      type: "array",
+      items: {
+        type: "object",
+        additionalProperties: false,
+        required: ["risk", "likelihood", "impact", "mitigation", "owner"],
+        properties: {
+          risk: { type: "string" },
+          likelihood: { type: "string", enum: ["low", "medium", "high"] },
+          impact: { type: "string", enum: ["low", "medium", "high"] },
+          mitigation: { type: "string" },
+          owner: { type: ["string", "null"] }
+        }
+      }
+    }
+  }
+};
+var patchSuggestionsSchema = {
+  type: "object",
+  additionalProperties: false,
+  required: ["summary", "suggestions"],
+  properties: {
+    summary: { type: "string" },
+    suggestions: {
+      type: "array",
+      items: {
+        type: "object",
+        additionalProperties: false,
+        required: ["file", "description", "line", "suggested_change", "rationale"],
+        properties: {
+          file: { type: "string" },
+          line: { type: ["integer", "null"] },
+          description: { type: "string" },
+          suggested_change: { type: ["string", "null"] },
+          rationale: { type: ["string", "null"] }
+        }
+      }
+    }
+  }
+};
+function schemaForOutputContract(contract, customSchema) {
+  if (customSchema) return customSchema;
+  switch (contract) {
+    case "review_findings":
+      return reviewFindingsSchema;
+    case "plan":
+      return planSchema;
+    case "risk_matrix":
+      return riskMatrixSchema;
+    case "patch_suggestions":
+      return patchSuggestionsSchema;
+    default:
+      return void 0;
+  }
+}
+function parseStructuredOutput(text) {
+  const trimmed = text.trim();
+  if (!trimmed) return { error: "Codex returned an empty final message." };
+  try {
+    return { value: JSON.parse(trimmed) };
+  } catch (error2) {
+    return {
+      error: error2 instanceof Error ? error2.message : String(error2)
+    };
   }
 }
 
@@ -21902,9 +22024,9 @@ async function cleanupRuntime(reason, graceMs = 2500) {
 }
 
 // src/subagents.ts
-import { lstat, mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
-import os2 from "node:os";
-import path3 from "node:path";
+import { lstat, mkdir as mkdir2, mkdtemp as mkdtemp2, readFile, rm, symlink, writeFile as writeFile2 } from "node:fs/promises";
+import os3 from "node:os";
+import path4 from "node:path";
 var modelPresets = ["default", "codex", "spark"];
 var mcpConfigPolicies = [
   "inherit_codex",
@@ -22033,35 +22155,35 @@ async function linkIfPresent(source, destination) {
   await symlink(source, destination);
 }
 async function prepareTempCodexHome(definitions, env, options = {}) {
-  const realCodexHome = env.CODEX_HOME?.trim() || path3.join(os2.homedir(), ".codex");
-  const tempCodexHome = await mkdtemp(path3.join(os2.tmpdir(), "codex-subagents-home-"));
+  const realCodexHome = env.CODEX_HOME?.trim() || path4.join(os3.homedir(), ".codex");
+  const tempCodexHome = await mkdtemp2(path4.join(os3.tmpdir(), "codex-subagents-home-"));
   const links = [
-    linkIfPresent(path3.join(realCodexHome, "auth.json"), path3.join(tempCodexHome, "auth.json")),
-    linkIfPresent(path3.join(realCodexHome, "AGENTS.md"), path3.join(tempCodexHome, "AGENTS.md")),
-    linkIfPresent(path3.join(realCodexHome, "skills"), path3.join(tempCodexHome, "skills")),
-    linkIfPresent(path3.join(realCodexHome, "rules"), path3.join(tempCodexHome, "rules")),
-    linkIfPresent(path3.join(realCodexHome, "plugins"), path3.join(tempCodexHome, "plugins"))
+    linkIfPresent(path4.join(realCodexHome, "auth.json"), path4.join(tempCodexHome, "auth.json")),
+    linkIfPresent(path4.join(realCodexHome, "AGENTS.md"), path4.join(tempCodexHome, "AGENTS.md")),
+    linkIfPresent(path4.join(realCodexHome, "skills"), path4.join(tempCodexHome, "skills")),
+    linkIfPresent(path4.join(realCodexHome, "rules"), path4.join(tempCodexHome, "rules")),
+    linkIfPresent(path4.join(realCodexHome, "plugins"), path4.join(tempCodexHome, "plugins"))
   ];
   if (options.isolated || options.mcpServers) {
     links.push(
-      writeFile(
-        path3.join(tempCodexHome, "config.toml"),
+      writeFile2(
+        path4.join(tempCodexHome, "config.toml"),
         serializeGeneratedConfig(options.mcpServers),
         "utf8"
       )
     );
   } else {
-    links.push(linkIfPresent(path3.join(realCodexHome, "config.toml"), path3.join(tempCodexHome, "config.toml")));
+    links.push(linkIfPresent(path4.join(realCodexHome, "config.toml"), path4.join(tempCodexHome, "config.toml")));
   }
   await Promise.all(links);
-  const agentsDir = path3.join(tempCodexHome, "agents");
-  await mkdir(agentsDir, { recursive: true });
+  const agentsDir = path4.join(tempCodexHome, "agents");
+  await mkdir2(agentsDir, { recursive: true });
   await Promise.all(
     definitions.map(async (definition, index) => {
       const fileName = `${String(index + 1).padStart(2, "0")}-${sanitizeAgentFileName(
         definition.name
       )}.toml`;
-      await writeFile(path3.join(agentsDir, fileName), serializeCodexSubagent(definition), "utf8");
+      await writeFile2(path4.join(agentsDir, fileName), serializeCodexSubagent(definition), "utf8");
     })
   );
   return tempCodexHome;
@@ -22136,8 +22258,8 @@ async function prepareSubagents(options) {
 async function readClaudeProjectMcpServers(projectDir) {
   if (!projectDir) return void 0;
   const candidates = [
-    path3.join(projectDir, ".mcp.json"),
-    path3.join(projectDir, ".claude", "mcp.json")
+    path4.join(projectDir, ".mcp.json"),
+    path4.join(projectDir, ".claude", "mcp.json")
   ];
   for (const candidate of candidates) {
     try {
@@ -22154,8 +22276,8 @@ async function readClaudeProjectMcpServers(projectDir) {
 
 // src/artifacts.ts
 import { appendFileSync as appendFileSync2, mkdirSync as mkdirSync2, mkdtempSync, rmSync, writeFileSync } from "node:fs";
-import os3 from "node:os";
-import path4 from "node:path";
+import os4 from "node:os";
+import path5 from "node:path";
 function artifactsEnabled(env = process.env) {
   return env.CODEX_SUBAGENTS_OUTPUT_ARTIFACTS !== "0";
 }
@@ -22166,7 +22288,7 @@ function redactArtifacts(env = process.env) {
   return env.CODEX_SUBAGENTS_ARTIFACT_REDACT !== "0";
 }
 function artifactBaseDir(env = process.env) {
-  return path4.resolve(env.CODEX_SUBAGENTS_ARTIFACT_DIR?.trim() || path4.join(os3.tmpdir(), "codex-subagents-artifacts"));
+  return path5.resolve(env.CODEX_SUBAGENTS_ARTIFACT_DIR?.trim() || path5.join(os4.tmpdir(), "codex-subagents-artifacts"));
 }
 function safeText(text, redacted) {
   return redacted ? redactSensitiveText(text) : text;
@@ -22235,11 +22357,11 @@ var OutputArtifactWriter = class {
     if (this.dir) return;
     const base = artifactBaseDir(this.env);
     mkdirSync2(base, { recursive: true });
-    this.dir = mkdtempSync(path4.join(base, `${this.label.replace(/[^a-zA-Z0-9_.-]/g, "_")}-`));
+    this.dir = mkdtempSync(path5.join(base, `${this.label.replace(/[^a-zA-Z0-9_.-]/g, "_")}-`));
   }
   pathFor(file) {
     if (!this.dir) throw new Error("Output artifact directory was not initialized.");
-    return path4.join(this.dir, file);
+    return path5.join(this.dir, file);
   }
 };
 function outputArtifactDiagnostics(env = process.env) {
@@ -22352,7 +22474,7 @@ async function resolveWorkingDirectory(cwd, env = process.env) {
   const requested = cwd?.trim();
   const claudeProjectDir = env.CLAUDE_PROJECT_DIR?.trim();
   const fallback = claudeProjectDir && !claudeProjectDir.includes("${") ? claudeProjectDir : process.env.PWD ?? process.cwd();
-  const resolved = path5.resolve(requested || fallback);
+  const resolved = path6.resolve(requested || fallback);
   const info = await stat(resolved);
   if (!info.isDirectory()) {
     throw new Error(`Codex working directory is not a directory: ${resolved}`);
@@ -22518,7 +22640,7 @@ function agentFailureResultForError(options, error2, started = Date.now()) {
   const mergedEnv = { ...process.env, ...options.env };
   let cwd = options.projectDir ?? options.cwd ?? process.env.CLAUDE_PROJECT_DIR ?? process.cwd();
   try {
-    cwd = path5.resolve(cwd);
+    cwd = path6.resolve(cwd);
   } catch {
     cwd = process.cwd();
   }
@@ -22675,7 +22797,7 @@ async function runAgent(options) {
     }
     throw error2;
   }
-  const tempDir = await mkdtemp2(path5.join(os4.tmpdir(), "codex-subagents-"));
+  const tempDir = await mkdtemp3(path6.join(os5.tmpdir(), "codex-subagents-"));
   const artifactWriter = new OutputArtifactWriter(runId, mergedEnv);
   const preparedSubagents = await prepareSubagents({
     definitions: options.codexSubagents,
@@ -22693,10 +22815,10 @@ async function runAgent(options) {
     tempCodexHomeUsed: Boolean(preparedSubagents.tempCodexHome)
   });
   const childEnv = sanitizeChildEnv({ ...mergedEnv, ...preparedSubagents.env }, options.forwardSensitiveEnv);
-  const outputPath = path5.join(tempDir, "last-message.md");
+  const outputPath = path6.join(tempDir, "last-message.md");
   const outputSchema = schemaForOutputContract(options.outputContract, options.outputSchema);
-  const outputSchemaPath = outputSchema && !options.resumeSessionId && !options.resumeLast ? path5.join(tempDir, "output-schema.json") : void 0;
-  if (outputSchemaPath) await writeFile2(outputSchemaPath, JSON.stringify(outputSchema), "utf8");
+  const outputSchemaPath = outputSchema && !options.resumeSessionId && !options.resumeLast ? path6.join(tempDir, "output-schema.json") : void 0;
+  if (outputSchemaPath) await writeFile3(outputSchemaPath, JSON.stringify(outputSchema), "utf8");
   const args = buildCodexExecArgs({ ...options, cwd, outputSchemaPath }, outputPath, childEnv);
   logger.rawDebug("codex.spawn", {
     runId,
@@ -23004,126 +23126,6 @@ async function probeCodexVersion(codexBin, env = process.env, options = {}) {
     });
   });
   return { binary, ...version2 };
-}
-
-// src/aggregate.ts
-function agentName(result, index) {
-  return result.name ?? `agent-${index + 1}`;
-}
-function structuredRecord(value) {
-  return value && typeof value === "object" && !Array.isArray(value) ? value : void 0;
-}
-function aggregateAgentResults(results) {
-  const failedAgents = results.map((result, index) => ({ result, name: agentName(result, index) })).filter(({ result }) => !result.ok).map(({ name }) => name);
-  const findings = [];
-  const summaries = [];
-  results.forEach((result, index) => {
-    const name = agentName(result, index);
-    const structured = structuredRecord(result.structuredOutput);
-    if (typeof structured?.summary === "string") {
-      summaries.push({ agent: name, summary: structured.summary });
-    } else if (result.finalMessage.trim()) {
-      summaries.push({ agent: name, summary: result.finalMessage.trim().slice(0, 1e3) });
-    }
-    const structuredFindings = Array.isArray(structured?.findings) ? structured.findings : Array.isArray(structured?.risks) ? structured.risks : Array.isArray(structured?.suggestions) ? structured.suggestions : [];
-    for (const finding of structuredFindings) {
-      if (finding && typeof finding === "object") {
-        findings.push({ agent: name, ...finding });
-      }
-    }
-  });
-  return {
-    ok: failedAgents.length === 0,
-    totalAgents: results.length,
-    completedAgents: results.filter((result) => result.ok).length,
-    failedAgents,
-    findings,
-    summaries,
-    recommendedNextAction: failedAgents.length > 0 ? `Inspect failed agents first: ${failedAgents.join(", ")}.` : findings.length > 0 ? "Review the aggregated findings and address the highest-severity concrete items first." : "Use the per-agent summaries to decide whether more focused follow-up is needed."
-  };
-}
-
-// src/diagnostics.ts
-import { mkdir as mkdir2, mkdtemp as mkdtemp3, open, writeFile as writeFile3 } from "node:fs/promises";
-import os5 from "node:os";
-import path6 from "node:path";
-var events = [];
-function maxEvents(env = process.env) {
-  const parsed = Number(env.CODEX_SUBAGENTS_DIAGNOSTIC_EVENTS);
-  if (!Number.isInteger(parsed) || parsed < 1) return 100;
-  return Math.min(parsed, 1e3);
-}
-function makeId() {
-  return `diag-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
-}
-function recordDiagnosticEvent(event, env = process.env) {
-  const entry = {
-    id: makeId(),
-    ts: (/* @__PURE__ */ new Date()).toISOString(),
-    ...event,
-    message: redactSensitiveText(event.message),
-    recovery: event.recovery === void 0 ? void 0 : redactJsonValue(event.recovery),
-    detail: event.detail === void 0 ? void 0 : redactJsonValue(event.detail)
-  };
-  events.push(entry);
-  const limit = maxEvents(env);
-  while (events.length > limit) events.shift();
-  return entry;
-}
-function recentDiagnosticEvents(limit = 50) {
-  return events.slice(-Math.max(0, Math.min(limit, events.length)));
-}
-function diagnosticStats() {
-  return {
-    retainedEvents: events.length,
-    recentErrors: events.filter((event) => event.severity === "error").length,
-    newestEventAt: events.at(-1)?.ts
-  };
-}
-async function tailFile(file, maxBytes = 2e5) {
-  let handle;
-  try {
-    handle = await open(file, "r");
-    const stat3 = await handle.stat();
-    const length = Math.min(stat3.size, maxBytes);
-    const buffer = Buffer.alloc(length);
-    await handle.read(buffer, 0, length, stat3.size - length);
-    return buffer.toString("utf8");
-  } catch {
-    return void 0;
-  } finally {
-    await handle?.close().catch(() => {
-    });
-  }
-}
-async function createDebugBundle(input = {}) {
-  const env = input.env ?? process.env;
-  const base = path6.resolve(env.CODEX_SUBAGENTS_DEBUG_BUNDLE_DIR?.trim() || os5.tmpdir());
-  await mkdir2(base, { recursive: true });
-  const bundleDir = await mkdtemp3(path6.join(base, "codex-subagents-debug-"));
-  const logFile = env.CODEX_SUBAGENTS_LOG_FILE?.trim();
-  const payload = redactJsonValue({
-    createdAt: (/* @__PURE__ */ new Date()).toISOString(),
-    pid: process.pid,
-    cwd: process.cwd(),
-    node: process.version,
-    platform: {
-      platform: process.platform,
-      arch: process.arch,
-      release: os5.release()
-    },
-    envKeys: Object.keys(env).filter((key) => key.startsWith("CODEX_SUBAGENTS_") || key.startsWith("CLAUDE_")).sort(),
-    logging: loggingDiagnostics(env),
-    recentDiagnostics: recentDiagnosticEvents(100),
-    status: input.status,
-    session: input.session,
-    job: input.job,
-    notes: input.notes,
-    logTail: input.includeLogTail && logFile ? await tailFile(logFile) : void 0
-  });
-  const diagnosticsPath = path6.join(bundleDir, "diagnostics.json");
-  await writeFile3(diagnosticsPath, JSON.stringify(payload, null, 2), "utf8");
-  return { bundleDir, diagnosticsPath };
 }
 
 // src/jobs.ts
@@ -23568,75 +23570,6 @@ var CodexJobManager = class {
 };
 var jobManager = new CodexJobManager();
 
-// src/processes.ts
-import { execFile } from "node:child_process";
-import { promisify } from "node:util";
-var execFileAsync = promisify(execFile);
-var staleCpuThresholdPct = 25;
-function sanitizeCommand(command) {
-  const redacted = redactSensitiveText(command);
-  return redacted.length <= 500 ? redacted : `${redacted.slice(0, 500)}...`;
-}
-function parsePsProcessLine(line) {
-  const match = line.trim().match(/^(\d+)\s+(\d+)\s+(\d+)\s+(\S+)\s+([0-9.]+)\s+(\S+)\s+(.+)$/);
-  if (!match) return void 0;
-  const [, pid, ppid, pgid, stat3, cpuPct, elapsed, command] = match;
-  if (!pid || !ppid || !pgid || !stat3 || !cpuPct || !elapsed || !command) return void 0;
-  return {
-    pid: Number(pid),
-    ppid: Number(ppid),
-    pgid: Number(pgid),
-    stat: stat3,
-    cpuPct: Number(cpuPct),
-    elapsed,
-    command: sanitizeCommand(command)
-  };
-}
-function isPluginProcess(command) {
-  return command.includes("codex-subagents") && command.includes("dist/index.js");
-}
-function pluginProcessDiagnosticsFromSnapshots(snapshots, currentPid = process.pid) {
-  const pluginProcesses = snapshots.filter((snapshot3) => isPluginProcess(snapshot3.command));
-  const staleSuspects = pluginProcesses.filter((snapshot3) => snapshot3.pid !== currentPid && snapshot3.ppid === 1);
-  return {
-    supported: true,
-    currentPid,
-    pluginProcesses,
-    staleSuspects,
-    highCpuStaleSuspects: staleSuspects.filter((snapshot3) => snapshot3.cpuPct >= staleCpuThresholdPct)
-  };
-}
-async function detectPluginProcesses() {
-  if (process.platform === "win32") {
-    return {
-      supported: false,
-      currentPid: process.pid,
-      pluginProcesses: [],
-      staleSuspects: [],
-      highCpuStaleSuspects: [],
-      error: "process scan is not implemented on Windows"
-    };
-  }
-  try {
-    const { stdout } = await execFileAsync(
-      "ps",
-      ["-axo", "pid=,ppid=,pgid=,stat=,%cpu=,etime=,command="],
-      { timeout: 1e3, maxBuffer: 1e6, encoding: "utf8" }
-    );
-    const snapshots = stdout.split("\n").map((line) => parsePsProcessLine(line)).filter((snapshot3) => Boolean(snapshot3));
-    return pluginProcessDiagnosticsFromSnapshots(snapshots);
-  } catch (error2) {
-    return {
-      supported: false,
-      currentPid: process.pid,
-      pluginProcesses: [],
-      staleSuspects: [],
-      highCpuStaleSuspects: [],
-      error: error2 instanceof Error ? error2.message : String(error2)
-    };
-  }
-}
-
 // src/recovery.ts
 function messageFor(error2) {
   return error2 instanceof Error ? error2.message : String(error2);
@@ -23759,194 +23692,6 @@ function recoveryForWait(kind, timeoutReason) {
     recommendedAction: kind === "codex_session" ? "Use codex_followup mode wait again with a larger timeout, or mode steer if the active work should be redirected." : "Inspect codex://status for queue state, then retry or switch to codex_task with background true for long-running work.",
     recommendedTool: kind === "codex_session" ? "codex_followup" : void 0,
     retryAfterMs: 1e3
-  };
-}
-
-// src/progress.ts
-function progressNotificationsEnabled(env = process.env) {
-  const raw = env.CODEX_SUBAGENTS_ENABLE_PROGRESS_NOTIFICATIONS?.trim().toLowerCase();
-  return ["1", "true", "yes", "on"].includes(raw ?? "");
-}
-function progressNotificationsAvailable(extra, env = process.env) {
-  return progressNotificationsEnabled(env) && extra?._meta?.progressToken !== void 0;
-}
-function progressSendTimeoutMs(env = process.env) {
-  const parsed = Number(env.CODEX_SUBAGENTS_PROGRESS_SEND_TIMEOUT_MS);
-  if (!Number.isFinite(parsed) || parsed <= 0) return 1e3;
-  return Math.max(25, Math.min(Math.floor(parsed), 1e4));
-}
-function timeoutPromise(ms) {
-  return new Promise((_, reject) => {
-    const timer = setTimeout(() => reject(new Error(`Progress notification timed out after ${ms}ms`)), ms);
-    timer.unref();
-  });
-}
-async function bounded(promise, timeoutMs) {
-  return Promise.race([promise, timeoutPromise(timeoutMs)]);
-}
-function progressMinIntervalMs(env = process.env) {
-  const parsed = Number(env.CODEX_SUBAGENTS_PROGRESS_MIN_INTERVAL_MS);
-  if (!Number.isFinite(parsed) || parsed < 0) return 250;
-  return Math.max(0, Math.min(Math.floor(parsed), 5e3));
-}
-function createProgressReporter(extra, options = {}) {
-  const progressToken = extra?._meta?.progressToken;
-  const enabled = options.enabled ?? progressNotificationsEnabled();
-  const sendTimeoutMs = options.sendTimeoutMs ?? progressSendTimeoutMs();
-  const minIntervalMs = options.minIntervalMs ?? progressMinIntervalMs();
-  let progress = 0;
-  let pending = Promise.resolve();
-  let disabled = false;
-  let failures = 0;
-  let lastSentAt = 0;
-  let throttleTimer;
-  let pendingThrottled;
-  function queueSend(message, progressOptions = {}) {
-    if (!enabled || progressToken === void 0 || !extra) return;
-    pending = pending.catch(() => {
-    }).then(async () => {
-      if (disabled) return;
-      const requested = progressOptions.progress ?? progress + 1;
-      const unclamped = Math.max(progress + 1, requested);
-      const next = progressOptions.total === void 0 ? unclamped : Math.min(
-        unclamped,
-        progressOptions.reserveFinal && progressOptions.progress === void 0 ? Math.max(0, progressOptions.total - 1) : progressOptions.total
-      );
-      if (next <= progress) return;
-      progress = next;
-      lastSentAt = Date.now();
-      await bounded(
-        extra.sendNotification({
-          method: "notifications/progress",
-          params: {
-            progressToken,
-            progress,
-            ...progressOptions.total === void 0 ? {} : { total: progressOptions.total },
-            message
-          }
-        }),
-        sendTimeoutMs
-      );
-      failures = 0;
-      logger.rawDebug("mcp.notification.sent", {
-        method: "notifications/progress",
-        params: {
-          progressToken,
-          progress,
-          ...progressOptions.total === void 0 ? {} : { total: progressOptions.total },
-          message
-        }
-      });
-    }).catch((error2) => {
-      failures += 1;
-      if (failures >= 2) disabled = true;
-      logger.error("mcp.notification.failed", { disabled, error: errorForLog(error2) });
-    });
-  }
-  function scheduleThrottledSend() {
-    if (throttleTimer || !pendingThrottled) return;
-    const elapsed = Date.now() - lastSentAt;
-    const delay = Math.max(0, minIntervalMs - elapsed);
-    throttleTimer = setTimeout(() => {
-      throttleTimer = void 0;
-      const next = pendingThrottled;
-      pendingThrottled = void 0;
-      if (next) queueSend(next.message, next.progressOptions);
-    }, delay);
-    throttleTimer.unref();
-  }
-  async function send(message, progressOptions = {}) {
-    logger.rawDebug("mcp.progress", {
-      hasProgressToken: progressToken !== void 0,
-      enabled,
-      message,
-      options: progressOptions
-    });
-    if (!enabled || progressToken === void 0 || !extra || disabled) return;
-    const elapsed = Date.now() - lastSentAt;
-    if (progressOptions.force || minIntervalMs === 0 || lastSentAt === 0 || elapsed >= minIntervalMs) {
-      if (progressOptions.force && throttleTimer) {
-        clearTimeout(throttleTimer);
-        throttleTimer = void 0;
-        pendingThrottled = void 0;
-      }
-      queueSend(message, progressOptions);
-    } else {
-      pendingThrottled = { message, progressOptions };
-      scheduleThrottledSend();
-    }
-    await bounded(pending, sendTimeoutMs + 25).catch(() => {
-    });
-  }
-  async function flush() {
-    if (!enabled || progressToken === void 0 || !extra) return;
-    if (throttleTimer) {
-      clearTimeout(throttleTimer);
-      throttleTimer = void 0;
-    }
-    if (pendingThrottled) {
-      const next = pendingThrottled;
-      pendingThrottled = void 0;
-      queueSend(next.message, next.progressOptions);
-    }
-    await bounded(pending, sendTimeoutMs + 25).catch(() => {
-    });
-    await new Promise((resolve) => setTimeout(resolve, 0));
-  }
-  return { send, flush };
-}
-
-// src/stdio.ts
-var brokenStdioCodes = /* @__PURE__ */ new Set([
-  "EPIPE",
-  "ECONNRESET",
-  "ERR_STREAM_DESTROYED",
-  "ERR_STREAM_WRITE_AFTER_END"
-]);
-function isBrokenStdioError(error2) {
-  if (!error2 || typeof error2 !== "object") return false;
-  const value = error2;
-  if (typeof value.code === "string" && brokenStdioCodes.has(value.code)) return true;
-  const message = typeof value.message === "string" ? value.message.toLowerCase() : "";
-  return message.includes("broken pipe") || message.includes("channel closed") || message.includes("socket closed") || message.includes("stream has been destroyed") || message.includes("write after end");
-}
-function isOrphanedParentPid(parentPid) {
-  return parentPid <= 1;
-}
-function updateOrphanWatchdogState(options) {
-  if (!isOrphanedParentPid(options.parentPid)) {
-    return { shouldExit: false };
-  }
-  const orphanSinceMs = options.previousOrphanSinceMs ?? options.nowMs;
-  return {
-    orphanSinceMs,
-    shouldExit: options.nowMs - orphanSinceMs >= options.graceMs
-  };
-}
-
-// src/wait-timeout.ts
-var defaultBlockingWaitTimeoutMs = 3e5;
-var hardMaxBlockingWaitTimeoutMs = 3e5;
-var defaultProgressBlockingWaitTimeoutMs = 12e5;
-var hardMaxProgressBlockingWaitTimeoutMs = 12e5;
-var minBlockingWaitTimeoutMs = 25;
-function configuredMaxBlockingWaitMs(env = process.env, options = {}) {
-  const envKey = options.progress ? "CODEX_SUBAGENTS_MAX_PROGRESS_BLOCKING_WAIT_MS" : "CODEX_SUBAGENTS_MAX_BLOCKING_WAIT_MS";
-  const fallback = options.progress ? defaultProgressBlockingWaitTimeoutMs : defaultBlockingWaitTimeoutMs;
-  const hardMax = options.progress ? hardMaxProgressBlockingWaitTimeoutMs : hardMaxBlockingWaitTimeoutMs;
-  const parsed = Number(env[envKey]);
-  if (!Number.isFinite(parsed) || parsed <= 0) return fallback;
-  return Math.max(minBlockingWaitTimeoutMs, Math.min(Math.floor(parsed), hardMax));
-}
-function capBlockingWaitTimeout(requestedMs, env = process.env, options = {}) {
-  const configuredMax = configuredMaxBlockingWaitMs(env, options);
-  const requested = requestedMs ?? configuredMax;
-  const normalized = Math.max(1, Math.floor(requested));
-  const effective = Math.min(normalized, configuredMax);
-  return {
-    requestedMs: normalized,
-    effectiveMs: effective,
-    capped: effective < normalized
   };
 }
 
@@ -24115,6 +23860,381 @@ function isParallelResult(value) {
   return Boolean(
     value && typeof value === "object" && Array.isArray(value.agents) && value.agents.every(isAgentResult)
   );
+}
+
+// src/mcp-responses.ts
+function jsonResult(value, isError = false) {
+  const fullText = JSON.stringify(value, null, 2);
+  const text = fullText.length <= 4e3 ? fullText : JSON.stringify(
+    {
+      ok: Boolean(value.ok ?? !isError),
+      isError,
+      note: "MCP text content was shortened to keep Claude responsive; use structuredContent for the compacted result.",
+      keys: Object.keys(value)
+    },
+    null,
+    2
+  );
+  return {
+    structuredContent: value,
+    isError,
+    content: [
+      {
+        type: "text",
+        text
+      }
+    ]
+  };
+}
+function errorResult(error2, context = "tool_call") {
+  const recovery = recoveryForError(error2, context);
+  return jsonResult(
+    {
+      ok: false,
+      error: redactSensitiveText(error2 instanceof Error ? error2.message : String(error2)),
+      recovery: redactJsonValue(recovery),
+      suggested_next_action: recovery.recommendedAction
+    },
+    true
+  );
+}
+function agentResultResponse(result) {
+  const recovery = recoveryForAgentResult(result);
+  return jsonResult(
+    {
+      agent: compactAgentResultForMcp(result),
+      recovery,
+      suggested_next_action: recovery?.recommendedAction
+    },
+    !result.ok
+  );
+}
+function firstUsefulLine(text, fallback) {
+  const line = String(text ?? "").split(/\r?\n/).map((part) => part.trim()).find(Boolean);
+  if (!line) return fallback;
+  return line.length <= 500 ? line : `${line.slice(0, 500)}...`;
+}
+function stringifyResultValue(value, fallback = "") {
+  if (typeof value === "string") return value;
+  if (value === void 0 || value === null) return fallback;
+  try {
+    return JSON.stringify(value, null, 2);
+  } catch {
+    return String(value);
+  }
+}
+function summarizeResultValue(value, fallbackText, fallback) {
+  if (value && typeof value === "object" && !Array.isArray(value)) {
+    const summary = value.summary;
+    if (typeof summary === "string" && summary.trim()) return firstUsefulLine(summary, fallback);
+  }
+  if (typeof value === "string" && !value.trim() && fallbackText.trim()) {
+    return firstUsefulLine(fallbackText, fallback);
+  }
+  return firstUsefulLine(stringifyResultValue(value, fallbackText), fallback);
+}
+function agentFallbackErrorText(agent, recovery) {
+  const validationError = typeof agent.validationError === "string" ? agent.validationError.trim() : "";
+  if (validationError) return validationError;
+  const eventError = agent.eventSummary?.errors?.find(
+    (error2) => typeof error2 === "string" && error2.trim().length > 0
+  );
+  if (eventError) return eventError.trim();
+  const stderr = typeof agent.stderr === "string" ? agent.stderr.trim() : "";
+  if (stderr) return stderr;
+  const recoveryAction = recovery?.recommendedAction?.trim();
+  return recoveryAction || void 0;
+}
+function visibleAgentAnswer(agent, recovery) {
+  const resultValue = agent.structuredOutput ?? agent.finalMessage;
+  const answer = stringifyResultValue(resultValue, agent.finalMessage);
+  const structuredOutputError = typeof agent.structuredOutputError === "string" ? agent.structuredOutputError : void 0;
+  if (agent.ok && agent.structuredOutput !== void 0 && !structuredOutputError) {
+    const summary = summarizeResultValue(agent.structuredOutput, agent.finalMessage, "").trim();
+    return summary && summary !== answer ? `${summary}
+
+${answer}` : answer;
+  }
+  if (!agent.ok && structuredOutputError) {
+    return answer ? `${answer}
+
+Structured output parse failed: ${structuredOutputError}` : `Codex task ${agent.status}: Structured output parse failed: ${structuredOutputError}`;
+  }
+  const fallbackReason = !agent.ok && !answer ? agentFallbackErrorText(agent, recovery) : void 0;
+  if (fallbackReason) return `Codex task ${agent.status}: ${fallbackReason}`;
+  return answer;
+}
+function agentCommands(agent) {
+  return agent.eventSummary.commands.map((command) => ({ ...command }));
+}
+function suggestedActionForAgent(result, recovery) {
+  if (recovery?.recommendedAction) return recovery.recommendedAction;
+  if (result.ok) return void 0;
+  return "Inspect the Codex result details and retry only if the failure looks transient.";
+}
+function nativeTextResult(value, isError = false, textOverride) {
+  const text = typeof textOverride === "string" && textOverride.trim() ? textOverride : typeof value.result === "string" && value.result.trim() ? value.result : typeof value.summary === "string" ? value.summary : JSON.stringify(value, null, 2);
+  return {
+    structuredContent: value,
+    isError,
+    content: [{ type: "text", text }]
+  };
+}
+function nativeErrorPayload(error2, context = "tool_call") {
+  const recovery = recoveryForError(error2, context);
+  const message = redactSensitiveText(error2 instanceof Error ? error2.message : String(error2));
+  const result = recovery.recommendedAction ? `${message}
+
+Next: ${recovery.recommendedAction}` : message;
+  return {
+    ok: false,
+    summary: `Codex task failed: ${firstUsefulLine(message, "unknown error")}`,
+    result,
+    error: {
+      message,
+      recoverable: recovery.recoverable,
+      kind: recovery.reason,
+      retry_after_ms: recovery.retryAfterMs
+    },
+    hint: recovery.recommendedAction
+  };
+}
+function nativeErrorResult(error2, context = "tool_call") {
+  return nativeTextResult(nativeErrorPayload(error2, context), true);
+}
+function diagnosticsForAgent(agent) {
+  return {
+    duration_ms: agent.durationMs,
+    cwd: agent.cwd,
+    model: agent.model,
+    reasoning_effort: agent.reasoningEffort,
+    sandbox: agent.sandbox,
+    compacted: agent.mcpResponse.compacted,
+    artifact_paths: agent.outputArtifacts,
+    event_summary: agent.eventSummary,
+    stderr_tail: agent.stderr || void 0,
+    stdout_tail: agent.stdoutTail || void 0,
+    structured_output_error: agent.structuredOutputError || void 0,
+    validation_error: agent.validationError || void 0,
+    timeout_reason: agent.timeoutReason || void 0,
+    commands: agentCommands(agent)
+  };
+}
+function sessionPartialMessage(session, preferredResult) {
+  if (!session || typeof session !== "object") return void 0;
+  const value = session;
+  const partial2 = value.partial && typeof value.partial === "object" ? value.partial : void 0;
+  const lastResult = value.lastResult && typeof value.lastResult === "object" ? value.lastResult : void 0;
+  const preferred = preferredResult && typeof preferredResult === "object" ? preferredResult : void 0;
+  return typeof partial2?.lastAgentMessage === "string" ? partial2.lastAgentMessage : typeof preferred?.finalMessage === "string" ? preferred.finalMessage : typeof lastResult?.finalMessage === "string" ? lastResult.finalMessage : void 0;
+}
+function sessionProgressPayload(session, preferredResult) {
+  if (!session || typeof session !== "object") return {};
+  const value = session;
+  const partialResult = sessionPartialMessage(session, preferredResult);
+  const activeTurn = value.activeTurn && typeof value.activeTurn === "object" ? value.activeTurn : void 0;
+  const updatedAt = typeof value.updatedAt === "string" ? Date.parse(value.updatedAt) : NaN;
+  const createdAt = typeof activeTurn?.createdAt === "string" ? Date.parse(activeTurn.createdAt) : NaN;
+  const elapsedBase = Number.isFinite(createdAt) ? createdAt : updatedAt;
+  return {
+    partial_result: partialResult,
+    last_event: typeof activeTurn?.status === "string" ? `${activeTurn.kind ?? "turn"}:${activeTurn.status}` : typeof value.status === "string" ? value.status : void 0,
+    elapsed_ms: Number.isFinite(elapsedBase) ? Math.max(0, Date.now() - elapsedBase) : void 0,
+    next_poll_ms: value.active ? 1e3 : void 0
+  };
+}
+function nativeAgentPayload(result, context) {
+  const agent = compactAgentResultForMcp(result);
+  const recovery = recoveryForAgentResult(result);
+  const resultValue = agent.structuredOutput ?? agent.finalMessage;
+  const structuredOutputError = typeof agent.structuredOutputError === "string" ? agent.structuredOutputError : void 0;
+  const visibleAnswer = visibleAgentAnswer(agent, recovery);
+  const sessionId = context.session && typeof context.session === "object" ? context.session.id : void 0;
+  const sessionFallbackReason = context.session && typeof context.session === "object" ? context.session.appServerFallbackReason : void 0;
+  const hint = recovery?.recommendedAction ?? suggestedActionForAgent(agent, recovery);
+  const payload = {
+    ok: agent.ok,
+    status: agent.status,
+    summary: summarizeResultValue(resultValue, visibleAnswer, `Codex task ${agent.status}`),
+    result: visibleAnswer
+  };
+  if (agent.structuredOutput !== void 0) payload.structured = agent.structuredOutput;
+  if ((context.includeSessionId || !agent.ok) && sessionId) {
+    payload.session_id = sessionId;
+    if (context.turn !== void 0) payload.turn = context.turn;
+  }
+  if (hint) payload.hint = hint;
+  if (recovery) {
+    payload.error = {
+      message: structuredOutputError ? `Structured output parse failed: ${structuredOutputError}` : agentFallbackErrorText(agent, recovery) ?? `Codex task ${agent.status}`,
+      recoverable: recovery.recoverable,
+      kind: recovery.reason,
+      retry_after_ms: recovery.retryAfterMs
+    };
+  }
+  if (context.includeDiagnostics) {
+    payload.diagnostics = {
+      ...diagnosticsForAgent(agent),
+      session: context.session,
+      ...sessionProgressPayload(context.session),
+      app_server_fallback_reason: sessionFallbackReason || void 0
+    };
+  }
+  return payload;
+}
+function nativeAgentResponse(result, context) {
+  return nativeTextResult(nativeAgentPayload(result, context), !result.ok);
+}
+function nativeTaskGroupResponse(runs, options = {}) {
+  const includeDiagnostics2 = options.includeDiagnostics ?? (() => false);
+  const normalized = runs.map((run, index) => {
+    if (run.result) {
+      const agent = compactAgentResultForMcp(run.result);
+      const recovery2 = recoveryForAgentResult(run.result);
+      const resultValue = agent.structuredOutput ?? agent.finalMessage;
+      const answer = visibleAgentAnswer(agent, recovery2);
+      const item = {
+        name: agent.name ?? run.task.name ?? run.task.description ?? `codex-task-${index + 1}`,
+        ok: agent.ok,
+        status: agent.status,
+        summary: summarizeResultValue(resultValue, answer, `Codex task ${agent.status}`),
+        result: answer
+      };
+      if (agent.structuredOutput !== void 0) item.structured = agent.structuredOutput;
+      if ((run.task.keep_session || !agent.ok) && run.session?.id) item.session_id = run.session.id;
+      if (recovery2) {
+        item.error = {
+          message: agentFallbackErrorText(agent, recovery2) ?? `Codex task ${agent.status}`,
+          recoverable: recovery2.recoverable,
+          kind: recovery2.reason,
+          retry_after_ms: recovery2.retryAfterMs
+        };
+      }
+      if (includeDiagnostics2(run.task.advanced)) item.diagnostics = diagnosticsForAgent(agent);
+      return item;
+    }
+    const recovery = recoveryForError(run.error ?? new Error("Codex task failed before producing a result."), "codex_task_group");
+    const message = redactSensitiveText(run.error instanceof Error ? run.error.message : String(run.error ?? "Codex task failed."));
+    const result = recovery.recommendedAction ? `${message}
+
+Next: ${recovery.recommendedAction}` : message;
+    return {
+      name: run.task.name ?? run.task.description ?? `codex-task-${index + 1}`,
+      ok: false,
+      status: "failed",
+      summary: firstUsefulLine(message, "Codex task failed before producing a result."),
+      result,
+      session_id: run.session?.id,
+      error: {
+        message,
+        recoverable: recovery.recoverable,
+        kind: recovery.reason,
+        retry_after_ms: recovery.retryAfterMs
+      },
+      diagnostics: includeDiagnostics2(run.task.advanced) ? {} : void 0
+    };
+  });
+  const ok = normalized.every((result) => result.ok);
+  const resultText = normalized.map((item) => `## ${item.name}
+${item.result || item.summary}`).join("\n\n");
+  const firstFailed = normalized.find((result) => !result.ok);
+  return nativeTextResult(
+    {
+      ok,
+      status: ok ? "completed" : "failed",
+      summary: `${normalized.filter((result) => result.ok).length}/${normalized.length} Codex tasks completed successfully.`,
+      results: normalized,
+      hint: firstFailed ? "Retry only the failed task if it is still needed." : void 0
+    },
+    !ok,
+    resultText
+  );
+}
+
+// src/processes.ts
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
+var execFileAsync = promisify(execFile);
+var staleCpuThresholdPct = 25;
+var defaultProcessScanCacheTtlMs = 3e4;
+var processDiagnosticsCache;
+function sanitizeCommand(command) {
+  const redacted = redactSensitiveText(command);
+  return redacted.length <= 500 ? redacted : `${redacted.slice(0, 500)}...`;
+}
+function parsePsProcessLine(line) {
+  const match = line.trim().match(/^(\d+)\s+(\d+)\s+(\d+)\s+(\S+)\s+([0-9.]+)\s+(\S+)\s+(.+)$/);
+  if (!match) return void 0;
+  const [, pid, ppid, pgid, stat3, cpuPct, elapsed, command] = match;
+  if (!pid || !ppid || !pgid || !stat3 || !cpuPct || !elapsed || !command) return void 0;
+  return {
+    pid: Number(pid),
+    ppid: Number(ppid),
+    pgid: Number(pgid),
+    stat: stat3,
+    cpuPct: Number(cpuPct),
+    elapsed,
+    command: sanitizeCommand(command)
+  };
+}
+function isPluginProcess(command) {
+  return command.includes("codex-subagents") && command.includes("dist/index.js");
+}
+function pluginProcessDiagnosticsFromSnapshots(snapshots, currentPid = process.pid) {
+  const pluginProcesses = snapshots.filter((snapshot3) => isPluginProcess(snapshot3.command));
+  const staleSuspects = pluginProcesses.filter((snapshot3) => snapshot3.pid !== currentPid && snapshot3.ppid === 1);
+  return {
+    supported: true,
+    currentPid,
+    pluginProcesses,
+    staleSuspects,
+    highCpuStaleSuspects: staleSuspects.filter((snapshot3) => snapshot3.cpuPct >= staleCpuThresholdPct)
+  };
+}
+async function scanPluginProcesses() {
+  if (process.platform === "win32") {
+    return {
+      supported: false,
+      currentPid: process.pid,
+      pluginProcesses: [],
+      staleSuspects: [],
+      highCpuStaleSuspects: [],
+      error: "process scan is not implemented on Windows"
+    };
+  }
+  try {
+    const { stdout } = await execFileAsync(
+      "ps",
+      ["-axo", "pid=,ppid=,pgid=,stat=,%cpu=,etime=,command="],
+      { timeout: 1e3, maxBuffer: 1e6, encoding: "utf8" }
+    );
+    const snapshots = stdout.split("\n").map((line) => parsePsProcessLine(line)).filter((snapshot3) => Boolean(snapshot3));
+    return pluginProcessDiagnosticsFromSnapshots(snapshots);
+  } catch (error2) {
+    return {
+      supported: false,
+      currentPid: process.pid,
+      pluginProcesses: [],
+      staleSuspects: [],
+      highCpuStaleSuspects: [],
+      error: error2 instanceof Error ? error2.message : String(error2)
+    };
+  }
+}
+async function detectPluginProcesses(options = {}) {
+  const ttlMs = options.ttlMs ?? defaultProcessScanCacheTtlMs;
+  const now = options.now ?? Date.now();
+  if (ttlMs > 0 && processDiagnosticsCache && processDiagnosticsCache.expiresAt > now) {
+    return processDiagnosticsCache.value;
+  }
+  const value = await (options.scan ?? scanPluginProcesses)();
+  if (ttlMs > 0) {
+    processDiagnosticsCache = {
+      value,
+      expiresAt: now + ttlMs
+    };
+  }
+  return value;
 }
 
 // src/app-server.ts
@@ -25266,7 +25386,7 @@ function maxSessionMilestones(env = process.env) {
 function truncateText(text, maxChars) {
   return text.length <= maxChars ? text : text.slice(0, maxChars);
 }
-function firstUsefulLine(text, fallback = "") {
+function firstUsefulLine2(text, fallback = "") {
   const line = text?.split(/\r?\n/).map((part) => part.trim()).find(Boolean);
   return line ?? fallback;
 }
@@ -25274,8 +25394,8 @@ function sanitizeMilestone(milestone) {
   return {
     ...milestone,
     command: milestone.command ? truncateText(redactSensitiveText(milestone.command), 200) : void 0,
-    text: milestone.text ? truncateText(redactSensitiveText(firstUsefulLine(milestone.text)), 500) : void 0,
-    error: milestone.error ? truncateText(redactSensitiveText(firstUsefulLine(milestone.error)), 500) : void 0
+    text: milestone.text ? truncateText(redactSensitiveText(firstUsefulLine2(milestone.text)), 500) : void 0,
+    error: milestone.error ? truncateText(redactSensitiveText(firstUsefulLine2(milestone.error)), 500) : void 0
   };
 }
 function defaultMilestoneDetectionState() {
@@ -26556,96 +26676,294 @@ var CodexSessionManager = class {
 };
 var sessionManager = new CodexSessionManager({ persist: true });
 
-// src/index.ts
-var usageGuide = [
-  "Claude Code integration guide for codex-subagents:",
-  "",
-  "Use Codex subagents like Claude's native Task tool when the user needs an independent OpenAI Codex worker. Codex is a frontier model, like Claude, and is especially useful as a more technical, reliability-focused subagent for deep codebase work, server/deployment tasks, complex debugging, and adversarial review. Use this MCP server whenever the user asks Claude to use Codex, OpenAI Codex, Codex subagents, Codex Spark, a Codex second opinion, parallel Codex review, independent Codex codebase analysis, deep technical review, or adversarial validation. You do not need the user to name an MCP tool.",
-  "",
-  "Tool choice:",
-  "- Use codex_task when you want one independent Codex subagent: a frontier-model second opinion, deep technical implementation/review, complex codebase exploration, server/deployment work, or adversarial analysis. It is the Codex equivalent of native Task: description plus prompt, read-only by default, and answer-first result.",
-  "- Use multiple codex_task calls in parallel when investigations are independent and Claude can synthesize the answers itself.",
-  "- Use codex_task_group when the work can be split into independent concurrent Codex tasks and Claude wants one combined response with rolled-up per-task findings.",
-  "- Use codex_followup when Claude already has a session_id from codex_task or codex_task_group and wants to continue, steer, wait on, or cancel that same Codex context. This is a Codex-specific multi-turn extension; wait/cancel correspond to native TaskOutput/TaskStop-style operations.",
-  "- Set codex_task background true for long-running work so Claude gets a session_id immediately, then use codex_wait_any for several sessions or codex_followup mode wait, steer, or cancel for one session.",
-  "- Prefer codex_followup mode wait and codex_wait_any for completion. Subscribe to or read codex://sessions/{session_id} only when resource access is available and Claude needs progress milestones or completion state.",
-  "- Diagnostics are resources by default: read codex://status, codex://doctor, or codex://usage when a prior call failed or availability is uncertain. If Claude asks for a resource server id, use plugin:codex-subagents:codex-subagents, not the mcp__... tool prefix or a stale plain codex-subagents server.",
-  "- Debug tools such as codex_status, codex_doctor, codex_usage_guide, codex_choose_tool, and codex_export_debug_bundle are hidden unless CODEX_SUBAGENTS_ENABLE_DEBUG_TOOLS=1.",
-  "- Legacy/manual tools such as ask_codex, run_agent, run_agents, and old session names are hidden unless CODEX_SUBAGENTS_ENABLE_LEGACY_TOOLS=1.",
-  "",
-  "Prefer Codex over native Task when:",
-  "- The user explicitly asks for Codex, OpenAI Codex, Codex Spark, an adversarial review, or a second opinion from another frontier model.",
-  "- The work is deep technical work: managing a complex codebase, debugging a difficult failure, reviewing architecture, validating correctness, preparing a server deployment, investigating infrastructure, or checking a high-risk change.",
-  "- Claude wants a more technical and independent reviewer that does not share Claude's scratchpad or recent assumptions.",
-  "- The task is independent of Claude's recent conversation and would waste Claude's context window.",
-  "- The work is long-running and should proceed while Claude does other work; use background true.",
-  "- The goal is adversarial validation, security review, or formal challenge of Claude's reasoning.",
-  "Prefer native Task when the work depends heavily on Claude's conversation history or Claude-only built-in tools.",
-  "",
-  "Default operating rules:",
-  "- Do not use Codex for simple file reads, simple grep/search, tiny local commands, or work Claude can do directly faster.",
-  "- Keep sandbox read-only unless the user explicitly asks for a different sandbox.",
-  "- If the user explicitly asks for non-sandbox/full local capabilities, set full_access true. This maps to Codex's --dangerously-bypass-approvals-and-sandbox flag and allows DNS/network plus unrestricted file and git writes.",
-  "- Approvals are non-interactive; do not expect Codex to ask permission.",
-  `- Foreground codex_task calls are also capped to ${defaultBlockingWaitTimeoutMs}ms by default before they hand back a live session_id. If completed is false, the Codex task is still running; use codex_followup mode wait, steer, or cancel.`,
-  '- If codex_followup mode wait returns completed false with timeoutReason "wait_timeout", the session is still running unless its status says otherwise.',
-  `- Blocking wait tools are capped to ${defaultBlockingWaitTimeoutMs}ms by default so Claude stays responsive. If a wait returns completed false, call codex_followup mode wait or codex_wait_any again, or read codex://sessions/{session_id}.`,
-  "- Use codex_wait_any after launching several background Codex tasks to harvest whichever one finishes first without busy-polling.",
-  "- Use codex_followup mode cancel to stop a background or actively running Codex session early. The response includes whatever partial output streamed before the interrupt, and the matching Codex Desktop thread is archived best-effort when supported.",
-  '- If a tool returns error.kind "backpressure", reduce max_parallel or wait before retrying. codex://status exposes current queue/session limits.',
-  "- If a response mentions outputArtifacts, use the artifact paths for full retained output instead of asking Codex to resend huge stdout/stderr.",
-  '- Do not use model_preset "spark" by default. Use Spark only when the user asks for Spark or when a quick focused sidecar check is clearly more appropriate than the default Codex model.',
-  '- Use reasoning "medium" by default, "low" for simple checks, and "high" only for difficult normal analysis. Use advanced.reasoning "xhigh" only when the user explicitly asks for maximum reasoning.',
-  '- For the current strongest ChatGPT-backed Codex model, use advanced.model "gpt-5.5" or omit advanced.model. Do not invent a "-codex" suffix for GPT-5.5.',
-  '- Do not combine model_preset "spark" with reasoning_summary values other than "none"; Spark does not support reasoning.summary.',
-  "- Do not set service_tier by default. Let Codex use its normal account/default service tier unless the user explicitly asks for a service tier.",
-  "- Pass project_dir whenever Claude knows the active project directory so Codex works in the same tree as Claude Code.",
-  "- codex_task returns a session_id only for background tasks, keep_session requests, or failures. Set keep_session true when Claude expects to continue the Codex context after a completed task.",
-  "- Raw debug logs are intentionally verbose and may contain MCP traffic and prompt text. Treat logs and debug bundles as sensitive local data.",
-  "- Do not use Bash, Read, or filesystem inspection to locate Codex. The MCP server resolves Codex automatically, preferring the Codex desktop app binary when installed.",
-  "- Put uncommon settings such as exact model, Codex binary path, timeout, MCP sharing, nested Codex subagents, and output contracts under advanced.",
-  "- Ask Codex for concise results with file paths, line references, and actionable findings when reviewing code.",
-  "",
-  "Canonical recipes:",
-  "- Adversarial code review: Claude does its own review with native tools, then calls codex_task with subagent_type code-reviewer or security-reviewer for an independent frontier-model review. Claude compares both sets of findings and reports the merged result.",
-  "- Parallel codebase exploration: launch 3-4 codex_task background true calls with subagent_type explorer, each scoped to a different subsystem. Use codex_wait_any to harvest results as they finish.",
-  "- Long-context offload: delegate broad code reading or multi-file reasoning to codex_task so Codex uses its own context and Claude receives only the concise technical summary.",
-  "- Deployment or server hardening: use codex_task for technical deployment plans, server configuration review, CI/CD checks, rollback analysis, and operational failure modes.",
-  "- Security sweep before merge: call codex_task with subagent_type security-reviewer and ask Codex to audit staged changes, auth boundaries, secrets handling, and unsafe defaults.",
-  "",
-  "Nested Codex subagents:",
-  "- When the user wants Codex to use its own subagents, pass complete custom definitions in advanced.codex_subagents and explicit work items in advanced.subagent_tasks.",
-  "- Keep advanced.subagent_runtime.max_depth at 1 unless recursive delegation is intentionally requested."
-].join("\n");
-var server = new McpServer(
-  {
-    name: "codex-subagents",
-    version: packageVersion
-  },
-  {
-    instructions: usageGuide
-  }
-);
-server.server.registerCapabilities({ resources: { subscribe: true } });
-server.server.setRequestHandler(SubscribeRequestSchema, async () => ({}));
-server.server.setRequestHandler(UnsubscribeRequestSchema, async () => ({}));
+// src/wait-timeout.ts
+var defaultBlockingWaitTimeoutMs = 3e5;
+var hardMaxBlockingWaitTimeoutMs = 3e5;
+var defaultProgressBlockingWaitTimeoutMs = 12e5;
+var hardMaxProgressBlockingWaitTimeoutMs = 12e5;
+var minBlockingWaitTimeoutMs = 25;
+function configuredMaxBlockingWaitMs(env = process.env, options = {}) {
+  const envKey = options.progress ? "CODEX_SUBAGENTS_MAX_PROGRESS_BLOCKING_WAIT_MS" : "CODEX_SUBAGENTS_MAX_BLOCKING_WAIT_MS";
+  const fallback = options.progress ? defaultProgressBlockingWaitTimeoutMs : defaultBlockingWaitTimeoutMs;
+  const hardMax = options.progress ? hardMaxProgressBlockingWaitTimeoutMs : hardMaxBlockingWaitTimeoutMs;
+  const parsed = Number(env[envKey]);
+  if (!Number.isFinite(parsed) || parsed <= 0) return fallback;
+  return Math.max(minBlockingWaitTimeoutMs, Math.min(Math.floor(parsed), hardMax));
+}
+function capBlockingWaitTimeout(requestedMs, env = process.env, options = {}) {
+  const configuredMax = configuredMaxBlockingWaitMs(env, options);
+  const requested = requestedMs ?? configuredMax;
+  const normalized = Math.max(1, Math.floor(requested));
+  const effective = Math.min(normalized, configuredMax);
+  return {
+    requestedMs: normalized,
+    effectiveMs: effective,
+    capped: effective < normalized
+  };
+}
+
+// src/resources.ts
 function sessionResourceUri(sessionId) {
   return `codex://sessions/${encodeURIComponent(sessionId)}`;
 }
-sessionManager.setSessionChangedHandler(
-  (sessionId) => server.server.sendResourceUpdated({ uri: sessionResourceUri(sessionId) })
-);
-var legacyToolsEnabled = process.env.CODEX_SUBAGENTS_ENABLE_LEGACY_TOOLS === "1";
-var debugToolsEnabled = process.env.CODEX_SUBAGENTS_ENABLE_DEBUG_TOOLS === "1";
-var registerTool = server.registerTool.bind(server);
-var registerLegacyTool = ((name, config2, cb) => {
-  if (!legacyToolsEnabled) return;
-  return registerTool(name, config2, cb);
-});
-var registerDebugTool = ((name, config2, cb) => {
-  if (!debugToolsEnabled) return;
-  return registerTool(name, config2, cb);
-});
+async function codexStatusPayload(codexBin, visibility) {
+  const status = await probeCodexVersion(codexBin);
+  const processes = await detectPluginProcesses();
+  return {
+    ok: !status.error,
+    binary: status.binary,
+    version: status.version,
+    error: status.error,
+    cwd: process.cwd(),
+    defaultTools: ["codex_task", "codex_task_group", "codex_followup", "codex_wait_any"],
+    hiddenDebugTools: visibility ? !visibility.debugToolsEnabled : process.env.CODEX_SUBAGENTS_ENABLE_DEBUG_TOOLS !== "1",
+    hiddenLegacyTools: visibility ? !visibility.legacyToolsEnabled : process.env.CODEX_SUBAGENTS_ENABLE_LEGACY_TOOLS !== "1",
+    defaultModel: defaultModel(),
+    defaultReasoningEffort: defaultReasoningEffort(),
+    defaultSandbox: "read-only",
+    fullAccessFlag: "full_access",
+    advancedFullAccessFlag: "advanced.dangerously_bypass_approvals_and_sandbox",
+    defaultServiceTier: "codex-default",
+    defaultSessionProtocol: process.env.CODEX_SUBAGENTS_SESSION_PROTOCOL === "exec" ? "exec" : "app-server",
+    appServerProtocol: {
+      transport: "stdio",
+      command: "codex app-server --listen stdio://",
+      default: process.env.CODEX_SUBAGENTS_SESSION_PROTOCOL === "exec" ? "exec" : "app-server",
+      requiredMethods: ["initialize", "thread/start", "turn/start"],
+      liveSteeringMethods: ["turn/steer", "turn/interrupt"],
+      recoveryMethods: ["thread/resume", "thread/read"],
+      passiveMethods: ["thread/read"],
+      fallbackToExec: process.env.CODEX_SUBAGENTS_DISABLE_EXEC_FALLBACK === "1" ? "disabled" : "enabled"
+    },
+    appServerFallback: process.env.CODEX_SUBAGENTS_DISABLE_EXEC_FALLBACK === "1" ? "disabled" : "enabled",
+    modelPresets: {
+      codex: "gpt-5.3-codex",
+      spark: "gpt-5.3-codex-spark"
+    },
+    outputContracts,
+    mcpConfigPolicies,
+    pluginCodexBin: cleanOption(process.env.CODEX_SUBAGENTS_CODEX_BIN),
+    claudeProjectDir: cleanOption(process.env.CLAUDE_PROJECT_DIR),
+    queue: jobManager.stats(),
+    sessions: sessionManager.stats(),
+    notifications: {
+      resource_updates_enabled: true,
+      debounce_ms: 250,
+      max_delay_ms: 2e3,
+      max_milestones_per_session: maxSessionMilestones()
+    },
+    waits: {
+      default_blocking_wait_timeout_ms: defaultBlockingWaitTimeoutMs,
+      max_blocking_wait_ms: configuredMaxBlockingWaitMs(),
+      hard_max_blocking_wait_ms: hardMaxBlockingWaitTimeoutMs
+    },
+    logging: loggingDiagnostics(),
+    artifacts: outputArtifactDiagnostics(),
+    processes,
+    diagnostics: {
+      ...diagnosticStats(),
+      recentFailures: recentDiagnosticEvents(20)
+    },
+    lifecycle: lifecycleStats()
+  };
+}
+async function codexDoctorPayload(args = {}) {
+  const checks = [];
+  let ok = true;
+  try {
+    const status = await probeCodexVersion(args.codex_bin);
+    checks.push({
+      name: "codex_binary",
+      ok: !status.error,
+      detail: { binary: status.binary, version: status.version, error: status.error }
+    });
+    if (status.error) ok = false;
+  } catch (error2) {
+    ok = false;
+    logger.error("codex_doctor.binary_failed", { error: errorForLog(error2) });
+    checks.push({
+      name: "codex_binary",
+      ok: false,
+      detail: error2 instanceof Error ? error2.message : String(error2)
+    });
+  }
+  try {
+    const projectDir = await resolveWorkingDirectory(args.project_dir);
+    checks.push({
+      name: "project_dir",
+      ok: true,
+      detail: { projectDir: cleanOption(projectDir) }
+    });
+  } catch (error2) {
+    ok = false;
+    logger.error("codex_doctor.project_dir_failed", { error: errorForLog(error2) });
+    checks.push({ name: "project_dir", ok: false, detail: String(error2) });
+  }
+  checks.push({
+    name: "defaults",
+    ok: defaultReasoningEffort() !== "minimal",
+    detail: {
+      sandbox: "read-only",
+      fullAccess: false,
+      approvalPolicy: "never",
+      defaultModel: defaultModel(),
+      defaultReasoningEffort: defaultReasoningEffort(),
+      forwardSensitiveEnvDefault: false
+    }
+  });
+  checks.push({ name: "queue", ok: true, detail: jobManager.stats() });
+  checks.push({ name: "sessions", ok: true, detail: sessionManager.stats() });
+  checks.push({ name: "logging", ok: true, detail: loggingDiagnostics() });
+  checks.push({ name: "artifacts", ok: true, detail: outputArtifactDiagnostics() });
+  checks.push({ name: "diagnostics", ok: true, detail: diagnosticStats() });
+  checks.push({ name: "lifecycle", ok: true, detail: lifecycleStats() });
+  const processes = await detectPluginProcesses();
+  const processOk = processes.highCpuStaleSuspects.length === 0;
+  if (!processOk) ok = false;
+  checks.push({
+    name: "stale_processes",
+    ok: processOk,
+    detail: processes
+  });
+  return {
+    ok,
+    checks,
+    supported: {
+      modelPresets,
+      reasoningEfforts,
+      sandboxModes,
+      fullAccessFlag: "full_access",
+      advancedFullAccessFlag: "advanced.dangerously_bypass_approvals_and_sandbox",
+      outputContracts,
+      mcpConfigPolicies
+    }
+  };
+}
+function sessionResourceStatus(session) {
+  if (session.status === "failed" || session.status === "cancelled") return session.status;
+  return session.active ? "running" : "idle";
+}
+function jsonResource(uri, value) {
+  return {
+    contents: [
+      {
+        uri: uri.href,
+        mimeType: "application/json",
+        text: JSON.stringify(value, null, 2)
+      }
+    ]
+  };
+}
+function sessionResourceMilestone(milestone) {
+  return redactJsonValue({
+    seq: milestone.seq,
+    at: milestone.at,
+    kind: milestone.kind,
+    turn_id: milestone.turn_id,
+    command: milestone.command,
+    text: milestone.text,
+    error: milestone.error
+  });
+}
+function sessionResourceBody(session) {
+  const lastResult = session.lastResult ? compactAgentResultForMcp(session.lastResult) : void 0;
+  return redactJsonValue({
+    id: session.id,
+    name: session.name,
+    status: sessionResourceStatus(session),
+    active: session.active,
+    completed: Boolean(
+      !session.active && session.queuedTurns.length === 0 && (session.lastResult || session.status === "failed" || session.status === "cancelled")
+    ),
+    created_at: session.createdAt,
+    updated_at: session.updatedAt,
+    project_dir: session.projectDir ?? session.cwd,
+    turns: session.turns,
+    queued_turns: session.queuedTurns.length,
+    last_milestone_seq: session.lastMilestoneSeq,
+    milestones: session.milestones.map(sessionResourceMilestone),
+    last_result: lastResult ? {
+      ok: lastResult.ok,
+      status: lastResult.status,
+      final_message: redactSensitiveText(lastResult.finalMessage),
+      duration_ms: lastResult.durationMs,
+      turn_id: session.lastResultTurnId
+    } : null
+  });
+}
+function sessionResourceList() {
+  return {
+    resources: sessionManager.list().slice(0, 100).map((session) => ({
+      uri: sessionResourceUri(session.id),
+      name: session.name ?? session.id,
+      mimeType: "application/json",
+      description: `Codex session ${sessionResourceStatus(session)} - ${session.turns} turn${session.turns === 1 ? "" : "s"}`
+    }))
+  };
+}
+function templateVariable(value) {
+  if (Array.isArray(value)) return String(value[0] ?? "");
+  return String(value ?? "");
+}
+function registerResources(server2, options) {
+  server2.registerResource(
+    "codex-usage",
+    "codex://usage",
+    {
+      title: "Codex Subagents Usage",
+      description: "Claude-facing operating guide for using Codex subagents through the native MCP tools.",
+      mimeType: "text/plain"
+    },
+    async (uri) => ({
+      contents: [
+        {
+          uri: uri.href,
+          mimeType: "text/plain",
+          text: options.usageGuide
+        }
+      ]
+    })
+  );
+  server2.registerResource(
+    "codex-status",
+    "codex://status",
+    {
+      title: "Codex Subagents Status",
+      description: "Read-only diagnostics: binary, version, default settings, queues, sessions, logging, and recent failures.",
+      mimeType: "application/json"
+    },
+    async (uri) => jsonResource(uri, await codexStatusPayload(void 0, options))
+  );
+  server2.registerResource(
+    "codex-doctor",
+    "codex://doctor",
+    {
+      title: "Codex Subagents Doctor",
+      description: "Read-only health checks for Codex binary resolution, project directory, defaults, queues, and logging.",
+      mimeType: "application/json"
+    },
+    async (uri) => jsonResource(uri, await codexDoctorPayload())
+  );
+  server2.registerResource(
+    "codex-session",
+    new ResourceTemplate("codex://sessions/{session_id}", {
+      list: () => sessionResourceList()
+    }),
+    {
+      title: "Codex Session",
+      description: "Codex TaskGet/TaskList-style resource: per-session progress milestones and completion state for background tasks.",
+      mimeType: "application/json"
+    },
+    async (uri, variables) => {
+      const sessionId = templateVariable(variables.session_id);
+      const session = sessionManager.get(sessionId);
+      if (!session) throw new Error(`Unknown session_id: ${sessionId}`);
+      return jsonResource(uri, sessionResourceBody(session));
+    }
+  );
+}
+
+// src/schemas.ts
 var reasoningEffortSchema = external_exports.enum(reasoningEfforts);
 var publicReasoningSchema = external_exports.enum(["low", "medium", "high"]);
 var sandboxModeSchema = external_exports.enum(sandboxModes);
@@ -26915,6 +27233,315 @@ var nativeBaseInputSchema = {
   full_access: external_exports.boolean().default(false).describe("Allow Codex to write files, use network/DNS, and modify git. Only true when the user explicitly asks for non-sandbox execution."),
   advanced: advertisedAdvancedInputSchema.optional()
 };
+var parallelRunOverrideSchema = {
+  model: commonInputSchema.model,
+  model_preset: commonInputSchema.model_preset,
+  reasoning_effort: commonInputSchema.reasoning_effort,
+  sandbox: commonInputSchema.sandbox.optional(),
+  dangerously_bypass_approvals_and_sandbox: commonInputSchema.dangerously_bypass_approvals_and_sandbox.optional(),
+  service_tier: commonInputSchema.service_tier.optional(),
+  model_verbosity: commonInputSchema.model_verbosity,
+  reasoning_summary: commonInputSchema.reasoning_summary,
+  cwd: commonInputSchema.cwd,
+  project_dir: commonInputSchema.project_dir,
+  codex_bin: commonInputSchema.codex_bin,
+  profile: commonInputSchema.profile,
+  timeout_ms: commonInputSchema.timeout_ms.optional(),
+  max_output_chars: commonInputSchema.max_output_chars.optional(),
+  include_events: commonInputSchema.include_events.optional(),
+  ephemeral: commonInputSchema.ephemeral.optional(),
+  skip_git_repo_check: commonInputSchema.skip_git_repo_check.optional(),
+  ignore_rules: commonInputSchema.ignore_rules.optional(),
+  isolated_codex_home: commonInputSchema.isolated_codex_home.optional(),
+  mcp_config_policy: commonInputSchema.mcp_config_policy.optional(),
+  codex_mcp_servers: commonInputSchema.codex_mcp_servers,
+  forward_sensitive_env: commonInputSchema.forward_sensitive_env.optional(),
+  idle_timeout_ms: commonInputSchema.idle_timeout_ms,
+  spawn_timeout_ms: commonInputSchema.spawn_timeout_ms.optional(),
+  terminate_grace_ms: commonInputSchema.terminate_grace_ms.optional(),
+  output_contract: commonInputSchema.output_contract.optional(),
+  output_schema: commonInputSchema.output_schema,
+  codex_subagents: commonInputSchema.codex_subagents,
+  subagent_tasks: commonInputSchema.subagent_tasks,
+  subagent_runtime: commonInputSchema.subagent_runtime
+};
+var parallelAgentSchema = external_exports.object({
+  prompt: external_exports.string().min(1).describe(
+    "Concrete independent task for this Codex agent. Keep overlap low across parallel agents."
+  ),
+  name: external_exports.string().trim().min(1).optional().describe("Optional label for this agent."),
+  ...parallelRunOverrideSchema
+});
+var frontDoorParallelTaskSchema = external_exports.object({
+  task: external_exports.string().min(1).describe(
+    "Concrete independent Codex task. Keep overlap low across parallel tasks and state the expected output shape."
+  ),
+  name: external_exports.string().trim().min(1).optional().describe("Optional label for this Codex task."),
+  ...parallelRunOverrideSchema
+});
+var nativeTaskGroupTaskSchema = external_exports.object({
+  description: external_exports.string().trim().min(1).describe("Short task label, like Claude's native Task description."),
+  prompt: external_exports.string().trim().min(1).describe(
+    "Self-contained Codex prompt for this independent task. Keep overlap low across parallel tasks."
+  ),
+  subagent_type: advertisedCodexRoleSchema.optional().describe("Claude-style Codex persona. Prefer general-purpose, explorer, planner, code-reviewer, or security-reviewer."),
+  name: external_exports.string().trim().min(1).optional().describe("Optional stable label for this Codex task."),
+  keep_session: external_exports.boolean().default(false).describe("Return this task's session_id after completion so Claude can follow up. Leave false for native Task-like one-shot work."),
+  ...nativeBaseInputSchema
+});
+var followupModeSchema = external_exports.enum(["queue", "steer", "wait", "cancel"]);
+var jobIdSchema = external_exports.string().trim().min(1).describe("Job id returned by start_agent_run or start_agents_run.");
+var sessionIdSchema = external_exports.string().trim().min(1).describe("Session id returned by codex_task or codex_task_group.");
+
+// src/progress.ts
+function progressNotificationsEnabled(env = process.env) {
+  const raw = env.CODEX_SUBAGENTS_ENABLE_PROGRESS_NOTIFICATIONS?.trim().toLowerCase();
+  return ["1", "true", "yes", "on"].includes(raw ?? "");
+}
+function progressNotificationsAvailable(extra, env = process.env) {
+  return progressNotificationsEnabled(env) && extra?._meta?.progressToken !== void 0;
+}
+function progressSendTimeoutMs(env = process.env) {
+  const parsed = Number(env.CODEX_SUBAGENTS_PROGRESS_SEND_TIMEOUT_MS);
+  if (!Number.isFinite(parsed) || parsed <= 0) return 1e3;
+  return Math.max(25, Math.min(Math.floor(parsed), 1e4));
+}
+function timeoutPromise(ms) {
+  return new Promise((_, reject) => {
+    const timer = setTimeout(() => reject(new Error(`Progress notification timed out after ${ms}ms`)), ms);
+    timer.unref();
+  });
+}
+async function bounded(promise, timeoutMs) {
+  return Promise.race([promise, timeoutPromise(timeoutMs)]);
+}
+function progressMinIntervalMs(env = process.env) {
+  const parsed = Number(env.CODEX_SUBAGENTS_PROGRESS_MIN_INTERVAL_MS);
+  if (!Number.isFinite(parsed) || parsed < 0) return 250;
+  return Math.max(0, Math.min(Math.floor(parsed), 5e3));
+}
+function createProgressReporter(extra, options = {}) {
+  const progressToken = extra?._meta?.progressToken;
+  const enabled = options.enabled ?? progressNotificationsEnabled();
+  const sendTimeoutMs = options.sendTimeoutMs ?? progressSendTimeoutMs();
+  const minIntervalMs = options.minIntervalMs ?? progressMinIntervalMs();
+  let progress = 0;
+  let pending = Promise.resolve();
+  let disabled = false;
+  let failures = 0;
+  let lastSentAt = 0;
+  let throttleTimer;
+  let pendingThrottled;
+  function queueSend(message, progressOptions = {}) {
+    if (!enabled || progressToken === void 0 || !extra) return;
+    pending = pending.catch(() => {
+    }).then(async () => {
+      if (disabled) return;
+      const requested = progressOptions.progress ?? progress + 1;
+      const unclamped = Math.max(progress + 1, requested);
+      const next = progressOptions.total === void 0 ? unclamped : Math.min(
+        unclamped,
+        progressOptions.reserveFinal && progressOptions.progress === void 0 ? Math.max(0, progressOptions.total - 1) : progressOptions.total
+      );
+      if (next <= progress) return;
+      progress = next;
+      lastSentAt = Date.now();
+      await bounded(
+        extra.sendNotification({
+          method: "notifications/progress",
+          params: {
+            progressToken,
+            progress,
+            ...progressOptions.total === void 0 ? {} : { total: progressOptions.total },
+            message
+          }
+        }),
+        sendTimeoutMs
+      );
+      failures = 0;
+      logger.rawDebug("mcp.notification.sent", {
+        method: "notifications/progress",
+        params: {
+          progressToken,
+          progress,
+          ...progressOptions.total === void 0 ? {} : { total: progressOptions.total },
+          message
+        }
+      });
+    }).catch((error2) => {
+      failures += 1;
+      if (failures >= 2) disabled = true;
+      logger.error("mcp.notification.failed", { disabled, error: errorForLog(error2) });
+    });
+  }
+  function scheduleThrottledSend() {
+    if (throttleTimer || !pendingThrottled) return;
+    const elapsed = Date.now() - lastSentAt;
+    const delay = Math.max(0, minIntervalMs - elapsed);
+    throttleTimer = setTimeout(() => {
+      throttleTimer = void 0;
+      const next = pendingThrottled;
+      pendingThrottled = void 0;
+      if (next) queueSend(next.message, next.progressOptions);
+    }, delay);
+    throttleTimer.unref();
+  }
+  async function send(message, progressOptions = {}) {
+    logger.rawDebug("mcp.progress", {
+      hasProgressToken: progressToken !== void 0,
+      enabled,
+      message,
+      options: progressOptions
+    });
+    if (!enabled || progressToken === void 0 || !extra || disabled) return;
+    const elapsed = Date.now() - lastSentAt;
+    if (progressOptions.force || minIntervalMs === 0 || lastSentAt === 0 || elapsed >= minIntervalMs) {
+      if (progressOptions.force && throttleTimer) {
+        clearTimeout(throttleTimer);
+        throttleTimer = void 0;
+        pendingThrottled = void 0;
+      }
+      queueSend(message, progressOptions);
+    } else {
+      pendingThrottled = { message, progressOptions };
+      scheduleThrottledSend();
+    }
+    await bounded(pending, sendTimeoutMs + 25).catch(() => {
+    });
+  }
+  async function flush() {
+    if (!enabled || progressToken === void 0 || !extra) return;
+    if (throttleTimer) {
+      clearTimeout(throttleTimer);
+      throttleTimer = void 0;
+    }
+    if (pendingThrottled) {
+      const next = pendingThrottled;
+      pendingThrottled = void 0;
+      queueSend(next.message, next.progressOptions);
+    }
+    await bounded(pending, sendTimeoutMs + 25).catch(() => {
+    });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+  }
+  return { send, flush };
+}
+
+// src/stdio.ts
+var brokenStdioCodes = /* @__PURE__ */ new Set([
+  "EPIPE",
+  "ECONNRESET",
+  "ERR_STREAM_DESTROYED",
+  "ERR_STREAM_WRITE_AFTER_END"
+]);
+function isBrokenStdioError(error2) {
+  if (!error2 || typeof error2 !== "object") return false;
+  const value = error2;
+  if (typeof value.code === "string" && brokenStdioCodes.has(value.code)) return true;
+  const message = typeof value.message === "string" ? value.message.toLowerCase() : "";
+  return message.includes("broken pipe") || message.includes("channel closed") || message.includes("socket closed") || message.includes("stream has been destroyed") || message.includes("write after end");
+}
+function isOrphanedParentPid(parentPid) {
+  return parentPid <= 1;
+}
+function updateOrphanWatchdogState(options) {
+  if (!isOrphanedParentPid(options.parentPid)) {
+    return { shouldExit: false };
+  }
+  const orphanSinceMs = options.previousOrphanSinceMs ?? options.nowMs;
+  return {
+    orphanSinceMs,
+    shouldExit: options.nowMs - orphanSinceMs >= options.graceMs
+  };
+}
+
+// src/index.ts
+var usageGuide = [
+  "Claude Code integration guide for codex-subagents:",
+  "",
+  "Use Codex subagents like Claude's native Task tool when the user needs an independent OpenAI Codex worker. Codex is a frontier model, like Claude, and is especially useful as a more technical, reliability-focused subagent for deep codebase work, server/deployment tasks, complex debugging, and adversarial review. Use this MCP server whenever the user asks Claude to use Codex, OpenAI Codex, Codex subagents, Codex Spark, a Codex second opinion, parallel Codex review, independent Codex codebase analysis, deep technical review, or adversarial validation. You do not need the user to name an MCP tool.",
+  "",
+  "Tool choice:",
+  "- Use codex_task when you want one independent Codex subagent: a frontier-model second opinion, deep technical implementation/review, complex codebase exploration, server/deployment work, or adversarial analysis. It is the Codex equivalent of native Task: description plus prompt, read-only by default, and answer-first result.",
+  "- Use multiple codex_task calls in parallel when investigations are independent and Claude can synthesize the answers itself.",
+  "- Use codex_task_group when the work can be split into independent concurrent Codex tasks and Claude wants one combined response with rolled-up per-task findings.",
+  "- Use codex_followup when Claude already has a session_id from codex_task or codex_task_group and wants to continue, steer, wait on, or cancel that same Codex context. This is a Codex-specific multi-turn extension; wait/cancel correspond to native TaskOutput/TaskStop-style operations.",
+  "- Set codex_task background true for long-running work so Claude gets a session_id immediately, then use codex_wait_any for several sessions or codex_followup mode wait, steer, or cancel for one session.",
+  "- Prefer codex_followup mode wait and codex_wait_any for completion. Subscribe to or read codex://sessions/{session_id} only when resource access is available and Claude needs progress milestones or completion state.",
+  "- Diagnostics are resources by default: read codex://status, codex://doctor, or codex://usage when a prior call failed or availability is uncertain. If Claude asks for a resource server id, use plugin:codex-subagents:codex-subagents, not the mcp__... tool prefix or a stale plain codex-subagents server.",
+  "- Debug tools such as codex_status, codex_doctor, codex_usage_guide, codex_choose_tool, and codex_export_debug_bundle are hidden unless CODEX_SUBAGENTS_ENABLE_DEBUG_TOOLS=1.",
+  "- Legacy/manual tools such as ask_codex, run_agent, run_agents, and old session names are hidden unless CODEX_SUBAGENTS_ENABLE_LEGACY_TOOLS=1.",
+  "",
+  "Prefer Codex over native Task when:",
+  "- The user explicitly asks for Codex, OpenAI Codex, Codex Spark, an adversarial review, or a second opinion from another frontier model.",
+  "- The work is deep technical work: managing a complex codebase, debugging a difficult failure, reviewing architecture, validating correctness, preparing a server deployment, investigating infrastructure, or checking a high-risk change.",
+  "- Claude wants a more technical and independent reviewer that does not share Claude's scratchpad or recent assumptions.",
+  "- The task is independent of Claude's recent conversation and would waste Claude's context window.",
+  "- The work is long-running and should proceed while Claude does other work; use background true.",
+  "- The goal is adversarial validation, security review, or formal challenge of Claude's reasoning.",
+  "Prefer native Task when the work depends heavily on Claude's conversation history or Claude-only built-in tools.",
+  "",
+  "Default operating rules:",
+  "- Do not use Codex for simple file reads, simple grep/search, tiny local commands, or work Claude can do directly faster.",
+  "- Keep sandbox read-only unless the user explicitly asks for a different sandbox.",
+  "- If the user explicitly asks for non-sandbox/full local capabilities, set full_access true. This maps to Codex's --dangerously-bypass-approvals-and-sandbox flag and allows DNS/network plus unrestricted file and git writes.",
+  "- Approvals are non-interactive; do not expect Codex to ask permission.",
+  `- Foreground codex_task calls are also capped to ${defaultBlockingWaitTimeoutMs}ms by default before they hand back a live session_id. If completed is false, the Codex task is still running; use codex_followup mode wait, steer, or cancel.`,
+  '- If codex_followup mode wait returns completed false with timeoutReason "wait_timeout", the session is still running unless its status says otherwise.',
+  `- Blocking wait tools are capped to ${defaultBlockingWaitTimeoutMs}ms by default so Claude stays responsive. If a wait returns completed false, call codex_followup mode wait or codex_wait_any again, or read codex://sessions/{session_id}.`,
+  "- Use codex_wait_any after launching several background Codex tasks to harvest whichever one finishes first without busy-polling.",
+  "- Use codex_followup mode cancel to stop a background or actively running Codex session early. The response includes whatever partial output streamed before the interrupt, and the matching Codex Desktop thread is archived best-effort when supported.",
+  '- If a tool returns error.kind "backpressure", reduce max_parallel or wait before retrying. codex://status exposes current queue/session limits.',
+  "- If a response mentions outputArtifacts, use the artifact paths for full retained output instead of asking Codex to resend huge stdout/stderr.",
+  '- Do not use model_preset "spark" by default. Use Spark only when the user asks for Spark or when a quick focused sidecar check is clearly more appropriate than the default Codex model.',
+  '- Use reasoning "medium" by default, "low" for simple checks, and "high" only for difficult normal analysis. Use advanced.reasoning "xhigh" only when the user explicitly asks for maximum reasoning.',
+  '- For the current strongest ChatGPT-backed Codex model, use advanced.model "gpt-5.5" or omit advanced.model. Do not invent a "-codex" suffix for GPT-5.5.',
+  '- Do not combine model_preset "spark" with reasoning_summary values other than "none"; Spark does not support reasoning.summary.',
+  "- Do not set service_tier by default. Let Codex use its normal account/default service tier unless the user explicitly asks for a service tier.",
+  "- Pass project_dir whenever Claude knows the active project directory so Codex works in the same tree as Claude Code.",
+  "- codex_task returns a session_id only for background tasks, keep_session requests, or failures. Set keep_session true when Claude expects to continue the Codex context after a completed task.",
+  "- Raw debug logs are intentionally verbose and may contain MCP traffic and prompt text. Treat logs and debug bundles as sensitive local data.",
+  "- Do not use Bash, Read, or filesystem inspection to locate Codex. The MCP server resolves Codex automatically, preferring the Codex desktop app binary when installed.",
+  "- Put uncommon settings such as exact model, Codex binary path, timeout, MCP sharing, nested Codex subagents, and output contracts under advanced.",
+  "- Ask Codex for concise results with file paths, line references, and actionable findings when reviewing code.",
+  "",
+  "Canonical recipes:",
+  "- Adversarial code review: Claude does its own review with native tools, then calls codex_task with subagent_type code-reviewer or security-reviewer for an independent frontier-model review. Claude compares both sets of findings and reports the merged result.",
+  "- Parallel codebase exploration: launch 3-4 codex_task background true calls with subagent_type explorer, each scoped to a different subsystem. Use codex_wait_any to harvest results as they finish.",
+  "- Long-context offload: delegate broad code reading or multi-file reasoning to codex_task so Codex uses its own context and Claude receives only the concise technical summary.",
+  "- Deployment or server hardening: use codex_task for technical deployment plans, server configuration review, CI/CD checks, rollback analysis, and operational failure modes.",
+  "- Security sweep before merge: call codex_task with subagent_type security-reviewer and ask Codex to audit staged changes, auth boundaries, secrets handling, and unsafe defaults.",
+  "",
+  "Nested Codex subagents:",
+  "- When the user wants Codex to use its own subagents, pass complete custom definitions in advanced.codex_subagents and explicit work items in advanced.subagent_tasks.",
+  "- Keep advanced.subagent_runtime.max_depth at 1 unless recursive delegation is intentionally requested."
+].join("\n");
+var server = new McpServer(
+  {
+    name: "codex-subagents",
+    version: packageVersion
+  },
+  {
+    instructions: usageGuide
+  }
+);
+server.server.registerCapabilities({ resources: { subscribe: true } });
+server.server.setRequestHandler(SubscribeRequestSchema, async () => ({}));
+server.server.setRequestHandler(UnsubscribeRequestSchema, async () => ({}));
+sessionManager.setSessionChangedHandler(
+  (sessionId) => server.server.sendResourceUpdated({ uri: sessionResourceUri(sessionId) })
+);
+var legacyToolsEnabled = process.env.CODEX_SUBAGENTS_ENABLE_LEGACY_TOOLS === "1";
+var debugToolsEnabled = process.env.CODEX_SUBAGENTS_ENABLE_DEBUG_TOOLS === "1";
+var registerTool = server.registerTool.bind(server);
+var registerLegacyTool = ((name, config2, cb) => {
+  if (!legacyToolsEnabled) return;
+  return registerTool(name, config2, cb);
+});
+var registerDebugTool = ((name, config2, cb) => {
+  if (!debugToolsEnabled) return;
+  return registerTool(name, config2, cb);
+});
 function toCodexSubagents(agents) {
   return agents?.map((agent) => ({
     name: agent.name,
@@ -26929,269 +27556,6 @@ function toCodexSubagents(agents) {
     skillsConfig: agent.skills_config,
     extraConfig: agent.extra_config
   }));
-}
-function jsonResult(value, isError = false) {
-  const fullText = JSON.stringify(value, null, 2);
-  const text = fullText.length <= 4e3 ? fullText : JSON.stringify(
-    {
-      ok: Boolean(value.ok ?? !isError),
-      isError,
-      note: "MCP text content was shortened to keep Claude responsive; use structuredContent for the compacted result.",
-      keys: Object.keys(value)
-    },
-    null,
-    2
-  );
-  return {
-    structuredContent: value,
-    isError,
-    content: [
-      {
-        type: "text",
-        text
-      }
-    ]
-  };
-}
-function errorResult(error2, context = "tool_call") {
-  const recovery = recoveryForError(error2, context);
-  return jsonResult(
-    {
-      ok: false,
-      error: redactSensitiveText(error2 instanceof Error ? error2.message : String(error2)),
-      recovery: redactJsonValue(recovery),
-      suggested_next_action: recovery.recommendedAction
-    },
-    true
-  );
-}
-function agentResultResponse(result) {
-  const recovery = recoveryForAgentResult(result);
-  return jsonResult(
-    {
-      agent: compactAgentResultForMcp(result),
-      recovery,
-      suggested_next_action: recovery?.recommendedAction
-    },
-    !result.ok
-  );
-}
-function firstUsefulLine2(text, fallback) {
-  const line = String(text ?? "").split(/\r?\n/).map((part) => part.trim()).find(Boolean);
-  if (!line) return fallback;
-  return line.length <= 500 ? line : `${line.slice(0, 500)}...`;
-}
-function stringifyResultValue(value, fallback = "") {
-  if (typeof value === "string") return value;
-  if (value === void 0 || value === null) return fallback;
-  try {
-    return JSON.stringify(value, null, 2);
-  } catch {
-    return String(value);
-  }
-}
-function summarizeResultValue(value, fallbackText, fallback) {
-  if (value && typeof value === "object" && !Array.isArray(value)) {
-    const summary = value.summary;
-    if (typeof summary === "string" && summary.trim()) return firstUsefulLine2(summary, fallback);
-  }
-  if (typeof value === "string" && !value.trim() && fallbackText.trim()) {
-    return firstUsefulLine2(fallbackText, fallback);
-  }
-  return firstUsefulLine2(stringifyResultValue(value, fallbackText), fallback);
-}
-function agentFallbackErrorText(agent, recovery) {
-  const validationError = typeof agent.validationError === "string" ? agent.validationError.trim() : "";
-  if (validationError) return validationError;
-  const eventError = agent.eventSummary?.errors?.find(
-    (error2) => typeof error2 === "string" && error2.trim().length > 0
-  );
-  if (eventError) return eventError.trim();
-  const stderr = typeof agent.stderr === "string" ? agent.stderr.trim() : "";
-  if (stderr) return stderr;
-  const recoveryAction = recovery?.recommendedAction?.trim();
-  return recoveryAction || void 0;
-}
-function visibleAgentAnswer(agent, recovery) {
-  const resultValue = agent.structuredOutput ?? agent.finalMessage;
-  const answer = stringifyResultValue(resultValue, agent.finalMessage);
-  const structuredOutputError = typeof agent.structuredOutputError === "string" ? agent.structuredOutputError : void 0;
-  if (agent.ok && agent.structuredOutput !== void 0 && !structuredOutputError) {
-    const summary = summarizeResultValue(agent.structuredOutput, agent.finalMessage, "").trim();
-    return summary && summary !== answer ? `${summary}
-
-${answer}` : answer;
-  }
-  if (!agent.ok && structuredOutputError) {
-    return answer ? `${answer}
-
-Structured output parse failed: ${structuredOutputError}` : `Codex task ${agent.status}: Structured output parse failed: ${structuredOutputError}`;
-  }
-  const fallbackReason = !agent.ok && !answer ? agentFallbackErrorText(agent, recovery) : void 0;
-  if (fallbackReason) return `Codex task ${agent.status}: ${fallbackReason}`;
-  return answer;
-}
-function agentCommands(agent) {
-  return agent.eventSummary.commands.map((command) => ({ ...command }));
-}
-function suggestedActionForAgent(result, recovery) {
-  if (recovery?.recommendedAction) return recovery.recommendedAction;
-  if (result.ok) return void 0;
-  return "Inspect the Codex result details and retry only if the failure looks transient.";
-}
-function nativeTextResult(value, isError = false, textOverride) {
-  const text = typeof textOverride === "string" && textOverride.trim() ? textOverride : typeof value.result === "string" && value.result.trim() ? value.result : typeof value.summary === "string" ? value.summary : JSON.stringify(value, null, 2);
-  return {
-    structuredContent: value,
-    isError,
-    content: [{ type: "text", text }]
-  };
-}
-function nativeErrorPayload(error2, context = "tool_call") {
-  const recovery = recoveryForError(error2, context);
-  const message = redactSensitiveText(error2 instanceof Error ? error2.message : String(error2));
-  const result = recovery.recommendedAction ? `${message}
-
-Next: ${recovery.recommendedAction}` : message;
-  return {
-    ok: false,
-    summary: `Codex task failed: ${firstUsefulLine2(message, "unknown error")}`,
-    result,
-    error: {
-      message,
-      recoverable: recovery.recoverable,
-      kind: recovery.reason,
-      retry_after_ms: recovery.retryAfterMs
-    },
-    hint: recovery.recommendedAction
-  };
-}
-function nativeErrorResult(error2, context = "tool_call") {
-  return nativeTextResult(nativeErrorPayload(error2, context), true);
-}
-function diagnosticsForAgent(agent) {
-  return {
-    duration_ms: agent.durationMs,
-    cwd: agent.cwd,
-    model: agent.model,
-    reasoning_effort: agent.reasoningEffort,
-    sandbox: agent.sandbox,
-    compacted: agent.mcpResponse.compacted,
-    artifact_paths: agent.outputArtifacts,
-    event_summary: agent.eventSummary,
-    stderr_tail: agent.stderr || void 0,
-    stdout_tail: agent.stdoutTail || void 0,
-    structured_output_error: agent.structuredOutputError || void 0,
-    validation_error: agent.validationError || void 0,
-    timeout_reason: agent.timeoutReason || void 0,
-    commands: agentCommands(agent)
-  };
-}
-function nativeAgentPayload(result, context) {
-  const agent = compactAgentResultForMcp(result);
-  const recovery = recoveryForAgentResult(result);
-  const resultValue = agent.structuredOutput ?? agent.finalMessage;
-  const structuredOutputError = typeof agent.structuredOutputError === "string" ? agent.structuredOutputError : void 0;
-  const visibleAnswer = visibleAgentAnswer(agent, recovery);
-  const sessionId = context.session && typeof context.session === "object" ? context.session.id : void 0;
-  const sessionFallbackReason = context.session && typeof context.session === "object" ? context.session.appServerFallbackReason : void 0;
-  const hint = recovery?.recommendedAction ?? suggestedActionForAgent(agent, recovery);
-  const payload = {
-    ok: agent.ok,
-    status: agent.status,
-    summary: summarizeResultValue(resultValue, visibleAnswer, `Codex task ${agent.status}`),
-    result: visibleAnswer
-  };
-  if (agent.structuredOutput !== void 0) payload.structured = agent.structuredOutput;
-  if ((context.includeSessionId || !agent.ok) && sessionId) {
-    payload.session_id = sessionId;
-    if (context.turn !== void 0) payload.turn = context.turn;
-  }
-  if (hint) payload.hint = hint;
-  if (recovery) {
-    payload.error = {
-      message: structuredOutputError ? `Structured output parse failed: ${structuredOutputError}` : agentFallbackErrorText(agent, recovery) ?? `Codex task ${agent.status}`,
-      recoverable: recovery.recoverable,
-      kind: recovery.reason,
-      retry_after_ms: recovery.retryAfterMs
-    };
-  }
-  if (context.includeDiagnostics) {
-    payload.diagnostics = {
-      ...diagnosticsForAgent(agent),
-      session: context.session,
-      ...sessionProgressPayload(context.session),
-      app_server_fallback_reason: sessionFallbackReason || void 0
-    };
-  }
-  return payload;
-}
-function nativeAgentResponse(result, context) {
-  return nativeTextResult(nativeAgentPayload(result, context), !result.ok);
-}
-function nativeTaskGroupResponse(runs) {
-  const normalized = runs.map((run, index) => {
-    if (run.result) {
-      const agent = compactAgentResultForMcp(run.result);
-      const recovery2 = recoveryForAgentResult(run.result);
-      const resultValue = agent.structuredOutput ?? agent.finalMessage;
-      const answer = visibleAgentAnswer(agent, recovery2);
-      const item = {
-        name: agent.name ?? run.task.name ?? run.task.description ?? `codex-task-${index + 1}`,
-        ok: agent.ok,
-        status: agent.status,
-        summary: summarizeResultValue(resultValue, answer, `Codex task ${agent.status}`),
-        result: answer
-      };
-      if (agent.structuredOutput !== void 0) item.structured = agent.structuredOutput;
-      if ((run.task.keep_session || !agent.ok) && run.session?.id) item.session_id = run.session.id;
-      if (recovery2) {
-        item.error = {
-          message: agentFallbackErrorText(agent, recovery2) ?? `Codex task ${agent.status}`,
-          recoverable: recovery2.recoverable,
-          kind: recovery2.reason,
-          retry_after_ms: recovery2.retryAfterMs
-        };
-      }
-      if (includeDiagnostics(run.task.advanced)) item.diagnostics = diagnosticsForAgent(agent);
-      return item;
-    }
-    const recovery = recoveryForError(run.error ?? new Error("Codex task failed before producing a result."), "codex_task_group");
-    const message = redactSensitiveText(run.error instanceof Error ? run.error.message : String(run.error ?? "Codex task failed."));
-    const result = recovery.recommendedAction ? `${message}
-
-Next: ${recovery.recommendedAction}` : message;
-    return {
-      name: run.task.name ?? run.task.description ?? `codex-task-${index + 1}`,
-      ok: false,
-      status: "failed",
-      summary: firstUsefulLine2(message, "Codex task failed before producing a result."),
-      result,
-      session_id: run.session?.id,
-      error: {
-        message,
-        recoverable: recovery.recoverable,
-        kind: recovery.reason,
-        retry_after_ms: recovery.retryAfterMs
-      },
-      diagnostics: includeDiagnostics(run.task.advanced) ? {} : void 0
-    };
-  });
-  const ok = normalized.every((result) => result.ok);
-  const resultText = normalized.map((item) => `## ${item.name}
-${item.result || item.summary}`).join("\n\n");
-  const firstFailed = normalized.find((result) => !result.ok);
-  return nativeTextResult(
-    {
-      ok,
-      status: ok ? "completed" : "failed",
-      summary: `${normalized.filter((result) => result.ok).length}/${normalized.length} Codex tasks completed successfully.`,
-      results: normalized,
-      hint: firstFailed ? "Retry only the failed task if it is still needed." : void 0
-    },
-    !ok,
-    resultText
-  );
 }
 function codexRoleForPrompt(args) {
   const candidate = args.subagent_type ?? (args.description ? "general-purpose" : void 0);
@@ -27208,29 +27572,6 @@ function nativeTaskPrompt(args) {
   return `${prefix.join("\n")}
 
 ${args.prompt}`;
-}
-function sessionPartialMessage(session, preferredResult) {
-  if (!session || typeof session !== "object") return void 0;
-  const value = session;
-  const partial2 = value.partial && typeof value.partial === "object" ? value.partial : void 0;
-  const lastResult = value.lastResult && typeof value.lastResult === "object" ? value.lastResult : void 0;
-  const preferred = preferredResult && typeof preferredResult === "object" ? preferredResult : void 0;
-  return typeof partial2?.lastAgentMessage === "string" ? partial2.lastAgentMessage : typeof preferred?.finalMessage === "string" ? preferred.finalMessage : typeof lastResult?.finalMessage === "string" ? lastResult.finalMessage : void 0;
-}
-function sessionProgressPayload(session, preferredResult) {
-  if (!session || typeof session !== "object") return {};
-  const value = session;
-  const partialResult = sessionPartialMessage(session, preferredResult);
-  const activeTurn = value.activeTurn && typeof value.activeTurn === "object" ? value.activeTurn : void 0;
-  const updatedAt = typeof value.updatedAt === "string" ? Date.parse(value.updatedAt) : NaN;
-  const createdAt = typeof activeTurn?.createdAt === "string" ? Date.parse(activeTurn.createdAt) : NaN;
-  const elapsedBase = Number.isFinite(createdAt) ? createdAt : updatedAt;
-  return {
-    partial_result: partialResult,
-    last_event: typeof activeTurn?.status === "string" ? `${activeTurn.kind ?? "turn"}:${activeTurn.status}` : typeof value.status === "string" ? value.status : void 0,
-    elapsed_ms: Number.isFinite(elapsedBase) ? Math.max(0, Date.now() - elapsedBase) : void 0,
-    next_poll_ms: value.active ? 1e3 : void 0
-  };
 }
 function withRequestAbort(options, extra) {
   if (!extra?.signal) return options;
@@ -27385,15 +27726,15 @@ function formatMilestoneProgress(milestone) {
     case "turn_started":
       return "Codex turn started";
     case "turn_completed":
-      return milestone.text ? firstUsefulLine2(`Codex completed: ${milestone.text}`, "Codex turn completed") : "Codex turn completed";
+      return milestone.text ? firstUsefulLine(`Codex completed: ${milestone.text}`, "Codex turn completed") : "Codex turn completed";
     case "command_started":
-      return milestone.command ? firstUsefulLine2(`Codex command: ${milestone.command}`, "Codex command started") : "Codex command started";
+      return milestone.command ? firstUsefulLine(`Codex command: ${milestone.command}`, "Codex command started") : "Codex command started";
     case "command_completed":
-      return milestone.command ? firstUsefulLine2(`Codex command completed: ${milestone.command}`, "Codex command completed") : "Codex command completed";
+      return milestone.command ? firstUsefulLine(`Codex command completed: ${milestone.command}`, "Codex command completed") : "Codex command completed";
     case "agent_message":
-      return milestone.text ? firstUsefulLine2(`Codex: ${milestone.text}`, "Codex produced output") : "Codex produced output";
+      return milestone.text ? firstUsefulLine(`Codex: ${milestone.text}`, "Codex produced output") : "Codex produced output";
     case "error":
-      return milestone.error ? firstUsefulLine2(`Codex error: ${milestone.error}`, "Codex error") : "Codex error";
+      return milestone.error ? firstUsefulLine(`Codex error: ${milestone.error}`, "Codex error") : "Codex error";
     case "cancelled":
       return "Codex session cancelled";
     case "queued_turn_added":
@@ -27422,10 +27763,10 @@ function codexLiveProgressMessage(sessionId, fallback) {
   const lastCommand = partial2?.eventSummary.commands.at(-1);
   if (lastCommand?.command) {
     const suffix = lastCommand.status ? ` (${lastCommand.status})` : "";
-    return firstUsefulLine2(`Codex running: ${lastCommand.command}${suffix}`, fallback);
+    return firstUsefulLine(`Codex running: ${lastCommand.command}${suffix}`, fallback);
   }
   if (partial2?.lastAgentMessage) {
-    return firstUsefulLine2(`Codex: ${partial2.lastAgentMessage}`, fallback);
+    return firstUsefulLine(`Codex: ${partial2.lastAgentMessage}`, fallback);
   }
   const activeStatus = session?.activeTurn?.status ?? session?.status;
   return activeStatus ? `Codex session ${sessionId} ${activeStatus}` : fallback;
@@ -27498,54 +27839,49 @@ function toFrontDoorRunOptions(args) {
     prompt: args.task
   });
 }
+function mergedParallelRunInput(args, agent) {
+  return {
+    prompt: agent.prompt,
+    name: agent.name,
+    model: agent.model ?? args.model,
+    model_preset: agent.model_preset ?? args.model_preset,
+    reasoning_effort: agent.reasoning_effort ?? args.reasoning_effort,
+    sandbox: agent.sandbox ?? args.sandbox,
+    dangerously_bypass_approvals_and_sandbox: agent.dangerously_bypass_approvals_and_sandbox ?? args.dangerously_bypass_approvals_and_sandbox,
+    service_tier: agent.service_tier ?? args.service_tier,
+    model_verbosity: agent.model_verbosity ?? args.model_verbosity,
+    reasoning_summary: agent.reasoning_summary ?? args.reasoning_summary,
+    cwd: agent.cwd ?? args.cwd,
+    project_dir: agent.project_dir ?? args.project_dir,
+    codex_bin: agent.codex_bin ?? args.codex_bin,
+    profile: agent.profile ?? args.profile,
+    timeout_ms: agent.timeout_ms ?? args.timeout_ms,
+    max_output_chars: agent.max_output_chars ?? args.max_output_chars,
+    include_events: agent.include_events ?? args.include_events,
+    ephemeral: agent.ephemeral ?? args.ephemeral,
+    skip_git_repo_check: agent.skip_git_repo_check ?? args.skip_git_repo_check,
+    ignore_rules: agent.ignore_rules ?? args.ignore_rules,
+    isolated_codex_home: agent.isolated_codex_home ?? args.isolated_codex_home,
+    mcp_config_policy: agent.mcp_config_policy ?? args.mcp_config_policy,
+    codex_mcp_servers: agent.codex_mcp_servers ?? args.codex_mcp_servers,
+    forward_sensitive_env: agent.forward_sensitive_env ?? args.forward_sensitive_env,
+    idle_timeout_ms: agent.idle_timeout_ms ?? args.idle_timeout_ms,
+    spawn_timeout_ms: agent.spawn_timeout_ms ?? args.spawn_timeout_ms,
+    terminate_grace_ms: agent.terminate_grace_ms ?? args.terminate_grace_ms,
+    output_contract: agent.output_contract ?? args.output_contract,
+    output_schema: agent.output_schema ?? args.output_schema,
+    codex_subagents: agent.codex_subagents ?? args.codex_subagents,
+    subagent_tasks: agent.subagent_tasks ?? args.subagent_tasks,
+    subagent_runtime: agent.subagent_runtime ?? args.subagent_runtime
+  };
+}
 function toParallelRunOptions(args) {
   return {
     ...toRunOptions({
       ...args,
       prompt: "shared-options"
     }),
-    agents: args.agents.map((agent) => ({
-      prompt: agent.prompt,
-      name: agent.name,
-      model: agent.model ?? args.model,
-      modelPreset: agent.model_preset ?? args.model_preset,
-      reasoningEffort: agent.reasoning_effort ?? args.reasoning_effort,
-      sandbox: agent.sandbox ?? args.sandbox,
-      dangerouslyBypassApprovalsAndSandbox: agent.dangerously_bypass_approvals_and_sandbox ?? args.dangerously_bypass_approvals_and_sandbox,
-      serviceTier: agent.service_tier ?? args.service_tier,
-      modelVerbosity: agent.model_verbosity ?? args.model_verbosity,
-      reasoningSummary: agent.reasoning_summary ?? args.reasoning_summary,
-      cwd: agent.cwd ?? args.cwd,
-      projectDir: agent.project_dir ?? args.project_dir,
-      codexBin: agent.codex_bin ?? args.codex_bin,
-      profile: agent.profile ?? args.profile,
-      timeoutMs: agent.timeout_ms ?? args.timeout_ms,
-      maxOutputChars: agent.max_output_chars ?? args.max_output_chars,
-      includeEvents: agent.include_events ?? args.include_events,
-      ephemeral: agent.ephemeral ?? args.ephemeral,
-      skipGitRepoCheck: agent.skip_git_repo_check ?? args.skip_git_repo_check,
-      ignoreRules: agent.ignore_rules ?? args.ignore_rules,
-      isolatedCodexHome: agent.isolated_codex_home ?? args.isolated_codex_home,
-      mcpConfigPolicy: agent.mcp_config_policy ?? args.mcp_config_policy ?? (agent.codex_mcp_servers ?? args.codex_mcp_servers ? "explicit" : void 0),
-      codexMcpServers: agent.codex_mcp_servers ?? args.codex_mcp_servers,
-      forwardSensitiveEnv: agent.forward_sensitive_env ?? args.forward_sensitive_env,
-      idleTimeoutMs: agent.idle_timeout_ms ?? args.idle_timeout_ms,
-      spawnTimeoutMs: agent.spawn_timeout_ms ?? args.spawn_timeout_ms,
-      terminateGraceMs: agent.terminate_grace_ms ?? args.terminate_grace_ms,
-      outputContract: agent.output_contract ?? args.output_contract,
-      outputSchema: agent.output_schema ?? args.output_schema,
-      codexSubagents: toCodexSubagents(agent.codex_subagents ?? args.codex_subagents),
-      subagentTasks: agent.subagent_tasks ?? args.subagent_tasks,
-      subagentRuntime: agent.subagent_runtime ? {
-        maxThreads: agent.subagent_runtime.max_threads,
-        maxDepth: agent.subagent_runtime.max_depth,
-        jobMaxRuntimeSeconds: agent.subagent_runtime.job_max_runtime_seconds
-      } : args.subagent_runtime ? {
-        maxThreads: args.subagent_runtime.max_threads,
-        maxDepth: args.subagent_runtime.max_depth,
-        jobMaxRuntimeSeconds: args.subagent_runtime.job_max_runtime_seconds
-      } : void 0
-    })),
+    agents: args.agents.map((agent) => toRunOptions(mergedParallelRunInput(args, agent))),
     maxParallel: args.max_parallel,
     defaultModel: args.model,
     defaultReasoningEffort: args.reasoning_effort
@@ -27663,260 +27999,7 @@ async function mapWithConcurrency(items, maxParallel, worker) {
   await Promise.all(workers);
   return results;
 }
-async function codexStatusPayload(codexBin) {
-  const status = await probeCodexVersion(codexBin);
-  const processes = await detectPluginProcesses();
-  return {
-    ok: !status.error,
-    binary: status.binary,
-    version: status.version,
-    error: status.error,
-    cwd: process.cwd(),
-    defaultTools: ["codex_task", "codex_task_group", "codex_followup", "codex_wait_any"],
-    hiddenDebugTools: !debugToolsEnabled,
-    hiddenLegacyTools: !legacyToolsEnabled,
-    defaultModel: defaultModel(),
-    defaultReasoningEffort: defaultReasoningEffort(),
-    defaultSandbox: "read-only",
-    fullAccessFlag: "full_access",
-    advancedFullAccessFlag: "advanced.dangerously_bypass_approvals_and_sandbox",
-    defaultServiceTier: "codex-default",
-    defaultSessionProtocol: process.env.CODEX_SUBAGENTS_SESSION_PROTOCOL === "exec" ? "exec" : "app-server",
-    appServerProtocol: {
-      transport: "stdio",
-      command: "codex app-server --listen stdio://",
-      default: process.env.CODEX_SUBAGENTS_SESSION_PROTOCOL === "exec" ? "exec" : "app-server",
-      requiredMethods: ["initialize", "thread/start", "turn/start"],
-      liveSteeringMethods: ["turn/steer", "turn/interrupt"],
-      recoveryMethods: ["thread/resume", "thread/read"],
-      passiveMethods: ["thread/read"],
-      fallbackToExec: process.env.CODEX_SUBAGENTS_DISABLE_EXEC_FALLBACK === "1" ? "disabled" : "enabled"
-    },
-    appServerFallback: process.env.CODEX_SUBAGENTS_DISABLE_EXEC_FALLBACK === "1" ? "disabled" : "enabled",
-    modelPresets: {
-      codex: "gpt-5.3-codex",
-      spark: "gpt-5.3-codex-spark"
-    },
-    outputContracts,
-    mcpConfigPolicies,
-    pluginCodexBin: cleanOption(process.env.CODEX_SUBAGENTS_CODEX_BIN),
-    claudeProjectDir: cleanOption(process.env.CLAUDE_PROJECT_DIR),
-    queue: jobManager.stats(),
-    sessions: sessionManager.stats(),
-    notifications: {
-      resource_updates_enabled: true,
-      debounce_ms: 250,
-      max_delay_ms: 2e3,
-      max_milestones_per_session: maxSessionMilestones()
-    },
-    waits: {
-      default_blocking_wait_timeout_ms: defaultBlockingWaitTimeoutMs,
-      max_blocking_wait_ms: configuredMaxBlockingWaitMs(),
-      hard_max_blocking_wait_ms: hardMaxBlockingWaitTimeoutMs
-    },
-    logging: loggingDiagnostics(),
-    artifacts: outputArtifactDiagnostics(),
-    processes,
-    diagnostics: {
-      ...diagnosticStats(),
-      recentFailures: recentDiagnosticEvents(20)
-    },
-    lifecycle: lifecycleStats()
-  };
-}
-async function codexDoctorPayload(args = {}) {
-  const checks = [];
-  let ok = true;
-  try {
-    const status = await probeCodexVersion(args.codex_bin);
-    checks.push({
-      name: "codex_binary",
-      ok: !status.error,
-      detail: { binary: status.binary, version: status.version, error: status.error }
-    });
-    if (status.error) ok = false;
-  } catch (error2) {
-    ok = false;
-    logger.error("codex_doctor.binary_failed", { error: errorForLog(error2) });
-    checks.push({
-      name: "codex_binary",
-      ok: false,
-      detail: error2 instanceof Error ? error2.message : String(error2)
-    });
-  }
-  try {
-    const projectDir = await resolveWorkingDirectory(args.project_dir);
-    checks.push({
-      name: "project_dir",
-      ok: true,
-      detail: { projectDir: cleanOption(projectDir) }
-    });
-  } catch (error2) {
-    ok = false;
-    logger.error("codex_doctor.project_dir_failed", { error: errorForLog(error2) });
-    checks.push({ name: "project_dir", ok: false, detail: String(error2) });
-  }
-  checks.push({
-    name: "defaults",
-    ok: defaultReasoningEffort() !== "minimal",
-    detail: {
-      sandbox: "read-only",
-      fullAccess: false,
-      approvalPolicy: "never",
-      defaultModel: defaultModel(),
-      defaultReasoningEffort: defaultReasoningEffort(),
-      forwardSensitiveEnvDefault: false
-    }
-  });
-  checks.push({ name: "queue", ok: true, detail: jobManager.stats() });
-  checks.push({ name: "sessions", ok: true, detail: sessionManager.stats() });
-  checks.push({ name: "logging", ok: true, detail: loggingDiagnostics() });
-  checks.push({ name: "artifacts", ok: true, detail: outputArtifactDiagnostics() });
-  checks.push({ name: "diagnostics", ok: true, detail: diagnosticStats() });
-  checks.push({ name: "lifecycle", ok: true, detail: lifecycleStats() });
-  const processes = await detectPluginProcesses();
-  const processOk = processes.highCpuStaleSuspects.length === 0;
-  if (!processOk) ok = false;
-  checks.push({
-    name: "stale_processes",
-    ok: processOk,
-    detail: processes
-  });
-  return {
-    ok,
-    checks,
-    supported: {
-      modelPresets,
-      reasoningEfforts,
-      sandboxModes,
-      fullAccessFlag: "full_access",
-      advancedFullAccessFlag: "advanced.dangerously_bypass_approvals_and_sandbox",
-      outputContracts,
-      mcpConfigPolicies
-    }
-  };
-}
-function jsonResource(uri, value) {
-  return {
-    contents: [
-      {
-        uri: uri.href,
-        mimeType: "application/json",
-        text: JSON.stringify(value, null, 2)
-      }
-    ]
-  };
-}
-function sessionResourceStatus(session) {
-  if (session.status === "failed" || session.status === "cancelled") return session.status;
-  return session.active ? "running" : "idle";
-}
-function sessionResourceMilestone(milestone) {
-  return redactJsonValue({
-    seq: milestone.seq,
-    at: milestone.at,
-    kind: milestone.kind,
-    turn_id: milestone.turn_id,
-    command: milestone.command,
-    text: milestone.text,
-    error: milestone.error
-  });
-}
-function sessionResourceBody(session) {
-  const lastResult = session.lastResult ? compactAgentResultForMcp(session.lastResult) : void 0;
-  return redactJsonValue({
-    id: session.id,
-    name: session.name,
-    status: sessionResourceStatus(session),
-    active: session.active,
-    completed: Boolean(
-      !session.active && session.queuedTurns.length === 0 && (session.lastResult || session.status === "failed" || session.status === "cancelled")
-    ),
-    created_at: session.createdAt,
-    updated_at: session.updatedAt,
-    project_dir: session.projectDir ?? session.cwd,
-    turns: session.turns,
-    queued_turns: session.queuedTurns.length,
-    last_milestone_seq: session.lastMilestoneSeq,
-    milestones: session.milestones.map(sessionResourceMilestone),
-    last_result: lastResult ? {
-      ok: lastResult.ok,
-      status: lastResult.status,
-      final_message: redactSensitiveText(lastResult.finalMessage),
-      duration_ms: lastResult.durationMs,
-      turn_id: session.lastResultTurnId
-    } : null
-  });
-}
-function sessionResourceList() {
-  return {
-    resources: sessionManager.list().slice(0, 100).map((session) => ({
-      uri: sessionResourceUri(session.id),
-      name: session.name ?? session.id,
-      mimeType: "application/json",
-      description: `Codex session ${sessionResourceStatus(session)} - ${session.turns} turn${session.turns === 1 ? "" : "s"}`
-    }))
-  };
-}
-function templateVariable(value) {
-  if (Array.isArray(value)) return String(value[0] ?? "");
-  return String(value ?? "");
-}
-server.registerResource(
-  "codex-usage",
-  "codex://usage",
-  {
-    title: "Codex Subagents Usage",
-    description: "Claude-facing operating guide for using Codex subagents through the native MCP tools.",
-    mimeType: "text/plain"
-  },
-  async (uri) => ({
-    contents: [
-      {
-        uri: uri.href,
-        mimeType: "text/plain",
-        text: usageGuide
-      }
-    ]
-  })
-);
-server.registerResource(
-  "codex-status",
-  "codex://status",
-  {
-    title: "Codex Subagents Status",
-    description: "Read-only diagnostics: binary, version, default settings, queues, sessions, logging, and recent failures.",
-    mimeType: "application/json"
-  },
-  async (uri) => jsonResource(uri, await codexStatusPayload())
-);
-server.registerResource(
-  "codex-doctor",
-  "codex://doctor",
-  {
-    title: "Codex Subagents Doctor",
-    description: "Read-only health checks for Codex binary resolution, project directory, defaults, queues, and logging.",
-    mimeType: "application/json"
-  },
-  async (uri) => jsonResource(uri, await codexDoctorPayload())
-);
-server.registerResource(
-  "codex-session",
-  new ResourceTemplate("codex://sessions/{session_id}", {
-    list: () => sessionResourceList()
-  }),
-  {
-    title: "Codex Session",
-    description: "Codex TaskGet/TaskList-style resource: per-session progress milestones and completion state for background tasks.",
-    mimeType: "application/json"
-  },
-  async (uri, variables) => {
-    const sessionId = templateVariable(variables.session_id);
-    const session = sessionManager.get(sessionId);
-    if (!session) throw new Error(`Unknown session_id: ${sessionId}`);
-    return jsonResource(uri, sessionResourceBody(session));
-  }
-);
+registerResources(server, { usageGuide, debugToolsEnabled, legacyToolsEnabled });
 registerDebugTool(
   "codex_usage_guide",
   {
@@ -28254,89 +28337,6 @@ registerLegacyTool(
     });
   }
 );
-var parallelAgentSchema = external_exports.object({
-  prompt: external_exports.string().min(1).describe(
-    "Concrete independent task for this Codex agent. Keep overlap low across parallel agents."
-  ),
-  name: external_exports.string().trim().min(1).optional().describe("Optional label for this agent."),
-  model: commonInputSchema.model,
-  model_preset: commonInputSchema.model_preset,
-  reasoning_effort: commonInputSchema.reasoning_effort,
-  sandbox: commonInputSchema.sandbox.optional(),
-  dangerously_bypass_approvals_and_sandbox: commonInputSchema.dangerously_bypass_approvals_and_sandbox.optional(),
-  service_tier: commonInputSchema.service_tier.optional(),
-  model_verbosity: commonInputSchema.model_verbosity,
-  reasoning_summary: commonInputSchema.reasoning_summary,
-  cwd: commonInputSchema.cwd,
-  project_dir: commonInputSchema.project_dir,
-  codex_bin: commonInputSchema.codex_bin,
-  profile: commonInputSchema.profile,
-  timeout_ms: commonInputSchema.timeout_ms.optional(),
-  max_output_chars: commonInputSchema.max_output_chars.optional(),
-  include_events: commonInputSchema.include_events.optional(),
-  ephemeral: commonInputSchema.ephemeral.optional(),
-  skip_git_repo_check: commonInputSchema.skip_git_repo_check.optional(),
-  ignore_rules: commonInputSchema.ignore_rules.optional(),
-  isolated_codex_home: commonInputSchema.isolated_codex_home.optional(),
-  mcp_config_policy: commonInputSchema.mcp_config_policy.optional(),
-  codex_mcp_servers: commonInputSchema.codex_mcp_servers,
-  forward_sensitive_env: commonInputSchema.forward_sensitive_env.optional(),
-  idle_timeout_ms: commonInputSchema.idle_timeout_ms,
-  spawn_timeout_ms: commonInputSchema.spawn_timeout_ms.optional(),
-  terminate_grace_ms: commonInputSchema.terminate_grace_ms.optional(),
-  output_contract: commonInputSchema.output_contract.optional(),
-  output_schema: commonInputSchema.output_schema,
-  codex_subagents: commonInputSchema.codex_subagents,
-  subagent_tasks: commonInputSchema.subagent_tasks,
-  subagent_runtime: commonInputSchema.subagent_runtime
-});
-var frontDoorParallelTaskSchema = external_exports.object({
-  task: external_exports.string().min(1).describe(
-    "Concrete independent Codex task. Keep overlap low across parallel tasks and state the expected output shape."
-  ),
-  name: external_exports.string().trim().min(1).optional().describe("Optional label for this Codex task."),
-  project_dir: commonInputSchema.project_dir,
-  model_preset: commonInputSchema.model_preset,
-  reasoning_effort: commonInputSchema.reasoning_effort,
-  sandbox: commonInputSchema.sandbox.optional(),
-  dangerously_bypass_approvals_and_sandbox: commonInputSchema.dangerously_bypass_approvals_and_sandbox.optional(),
-  codex_bin: commonInputSchema.codex_bin,
-  timeout_ms: commonInputSchema.timeout_ms.optional(),
-  max_output_chars: commonInputSchema.max_output_chars.optional(),
-  output_contract: commonInputSchema.output_contract.optional(),
-  output_schema: commonInputSchema.output_schema,
-  model: commonInputSchema.model,
-  service_tier: commonInputSchema.service_tier.optional(),
-  model_verbosity: commonInputSchema.model_verbosity,
-  reasoning_summary: commonInputSchema.reasoning_summary,
-  cwd: commonInputSchema.cwd,
-  profile: commonInputSchema.profile,
-  include_events: commonInputSchema.include_events.optional(),
-  ephemeral: commonInputSchema.ephemeral.optional(),
-  skip_git_repo_check: commonInputSchema.skip_git_repo_check.optional(),
-  ignore_rules: commonInputSchema.ignore_rules.optional(),
-  isolated_codex_home: commonInputSchema.isolated_codex_home.optional(),
-  mcp_config_policy: commonInputSchema.mcp_config_policy.optional(),
-  codex_mcp_servers: commonInputSchema.codex_mcp_servers,
-  forward_sensitive_env: commonInputSchema.forward_sensitive_env.optional(),
-  idle_timeout_ms: commonInputSchema.idle_timeout_ms,
-  spawn_timeout_ms: commonInputSchema.spawn_timeout_ms.optional(),
-  terminate_grace_ms: commonInputSchema.terminate_grace_ms.optional(),
-  codex_subagents: commonInputSchema.codex_subagents,
-  subagent_tasks: commonInputSchema.subagent_tasks,
-  subagent_runtime: commonInputSchema.subagent_runtime
-});
-var nativeTaskGroupTaskSchema = external_exports.object({
-  description: external_exports.string().trim().min(1).describe("Short task label, like Claude's native Task description."),
-  prompt: external_exports.string().trim().min(1).describe(
-    "Self-contained Codex prompt for this independent task. Keep overlap low across parallel tasks."
-  ),
-  subagent_type: advertisedCodexRoleSchema.optional().describe("Claude-style Codex persona. Prefer general-purpose, explorer, planner, code-reviewer, or security-reviewer."),
-  name: external_exports.string().trim().min(1).optional().describe("Optional stable label for this Codex task."),
-  keep_session: external_exports.boolean().default(false).describe("Return this task's session_id after completion so Claude can follow up. Leave false for native Task-like one-shot work."),
-  ...nativeBaseInputSchema
-});
-var followupModeSchema = external_exports.enum(["queue", "steer", "wait", "cancel"]);
 registerTool(
   "codex_task_group",
   {
@@ -28395,7 +28395,7 @@ registerTool(
           { total, reserveFinal: true }
         );
         await progress.flush();
-        return nativeTaskGroupResponse(runs);
+        return nativeTaskGroupResponse(runs, { includeDiagnostics });
       } catch (error2) {
         await progress.flush();
         logger.error("codex_task_group.failed", { error: errorForLog(error2) });
@@ -28979,7 +28979,6 @@ registerLegacyTool(
     });
   }
 );
-var jobIdSchema = external_exports.string().trim().min(1).describe("Job id returned by start_agent_run or start_agents_run.");
 registerLegacyTool(
   "get_agent_run",
   {
@@ -29017,19 +29016,8 @@ registerLegacyTool(
     return loggedToolCall("wait_agent_run", args, extra, async () => {
       const progress = createProgressReporter(extra);
       await progress.send(`Waiting for Codex job ${args.job_id}`);
-      const started = Date.now();
-      let job = jobManager.get(args.job_id);
-      while (job && !job.completedAt && Date.now() - started < args.timeout_ms && !extra?.signal?.aborted) {
-        const remaining = args.timeout_ms - (Date.now() - started);
-        await new Promise((resolve) => setTimeout(resolve, Math.min(1e3, Math.max(1, remaining))));
-        job = jobManager.get(args.job_id);
-        if (job) await progress.send(`Codex job ${job.status}`);
-      }
+      const job = await jobManager.wait(args.job_id, args.timeout_ms, extra?.signal);
       const waitCancelled = Boolean(extra?.signal?.aborted);
-      if (job && !job.completedAt) {
-        const waitedJob = await jobManager.wait(args.job_id, 1, extra?.signal);
-        job = waitedJob ?? job;
-      }
       if (!job) return errorResult(new Error(`Unknown job_id: ${args.job_id}`), "wait_agent_run");
       if (job.completedAt) await progress.send(`Codex job ${job.status}`);
       await progress.flush();
@@ -29068,7 +29056,6 @@ registerLegacyTool(
     });
   }
 );
-var sessionIdSchema = external_exports.string().trim().min(1).describe("Session id returned by codex_task or codex_task_group.");
 registerDebugTool(
   "codex_session_start",
   {
@@ -29173,7 +29160,7 @@ registerDebugTool(
             ok: result ? result.ok : true,
             status: result?.status ?? "queued",
             result: result ? stringifyResultValue(result.structuredOutput ?? result.finalMessage, result.finalMessage) : "Prompt queued.",
-            summary: result ? firstUsefulLine2(result.finalMessage, `Codex turn ${result.status}`) : "Queued Codex session prompt.",
+            summary: result ? firstUsefulLine(result.finalMessage, `Codex turn ${result.status}`) : "Queued Codex session prompt.",
             confidence: result?.ok === false ? "low" : "high",
             session: compactSession,
             ...sessionProgressPayload(compactSession),
@@ -29230,7 +29217,7 @@ registerDebugTool(
             ok: result ? result.ok : true,
             status: result?.status ?? "queued",
             result: result ? stringifyResultValue(result.structuredOutput ?? result.finalMessage, result.finalMessage) : "Steering delivered.",
-            summary: result ? firstUsefulLine2(result.finalMessage, `Codex steering ${result.status}`) : `Steering ${delivery}.`,
+            summary: result ? firstUsefulLine(result.finalMessage, `Codex steering ${result.status}`) : `Steering ${delivery}.`,
             confidence: result?.ok === false ? "low" : "high",
             session: compactSession,
             ...sessionProgressPayload(compactSession),

@@ -1013,46 +1013,6 @@ export async function runAgent(options: AgentRunOptions): Promise<AgentRunResult
   }
 }
 
-export async function runAgents(options: ParallelRunOptions): Promise<AgentRunResult[]> {
-  const maxParallel = Math.max(
-    1,
-    Math.min(options.maxParallel ?? Math.min(options.agents.length, 4), 8),
-  );
-  const results: AgentRunResult[] = new Array(options.agents.length);
-  let next = 0;
-
-  async function worker(): Promise<void> {
-    while (next < options.agents.length) {
-      const index = next;
-      next += 1;
-      const agent = options.agents[index];
-      if (!agent) continue;
-      const runOptions = {
-        ...options,
-        ...agent,
-        model: agent.model ?? options.defaultModel,
-        modelPreset: agent.modelPreset ?? options.modelPreset,
-        reasoningEffort: agent.reasoningEffort ?? options.defaultReasoningEffort,
-        prompt: agent.prompt,
-        name: agent.name ?? `agent-${index + 1}`,
-      };
-      try {
-        results[index] = await runAgent(runOptions);
-      } catch (error) {
-        logger.error("agent.parallel_agent_failed", {
-          index,
-          name: runOptions.name,
-          error: errorForLog(error),
-        });
-        results[index] = agentFailureResultForError(runOptions, error);
-      }
-    }
-  }
-
-  await Promise.all(Array.from({ length: Math.min(maxParallel, options.agents.length) }, worker));
-  return results;
-}
-
 export async function probeCodexVersion(
   codexBin?: string,
   env: NodeJS.ProcessEnv = process.env,

@@ -7,9 +7,16 @@
 Highlights:
 
 - Default tool surface is now `codex_task`, `codex_task_group`, and
-  `codex_followup`.
+  `codex_followup`, with `codex_wait_any` for collecting parallel background
+  sessions.
 - `codex_task` now defaults to a lean answer-first payload; it returns a
   `session_id` for `background`, `keep_session`, or failure cases.
+- App-server sessions are the default protocol, support live steering and
+  resource notifications, and archive matching Codex Desktop threads best-effort
+  on cancellation or retention pruning.
+- One-shot app-server sessions are closed after successful foreground runs when
+  Claude did not request a retained session.
+- App-server and exec turns share the same queue/backpressure limits.
 - Power-user knobs moved under `advanced`; routine calls use `description`,
   `prompt`, `project_dir`, `reasoning`, `subagent_type`, and `full_access`.
 - Diagnostics are resources by default: `codex://usage`, `codex://status`, and

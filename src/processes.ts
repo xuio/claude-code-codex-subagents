@@ -4,6 +4,7 @@ import { redactSensitiveText } from "./redaction.js";
 
 const execFileAsync = promisify(execFile);
 const staleCpuThresholdPct = 25;
+const defaultProcessScanCacheTtlMs = 30_000;
 
 export type PluginProcessSnapshot = {
   pid: number;
@@ -23,6 +24,13 @@ export type PluginProcessDiagnostics = {
   highCpuStaleSuspects: PluginProcessSnapshot[];
   error?: string;
 };
+
+let processDiagnosticsCache:
+  | {
+      expiresAt: number;
+      value: PluginProcessDiagnostics;
+    }
+  | undefined;
 
 function sanitizeCommand(command: string): string {
   const redacted = redactSensitiveText(command);
@@ -64,7 +72,11 @@ export function pluginProcessDiagnosticsFromSnapshots(
   };
 }
 
-export async function detectPluginProcesses(): Promise<PluginProcessDiagnostics> {
+export function clearPluginProcessDiagnosticsCache(): void {
+  processDiagnosticsCache = undefined;
+}
+
+async function scanPluginProcesses(): Promise<PluginProcessDiagnostics> {
   if (process.platform === "win32") {
     return {
       supported: false,
@@ -97,4 +109,27 @@ export async function detectPluginProcesses(): Promise<PluginProcessDiagnostics>
       error: error instanceof Error ? error.message : String(error),
     };
   }
+}
+
+export async function detectPluginProcesses(
+  options: {
+    ttlMs?: number;
+    now?: number;
+    scan?: () => Promise<PluginProcessDiagnostics>;
+  } = {},
+): Promise<PluginProcessDiagnostics> {
+  const ttlMs = options.ttlMs ?? defaultProcessScanCacheTtlMs;
+  const now = options.now ?? Date.now();
+  if (ttlMs > 0 && processDiagnosticsCache && processDiagnosticsCache.expiresAt > now) {
+    return processDiagnosticsCache.value;
+  }
+
+  const value = await (options.scan ?? scanPluginProcesses)();
+  if (ttlMs > 0) {
+    processDiagnosticsCache = {
+      value,
+      expiresAt: now + ttlMs,
+    };
+  }
+  return value;
 }

@@ -81,6 +81,9 @@ npm run test:claude-real-session
 
 The live tests spend Claude and/or Codex tokens. Use them when changing tool
 descriptions, session behavior, app-server integration, or real runtime handling.
+Some Claude Desktop CLI checks create a local `.in_use/` directory with lock
+markers. The directory is gitignored and can be removed after tests if all
+matching processes are gone.
 
 Longer soak:
 
@@ -115,6 +118,14 @@ If GitHub returns `Repository not found` for the `.wiki.git` remote, create the
 first wiki page once in the GitHub web UI, then rerun `npm run wiki:publish`.
 GitHub does not expose an initialized wiki git remote until that first page
 exists.
+The wiki files intentionally duplicate selected docs pages. Update the tracked
+`docs/wiki/*.md` source before running `npm run wiki:publish`.
+
+## Plugin Validation
+
+`npm run test:ci` is portable and uses a local manifest wiring check. Run
+`npm run validate:plugin` locally when changing `.claude-plugin/`, `skills/`, or
+installation behavior; it requires Claude Code to be installed.
 
 ## Useful Scripts
 

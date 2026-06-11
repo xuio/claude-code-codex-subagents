@@ -16,17 +16,18 @@ Default behavior:
 - Lets the caller set model, reasoning effort, project directory, timeout, and parallelism per agent. Put uncommon settings under `advanced`.
 - Supports `advanced.model: "spark"` for Codex Spark (`gpt-5.3-codex-spark`) without requiring Claude to remember the exact model string.
 - Supports nested Codex subagents by passing `advanced.codex_subagents`, `advanced.subagent_tasks`, and `advanced.subagent_runtime`; custom agents are sent as Codex `agents.<name>...` config overrides for the child run.
-- Supports persistent Codex sessions through the `session_id` returned by `codex_task` and `codex_task_group`; use `codex_followup` to continue, steer, or wait on the same Codex context.
+- Supports persistent Codex sessions through the `session_id` returned by `codex_task` and `codex_task_group`; use `codex_followup` to continue, steer, wait on, cancel, or otherwise manage the same Codex context.
+- Supports `codex_wait_any` for harvesting whichever background Codex session finishes first when Claude launched several sessions in parallel.
 - Supports structured results with `advanced.output_contract` or `advanced.output_schema`; use these when Claude must merge, compare, or aggregate Codex outputs.
 - Redacts secret-looking output by default and does not forward secret-looking environment variables unless `forward_sensitive_env` is explicitly true.
-- Writes very verbose JSONL logs to stderr by default, including raw MCP JSON-RPC frames, tool arguments/results, prompt outputs, progress notifications, queue/job/session lifecycle, and Codex stdin/stdout/stderr traffic.
 - Compacts large tool responses before returning them to Claude; when `mcpResponse.compacted` is true, use the returned summary first and inspect server logs only if the omitted raw tail is necessary.
 
 Prefer the native Claude-like tools for normal use:
 
 - For one delegated task, call `codex_task`. Provide `description` like Claude's Task description and `prompt` as the self-contained task. For code review and exploration, ask for concise findings with file paths and line references.
 - For independent tasks that can run concurrently, call `codex_task_group` with one task object per workstream. Split by ownership such as API flow, tests, security, performance, UI, docs, or migration risk. Keep tasks concrete and bounded, and set `max_parallel` to the smaller of the useful agent count and `4` unless the user asks for more.
-- For multi-turn Codex work, call `codex_task` for the initial prompt and preserve the returned `session_id`. Use `codex_followup` with `mode: "queue"` for ordinary follow-ups, `mode: "wait"` when Claude needs completion, and `mode: "steer"` for active redirection.
+- For multi-turn Codex work, call `codex_task` for the initial prompt and preserve the returned `session_id`. Use `codex_followup` with `mode: "queue"` for ordinary follow-ups, `mode: "wait"` when Claude needs completion, `mode: "steer"` for active redirection, and `mode: "cancel"` when the user no longer wants the run.
+- For several background Codex sessions, use `codex_wait_any` with all known `session_id` values instead of polling each session one at a time. Repeat with the returned remaining ids until all work is complete.
 - Use `codex_followup` mode `steer` only when the user wants to redirect active work now. It delivers real live steering with Codex `turn/steer` when app-server support is active. Set `interrupt_current: true` only when the active turn should be cancelled and redirected.
 - If unsure which path fits, call `codex_task` or `codex_followup` first; use MCP resources only for diagnostics or when a tool response explicitly says to inspect a resource.
 
@@ -40,7 +41,7 @@ When the user explicitly asks Codex to edit files, write to git, use DNS/network
 
 Prefer top-level `reasoning: "medium"` for exploration and `high` only when the task is complex enough to justify the extra latency and token usage. Use `advanced.reasoning: "xhigh"` only when the user asks for maximum reasoning. Do not use `minimal`; the plugin rejects it because Codex currently auto-attaches `web_search`, which the API does not allow with minimal reasoning.
 
-Do not use `advanced.model: "spark"` by default. Use Spark only when the user asks for Spark or when a quick focused sidecar check is clearly more appropriate than the default Codex model.
+Do not use `advanced.model: "spark"` by default. Use Spark only when the user asks for Spark or when a quick focused sidecar check is clearly more appropriate than the default Codex model. The server also accepts the compatibility alias `advanced.model: "codex"` for the default Codex model; omit `advanced.model` unless the user asked for a specific model.
 
 Do not set `advanced.reasoning_summary` with `advanced.model: "spark"` except for `advanced.reasoning_summary: "none"`. Spark does not support `reasoning.summary`, and the plugin rejects unsupported combinations before starting Codex.
 

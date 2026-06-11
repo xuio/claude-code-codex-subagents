@@ -1,5 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
+  clearPluginProcessDiagnosticsCache,
+  detectPluginProcesses,
   parsePsProcessLine,
   pluginProcessDiagnosticsFromSnapshots,
   type PluginProcessSnapshot,
@@ -47,5 +49,24 @@ describe("plugin process diagnostics", () => {
     expect(wrapped).toBeDefined();
     const diagnostics = pluginProcessDiagnosticsFromSnapshots([wrapped!], 999);
     expect(diagnostics.highCpuStaleSuspects.map((process) => process.pid)).toEqual([456]);
+  });
+
+  it("caches process scans for the configured ttl", async () => {
+    clearPluginProcessDiagnosticsCache();
+    let scans = 0;
+    const makeResult = async () => {
+      scans += 1;
+      return pluginProcessDiagnosticsFromSnapshots([], scans);
+    };
+
+    const first = await detectPluginProcesses({ now: 1_000, ttlMs: 30_000, scan: makeResult });
+    const second = await detectPluginProcesses({ now: 2_000, ttlMs: 30_000, scan: makeResult });
+    const third = await detectPluginProcesses({ now: 31_001, ttlMs: 30_000, scan: makeResult });
+
+    expect(first.currentPid).toBe(1);
+    expect(second.currentPid).toBe(1);
+    expect(third.currentPid).toBe(2);
+    expect(scans).toBe(2);
+    clearPluginProcessDiagnosticsCache();
   });
 });

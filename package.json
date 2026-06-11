@@ -13,9 +13,6 @@
     "type": "git",
     "url": "git+https://github.com/xuio/claude-code-codex-subagents.git"
   },
-  "bin": {
-    "codex-subagents-mcp": "./dist/index.js"
-  },
   "scripts": {
     "build": "tsc --noEmit && esbuild src/index.ts --bundle --platform=node --target=node20 --format=esm --outfile=dist/index.js --banner:js='#!/usr/bin/env node' && chmod 755 dist/index.js",
     "check:dist": "npm run build && git diff --exit-code -- dist/index.js",
