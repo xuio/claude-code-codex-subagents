@@ -284,8 +284,11 @@ describe("CodexSessionManager", () => {
 
     const calls = await waitFor(async () => {
       const current = await recordedCalls(recordDir);
-      return current.some((call) => call.method === "process/sigterm") ? current : undefined;
-    });
+      return current.some((call) => call.method === "thread/archive" && call.threadId === started.session.codexThreadId) &&
+        current.some((call) => call.method === "process/sigterm")
+        ? current
+        : undefined;
+    }, 10_000);
     expect(calls.some((call) => call.method === "thread/archive" && call.threadId === started.session.codexThreadId)).toBe(true);
   });
 
