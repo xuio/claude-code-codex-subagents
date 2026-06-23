@@ -48,6 +48,23 @@ try {
   assert(dryRunOutput.includes("Dry run only"), "dry run should be explicit", dryRunOutput);
   assert(!(await pathExists(path.join(claudeHome, "plugins"))), "dry run should not create plugin directories", dryRunOutput);
 
+  await mkdir(path.join(installPath, ".in_use"), { recursive: true });
+  await writeFile(path.join(installPath, ".in_use", String(process.pid)), JSON.stringify({ pid: process.pid }));
+  const activeResult = spawnSync("node", ["scripts/link-claude-dev-plugin.mjs"], {
+    cwd: root,
+    encoding: "utf8",
+    shell: false,
+    env: {
+      ...process.env,
+      CLAUDE_HOME: claudeHome,
+      CLAUDE_DESKTOP_CONFIG: desktopConfigPath,
+    },
+  });
+  const activeOutput = [activeResult.stdout, activeResult.stderr].filter(Boolean).join("");
+  assert(activeResult.status !== 0, "dev link should refuse to replace an active copied install", activeOutput);
+  assert(activeOutput.includes("Refusing to replace active Claude plugin install"), "active install refusal should be explicit", activeOutput);
+  await rm(installPath, { recursive: true, force: true });
+
   await mkdir(path.dirname(desktopConfigPath), { recursive: true });
   await writeFile(
     desktopConfigPath,

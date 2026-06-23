@@ -166,3 +166,9 @@ npm run validate:plugin
 
 `dev:link` prints the marketplace and installed cache symlinks that Claude Code
 and Claude Desktop share.
+
+If `codex://status` reports `install.staleDevInstall: true`, Claude is running a
+copied cache install even though the plugin entry is marked `dev-symlink`. Close
+the active Claude session that owns the `.in_use` marker, rerun `npm run
+dev:link`, then start a new Claude session. The script refuses to replace a live
+copied cache by default so it does not disturb active work.

@@ -1,10 +1,11 @@
-import { copyFile, lstat, mkdir, readFile, realpath, rename, rm, symlink, writeFile } from "node:fs/promises";
+import { copyFile, lstat, mkdir, readFile, readdir, realpath, rename, rm, symlink, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const dryRun = process.argv.includes("--dry-run") || process.env.CLAUDE_DEV_LINK_DRY_RUN === "1";
+const forceActive = process.argv.includes("--force-active") || process.env.CLAUDE_DEV_LINK_FORCE_ACTIVE === "1";
 const claudeHome = path.resolve(process.env.CLAUDE_HOME ?? path.join(os.homedir(), ".claude"));
 const manifestPath = path.join(root, ".claude-plugin", "plugin.json");
 const manifest = JSON.parse(await readFile(manifestPath, "utf8"));
@@ -52,6 +53,41 @@ async function resolvedPath(targetPath) {
   }
 }
 
+function pidIsAlive(pid) {
+  if (!Number.isInteger(pid) || pid <= 0) return false;
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    return error?.code === "EPERM";
+  }
+}
+
+async function activeUseMarkers(targetPath) {
+  const markerDir = path.join(targetPath, ".in_use");
+  let names = [];
+  try {
+    names = await readdir(markerDir);
+  } catch (error) {
+    if (error?.code === "ENOENT") return [];
+    throw error;
+  }
+
+  const markers = [];
+  for (const name of names) {
+    const markerPath = path.join(markerDir, name);
+    let pid = Number(name);
+    try {
+      const marker = JSON.parse(await readFile(markerPath, "utf8"));
+      if (typeof marker.pid === "number") pid = marker.pid;
+    } catch {
+      // The marker filename is still useful.
+    }
+    markers.push({ path: markerPath, pid, alive: pidIsAlive(pid) });
+  }
+  return markers;
+}
+
 function backupPath(targetPath) {
   return `${targetPath}.backup-${backupStamp}`;
 }
@@ -60,6 +96,15 @@ async function replaceWithSymlink(linkPath, targetPath) {
   assertSafePath(linkPath);
   const currentTarget = await resolvedPath(linkPath);
   if (currentTarget === targetPath) return { path: linkPath, changed: false };
+
+  const liveMarkers = (await activeUseMarkers(linkPath)).filter((marker) => marker.alive);
+  if (liveMarkers.length > 0 && !forceActive) {
+    const pids = liveMarkers.map((marker) => marker.pid).filter(Boolean).join(", ");
+    throw new Error(
+      `Refusing to replace active Claude plugin install at ${linkPath}. Live .in_use pid(s): ${pids}. ` +
+        "Close the active Claude session and rerun npm run dev:link, or rerun with -- --force-active if you intentionally want to replace the path while Claude is running.",
+    );
+  }
 
   if (dryRun) {
     return { path: linkPath, changed: true, dryRun: true };

@@ -34,6 +34,11 @@ npm run dev:watch
 Claude Code CLI and the Claude Desktop bundled Claude Code binary load the same
 working tree.
 
+If Claude has an active session using a copied cache install, `dev:link` refuses
+to replace that path while the `.in_use` marker points at a live process. Close
+the active Claude session and rerun `npm run dev:link`. `codex://status` and
+`codex://doctor` report this as `install.staleDevInstall`.
+
 ## Test Tiers
 
 Portable CI suite:

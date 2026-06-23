@@ -2,6 +2,7 @@ import { ResourceTemplate, type McpServer } from "@modelcontextprotocol/sdk/serv
 import { outputArtifactDiagnostics } from "./artifacts.js";
 import { cleanOption } from "./binary.js";
 import { diagnosticStats, recentDiagnosticEvents } from "./diagnostics.js";
+import { pluginInstallDiagnostics } from "./install-diagnostics.js";
 import { jobManager } from "./jobs.js";
 import { lifecycleStats } from "./lifecycle.js";
 import { errorForLog, logger, loggingDiagnostics } from "./logging.js";
@@ -40,8 +41,9 @@ export function sessionResourceUri(sessionId: string): string {
 export async function codexStatusPayload(codexBin?: string, visibility?: ResourceVisibility) {
   const status = await probeCodexVersion(codexBin);
   const processes = await detectPluginProcesses();
+  const install = pluginInstallDiagnostics();
   return {
-    ok: !status.error,
+    ok: !status.error && !install.staleDevInstall,
     binary: status.binary,
     version: status.version,
     error: status.error,
@@ -90,6 +92,7 @@ export async function codexStatusPayload(codexBin?: string, visibility?: Resourc
     },
     logging: loggingDiagnostics(),
     artifacts: outputArtifactDiagnostics(),
+    install,
     processes,
     diagnostics: {
       ...diagnosticStats(),
@@ -150,6 +153,13 @@ export async function codexDoctorPayload(args: { codex_bin?: string; project_dir
   checks.push({ name: "sessions", ok: true, detail: sessionManager.stats() });
   checks.push({ name: "logging", ok: true, detail: loggingDiagnostics() });
   checks.push({ name: "artifacts", ok: true, detail: outputArtifactDiagnostics() });
+  const install = pluginInstallDiagnostics();
+  if (install.staleDevInstall) ok = false;
+  checks.push({
+    name: "plugin_install",
+    ok: !install.staleDevInstall,
+    detail: install,
+  });
   checks.push({ name: "diagnostics", ok: true, detail: diagnosticStats() });
   checks.push({ name: "lifecycle", ok: true, detail: lifecycleStats() });
   const processes = await detectPluginProcesses();

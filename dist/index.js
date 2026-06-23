@@ -3225,8 +3225,8 @@ var require_utils = __commonJS({
       }
       return ind;
     }
-    function removeDotSegments(path8) {
-      let input = path8;
+    function removeDotSegments(path9) {
+      let input = path9;
       const output = [];
       let nextSlash = -1;
       let len = 0;
@@ -3478,8 +3478,8 @@ var require_schemes = __commonJS({
         wsComponent.secure = void 0;
       }
       if (wsComponent.resourceName) {
-        const [path8, query] = wsComponent.resourceName.split("?");
-        wsComponent.path = path8 && path8 !== "/" ? path8 : void 0;
+        const [path9, query] = wsComponent.resourceName.split("?");
+        wsComponent.path = path9 && path9 !== "/" ? path9 : void 0;
         wsComponent.query = query;
         wsComponent.resourceName = void 0;
       }
@@ -7363,8 +7363,8 @@ function getErrorMap() {
 
 // node_modules/zod/v3/helpers/parseUtil.js
 var makeIssue = (params) => {
-  const { data, path: path8, errorMaps, issueData } = params;
-  const fullPath = [...path8, ...issueData.path || []];
+  const { data, path: path9, errorMaps, issueData } = params;
+  const fullPath = [...path9, ...issueData.path || []];
   const fullIssue = {
     ...issueData,
     path: fullPath
@@ -7480,11 +7480,11 @@ var errorUtil;
 
 // node_modules/zod/v3/types.js
 var ParseInputLazyPath = class {
-  constructor(parent, value, path8, key) {
+  constructor(parent, value, path9, key) {
     this._cachedPath = [];
     this.parent = parent;
     this.data = value;
-    this._path = path8;
+    this._path = path9;
     this._key = key;
   }
   get path() {
@@ -11121,10 +11121,10 @@ function assignProp(target, prop, value) {
     configurable: true
   });
 }
-function getElementAtPath(obj, path8) {
-  if (!path8)
+function getElementAtPath(obj, path9) {
+  if (!path9)
     return obj;
-  return path8.reduce((acc, key) => acc?.[key], obj);
+  return path9.reduce((acc, key) => acc?.[key], obj);
 }
 function promiseAllObject(promisesObj) {
   const keys = Object.keys(promisesObj);
@@ -11444,11 +11444,11 @@ function aborted(x, startIndex = 0) {
   }
   return false;
 }
-function prefixIssues(path8, issues) {
+function prefixIssues(path9, issues) {
   return issues.map((iss) => {
     var _a;
     (_a = iss).path ?? (_a.path = []);
-    iss.path.unshift(path8);
+    iss.path.unshift(path9);
     return iss;
   });
 }
@@ -24151,6 +24151,122 @@ ${item.result || item.summary}`).join("\n\n");
   );
 }
 
+// src/install-diagnostics.ts
+import { lstatSync, readdirSync, readFileSync, realpathSync } from "node:fs";
+import os6 from "node:os";
+import path7 from "node:path";
+function safeRealpath(targetPath) {
+  if (!targetPath) return void 0;
+  try {
+    return realpathSync(targetPath);
+  } catch {
+    return void 0;
+  }
+}
+function safeLstat(targetPath) {
+  if (!targetPath) return void 0;
+  try {
+    return lstatSync(targetPath);
+  } catch {
+    return void 0;
+  }
+}
+function pluginRootFromEntrypoint(entrypoint) {
+  if (!entrypoint) return void 0;
+  const resolved = path7.resolve(entrypoint);
+  const dir = path7.dirname(resolved);
+  return path7.basename(dir) === "dist" ? path7.dirname(dir) : dir;
+}
+function processAlive(pid) {
+  if (!pid || pid <= 0) return void 0;
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error2) {
+    const code = error2.code;
+    return code === "EPERM" ? true : false;
+  }
+}
+function inUseMarkers(pluginRoot) {
+  if (!pluginRoot) return [];
+  const markerDir = path7.join(pluginRoot, ".in_use");
+  try {
+    return readdirSync(markerDir).map((name) => {
+      const markerPath = path7.join(markerDir, name);
+      let pid = Number(name);
+      try {
+        const parsed = JSON.parse(readFileSync(markerPath, "utf8"));
+        if (typeof parsed.pid === "number") pid = parsed.pid;
+      } catch {
+      }
+      return { pid: Number.isFinite(pid) ? pid : void 0, alive: processAlive(pid), path: markerPath };
+    });
+  } catch {
+    return [];
+  }
+}
+function readInstalledEntry(claudeHome, pluginRoot) {
+  let data;
+  try {
+    data = JSON.parse(readFileSync(path7.join(claudeHome, "plugins", "installed_plugins.json"), "utf8"));
+  } catch {
+    return void 0;
+  }
+  const pluginRootRealpath = safeRealpath(pluginRoot);
+  for (const [key, entries] of Object.entries(data.plugins ?? {})) {
+    if (!key.startsWith("codex-subagents@")) continue;
+    for (const entry of entries) {
+      if (!entry.installPath) continue;
+      const installRealpath = safeRealpath(entry.installPath);
+      if (entry.installPath === pluginRoot || installRealpath === pluginRootRealpath) {
+        return {
+          key,
+          installPath: entry.installPath,
+          version: entry.version,
+          gitCommitSha: entry.gitCommitSha
+        };
+      }
+    }
+  }
+  return void 0;
+}
+function pluginInstallDiagnostics(options = {}) {
+  try {
+    const entrypoint = options.entrypoint ?? process.argv[1];
+    const claudeHome = path7.resolve(options.claudeHome ?? path7.join(os6.homedir(), ".claude"));
+    const pluginRoot = pluginRootFromEntrypoint(entrypoint);
+    const pluginRootRealpath = safeRealpath(pluginRoot);
+    const pluginRootStat = safeLstat(pluginRoot);
+    const installedEntry = readInstalledEntry(claudeHome, pluginRoot);
+    const marketplacePath = installedEntry?.key.includes("@codex-subagents-local") ? path7.join(claudeHome, "plugins", "marketplaces", "codex-subagents-local", "plugins", "codex-subagents") : void 0;
+    const marketplaceRealpath = safeRealpath(marketplacePath);
+    const devSymlinkExpected = installedEntry?.gitCommitSha === "dev-symlink";
+    const staleDevInstall = Boolean(
+      devSymlinkExpected && installedEntry?.installPath && marketplaceRealpath && safeRealpath(installedEntry.installPath) !== marketplaceRealpath
+    );
+    return {
+      entrypoint,
+      pluginRoot,
+      pluginRootRealpath,
+      pluginRootIsSymlink: pluginRootStat?.isSymbolicLink(),
+      installedEntry,
+      marketplacePath,
+      marketplaceRealpath,
+      devSymlinkExpected,
+      staleDevInstall,
+      inUseMarkers: inUseMarkers(pluginRoot),
+      warning: staleDevInstall ? "Claude is running a copied codex-subagents dev install instead of the repository symlink. Run npm run dev:link after active sessions close." : void 0
+    };
+  } catch (error2) {
+    return {
+      devSymlinkExpected: false,
+      staleDevInstall: false,
+      inUseMarkers: [],
+      error: error2 instanceof Error ? error2.message : String(error2)
+    };
+  }
+}
+
 // src/processes.ts
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
@@ -25192,13 +25308,13 @@ var CodexAppServerSession = class _CodexAppServerSession {
 };
 
 // src/session-state.ts
-import { chmodSync as chmodSync2, mkdirSync as mkdirSync3, readFileSync, renameSync as renameSync2, writeFileSync as writeFileSync2 } from "node:fs";
-import os6 from "node:os";
-import path7 from "node:path";
+import { chmodSync as chmodSync2, mkdirSync as mkdirSync3, readFileSync as readFileSync2, renameSync as renameSync2, writeFileSync as writeFileSync2 } from "node:fs";
+import os7 from "node:os";
+import path8 from "node:path";
 function defaultSessionStateFile(env = process.env) {
   const explicit = env.CODEX_SUBAGENTS_SESSION_STATE_FILE?.trim();
-  if (explicit) return path7.resolve(explicit);
-  return path7.join(os6.homedir(), ".codex-subagents", "sessions.json");
+  if (explicit) return path8.resolve(explicit);
+  return path8.join(os7.homedir(), ".codex-subagents", "sessions.json");
 }
 var SessionStateStore = class {
   file;
@@ -25207,7 +25323,7 @@ var SessionStateStore = class {
   }
   load(options = {}) {
     try {
-      const parsed = JSON.parse(readFileSync(this.file, "utf8"));
+      const parsed = JSON.parse(readFileSync2(this.file, "utf8"));
       if (parsed.version !== 1 || !Array.isArray(parsed.sessions)) return [];
       return parsed.sessions.filter(isDurableSessionState).filter((session) => keepDurableSessionState(session, options));
     } catch {
@@ -25215,7 +25331,7 @@ var SessionStateStore = class {
     }
   }
   save(sessions, options = {}) {
-    mkdirSync3(path7.dirname(this.file), { recursive: true });
+    mkdirSync3(path8.dirname(this.file), { recursive: true });
     const temp = `${this.file}.${process.pid}.tmp`;
     const replaceIds = new Set(options.replaceIds ?? sessions.map((session) => session.id));
     const merged = [
@@ -26709,8 +26825,9 @@ function sessionResourceUri(sessionId) {
 async function codexStatusPayload(codexBin, visibility) {
   const status = await probeCodexVersion(codexBin);
   const processes = await detectPluginProcesses();
+  const install = pluginInstallDiagnostics();
   return {
-    ok: !status.error,
+    ok: !status.error && !install.staleDevInstall,
     binary: status.binary,
     version: status.version,
     error: status.error,
@@ -26759,6 +26876,7 @@ async function codexStatusPayload(codexBin, visibility) {
     },
     logging: loggingDiagnostics(),
     artifacts: outputArtifactDiagnostics(),
+    install,
     processes,
     diagnostics: {
       ...diagnosticStats(),
@@ -26815,6 +26933,13 @@ async function codexDoctorPayload(args = {}) {
   checks.push({ name: "sessions", ok: true, detail: sessionManager.stats() });
   checks.push({ name: "logging", ok: true, detail: loggingDiagnostics() });
   checks.push({ name: "artifacts", ok: true, detail: outputArtifactDiagnostics() });
+  const install = pluginInstallDiagnostics();
+  if (install.staleDevInstall) ok = false;
+  checks.push({
+    name: "plugin_install",
+    ok: !install.staleDevInstall,
+    detail: install
+  });
   checks.push({ name: "diagnostics", ok: true, detail: diagnosticStats() });
   checks.push({ name: "lifecycle", ok: true, detail: lifecycleStats() });
   const processes = await detectPluginProcesses();
