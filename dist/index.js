@@ -22374,7 +22374,7 @@ function outputArtifactDiagnostics(env = process.env) {
 }
 
 // src/runner.ts
-var reasoningEfforts = ["minimal", "low", "medium", "high", "xhigh"];
+var reasoningEfforts = ["minimal", "low", "medium", "high", "xhigh", "max"];
 var sandboxModes = ["read-only", "workspace-write", "danger-full-access"];
 var serviceTiers = ["fast", "flex"];
 var modelVerbosities = ["low", "medium", "high"];
@@ -27130,7 +27130,7 @@ var commonInputSchema = {
     "Convenience model preset. Use `spark` for responsive Codex Spark work; it maps to gpt-5.3-codex-spark."
   ),
   reasoning_effort: reasoningEffortSchema.optional().describe(
-    "Codex model reasoning effort. Prefer medium by default, low for simple checks, high/xhigh only for difficult analysis. `minimal` is rejected because Codex currently auto-attaches web_search, which the API does not allow with minimal reasoning."
+    "Codex model reasoning effort. Prefer medium by default, low for simple checks, high/xhigh/max only for difficult analysis. `max` is the deepest level and is supported by gpt-5.6 models. `minimal` is rejected because Codex currently auto-attaches web_search, which the API does not allow with minimal reasoning."
   ),
   sandbox: sandboxModeSchema.default("read-only").describe("Codex sandbox mode. Keep read-only unless the user explicitly asks otherwise."),
   dangerously_bypass_approvals_and_sandbox: external_exports.boolean().default(false).describe(
@@ -27315,7 +27315,7 @@ var advancedInputSchema = external_exports.object({
     "Exact Codex model, or alias `spark` / `codex`. Omit by default; use `spark` only when the user asks for Codex Spark or a quick focused sidecar check."
   ),
   model_preset: modelPresetSchema.optional().describe("Compatibility preset retained for older callers. Prefer advanced.model for new calls."),
-  reasoning: reasoningEffortSchema.optional().describe("Advanced reasoning effort, including xhigh. Minimal is still rejected by this server."),
+  reasoning: reasoningEffortSchema.optional().describe("Advanced reasoning effort, including xhigh and max. Minimal is still rejected by this server."),
   reasoning_effort: reasoningEffortSchema.optional().describe("Compatibility alias for advanced.reasoning."),
   sandbox: sandboxModeSchema.optional().describe("Advanced sandbox override. Leave unset for normal read-only Codex delegation."),
   service_tier: commonInputSchema.service_tier,
@@ -27348,7 +27348,7 @@ var advancedInputSchema = external_exports.object({
   "DO NOT USE unless the user explicitly asked for exact model, timeout, diagnostics, custom MCP sharing, nested Codex subagents, or another uncommon Codex setting."
 );
 var advertisedAdvancedInputSchema = looseRecordSchema.describe(
-  "Power-user Codex settings object. Usually omit. Common keys: model (`spark`, `codex`, or exact model), reasoning (`xhigh` only when explicitly requested), timeout_ms, include_diagnostics, sandbox, codex_bin, output_contract, output_schema, codex_subagents, subagent_tasks, subagent_runtime, and MCP sharing options. The server validates this object strictly at runtime."
+  "Power-user Codex settings object. Usually omit. Common keys: model (`spark`, `codex`, or exact model), reasoning (`xhigh` or `max` only when explicitly requested), timeout_ms, include_diagnostics, sandbox, codex_bin, output_contract, output_schema, codex_subagents, subagent_tasks, subagent_runtime, and MCP sharing options. The server validates this object strictly at runtime."
 );
 var nativeBaseInputSchema = {
   project_dir: commonInputSchema.project_dir.describe(
@@ -27619,7 +27619,7 @@ var usageGuide = [
   '- If a tool returns error.kind "backpressure", reduce max_parallel or wait before retrying. codex://status exposes current queue/session limits.',
   "- If a response mentions outputArtifacts, use the artifact paths for full retained output instead of asking Codex to resend huge stdout/stderr.",
   '- Do not use model_preset "spark" by default. Use Spark only when the user asks for Spark or when a quick focused sidecar check is clearly more appropriate than the default Codex model.',
-  '- Use reasoning "medium" by default, "low" for simple checks, and "high" only for difficult normal analysis. Use advanced.reasoning "xhigh" only when the user explicitly asks for maximum reasoning.',
+  '- Use reasoning "medium" by default, "low" for simple checks, and "high" only for difficult normal analysis. Use advanced.reasoning "xhigh" or "max" only when the user explicitly asks for maximum reasoning; "max" is the deepest level on gpt-5.6 models.',
   '- For the current strongest ChatGPT-backed Codex model, use advanced.model "gpt-5.5" or omit advanced.model. Do not invent a "-codex" suffix for GPT-5.5.',
   '- Do not combine model_preset "spark" with reasoning_summary values other than "none"; Spark does not support reasoning.summary.',
   "- Do not set service_tier by default. Let Codex use its normal account/default service tier unless the user explicitly asks for a service tier.",
