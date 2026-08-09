@@ -101,7 +101,7 @@ export const commonInputSchema = {
   reasoning_effort: reasoningEffortSchema
     .optional()
     .describe(
-      "Codex model reasoning effort. Prefer medium by default, low for simple checks, high/xhigh only for difficult analysis. `minimal` is rejected because Codex currently auto-attaches web_search, which the API does not allow with minimal reasoning.",
+      "Codex model reasoning effort. Prefer medium by default, low for simple checks, high/xhigh/max only for difficult analysis. `max` is the deepest level and is supported by gpt-5.6 models. `minimal` is rejected because Codex currently auto-attaches web_search, which the API does not allow with minimal reasoning.",
     ),
   sandbox: sandboxModeSchema
     .default("read-only")
@@ -412,7 +412,7 @@ export const advancedInputSchema = z
       .describe("Compatibility preset retained for older callers. Prefer advanced.model for new calls."),
     reasoning: reasoningEffortSchema
       .optional()
-      .describe("Advanced reasoning effort, including xhigh. Minimal is still rejected by this server."),
+      .describe("Advanced reasoning effort, including xhigh and max. Minimal is still rejected by this server."),
     reasoning_effort: reasoningEffortSchema
       .optional()
       .describe("Compatibility alias for advanced.reasoning."),
@@ -459,7 +459,7 @@ export const advancedInputSchema = z
   );
 
 export const advertisedAdvancedInputSchema = looseRecordSchema.describe(
-  "Power-user Codex settings object. Usually omit. Common keys: model (`spark`, `codex`, or exact model), reasoning (`xhigh` only when explicitly requested), timeout_ms, include_diagnostics, sandbox, codex_bin, output_contract, output_schema, codex_subagents, subagent_tasks, subagent_runtime, and MCP sharing options. The server validates this object strictly at runtime.",
+  "Power-user Codex settings object. Usually omit. Common keys: model (`spark`, `codex`, or exact model), reasoning (`xhigh` or `max` only when explicitly requested), timeout_ms, include_diagnostics, sandbox, codex_bin, output_contract, output_schema, codex_subagents, subagent_tasks, subagent_runtime, and MCP sharing options. The server validates this object strictly at runtime.",
 );
 
 export const nativeBaseInputSchema = {

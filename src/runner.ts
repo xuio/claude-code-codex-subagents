@@ -31,7 +31,7 @@ import {
 } from "./subagents.js";
 import { OutputArtifactWriter, type OutputArtifacts } from "./artifacts.js";
 
-export const reasoningEfforts = ["minimal", "low", "medium", "high", "xhigh"] as const;
+export const reasoningEfforts = ["minimal", "low", "medium", "high", "xhigh", "max"] as const;
 export const sandboxModes = ["read-only", "workspace-write", "danger-full-access"] as const;
 export const serviceTiers = ["fast", "flex"] as const;
 export const modelVerbosities = ["low", "medium", "high"] as const;
