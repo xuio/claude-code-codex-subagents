@@ -251,23 +251,40 @@ The cancel response includes partial output if Codex streamed any before the
 interrupt. Foreground `codex_task` calls are cancelled by Claude Code's normal
 request interruption path, not by a tool call from the same in-flight turn.
 
-## Spark And Reasoning
+## Models And Reasoning
 
-Do not use `advanced.model: "spark"` by default. Use Spark only when the user asks
-for Spark or when a quick focused sidecar check is clearly more appropriate than
-the default Codex model.
+| Alias / preset | Model | Use |
+| --- | --- | --- |
+| `sol`, `codex` | `gpt-6.1-sol` | General coding and repeated, complex work |
+| `astra` | `gpt-6-astra` | The most demanding reasoning and coding |
+| `luna` | `gpt-6-luna` | Focused, repeatable tasks |
+
+Set `advanced.model` to an alias or exact model ID. Legacy tools and nested
+`advanced.codex_subagents` definitions also accept `model_preset`. Exact model
+IDs override presets. Omitting the model inherits `CODEX_SUBAGENTS_DEFAULT_MODEL`
+or Codex configuration; `default` also inherits configuration. The plugin does
+not grant model access: availability depends on your CLI, account, and workspace.
+
+Spark retired on September 14, 2026. The plugin rejects `spark` and
+`gpt-5.3-codex-spark` before starting a run, including nested subagents. Update
+saved requests to one of the current models above. Explicit provider-specific
+model IDs remain supported.
 
 Recommended reasoning:
 
-- `low` for small, tactical checks.
-- `medium` for normal exploration and review.
-- `high` or `xhigh` for complex architecture, correctness, or security analysis.
+- Top-level `reasoning: "low"` for small checks, `"medium"` for normal exploration
+  and review, and `"high"` for difficult analysis.
+- `advanced.reasoning: "xhigh"` only when explicitly requested for deeper work.
 
-Avoid `minimal`. The plugin rejects it because the current Codex CLI can attach
-tools that are incompatible with minimal reasoning.
+The same levels work with legacy `reasoning_effort`, nested subagents, and
+`CODEX_SUBAGENTS_DEFAULT_REASONING_EFFORT`. `minimal` remains rejected because
+Codex can attach incompatible tools. Additional experimental reasoning levels
+are hidden by default; developer opt-ins are documented in
+[Development](DEVELOPMENT.md#hidden-reasoning-flags).
+Reasoning summaries and verbosity are passed through when explicitly requested;
+use settings supported by your model.
 
-Spark does not support `reasoning_summary`; with `advanced.model: "spark"`, use
-`advanced.reasoning_summary: "none"` or omit it.
+[Official Codex model guidance](https://learn.chatgpt.com/docs/models).
 
 ## Nested Codex Subagents
 

@@ -22,6 +22,9 @@ import {
   codexSubagentConfigOverrides,
   type McpConfigPolicy,
   modelForPreset,
+  normalizeRequestedModel,
+  currentModels,
+  retiredSparkModel,
   mcpConfigPolicies,
   prepareSubagents,
   type CodexSubagentDefinition,
@@ -31,17 +34,25 @@ import {
 } from "./subagents.js";
 import { OutputArtifactWriter, type OutputArtifacts } from "./artifacts.js";
 
-export const reasoningEfforts = ["minimal", "low", "medium", "high", "xhigh"] as const;
+const allReasoningEfforts = ["minimal", "low", "medium", "high", "xhigh", "max", "ultra"] as const;
+export type ReasoningEffort = (typeof allReasoningEfforts)[number];
+
+export function enabledReasoningEfforts(env: NodeJS.ProcessEnv = process.env): [ReasoningEffort, ...ReasoningEffort[]] {
+  const efforts: [ReasoningEffort, ...ReasoningEffort[]] = ["minimal", "low", "medium", "high", "xhigh"];
+  if (env.CODEX_SUBAGENTS_ENABLE_MAX_REASONING === "1") efforts.push("max");
+  if (env.CODEX_SUBAGENTS_ENABLE_ULTRA_REASONING === "1") efforts.push("ultra");
+  return efforts;
+}
+
+export const reasoningEfforts = enabledReasoningEfforts();
 export const sandboxModes = ["read-only", "workspace-write", "danger-full-access"] as const;
 export const serviceTiers = ["fast", "flex"] as const;
 export const modelVerbosities = ["low", "medium", "high"] as const;
 export const reasoningSummaries = ["auto", "concise", "detailed", "none"] as const;
-export const sparkModel = "gpt-5.3-codex-spark";
-export { mcpConfigPolicies, outputContracts };
+export { mcpConfigPolicies, outputContracts, normalizeRequestedModel };
 
 const maxPendingJsonLineChars = 1_000_000;
 
-export type ReasoningEffort = (typeof reasoningEfforts)[number];
 export type SandboxMode = (typeof sandboxModes)[number];
 export type ServiceTier = (typeof serviceTiers)[number];
 export type ModelVerbosity = (typeof modelVerbosities)[number];
@@ -215,7 +226,7 @@ function versionProbeTimeoutMs(env: NodeJS.ProcessEnv = process.env): number {
 
 export function defaultReasoningEffort(env: NodeJS.ProcessEnv = process.env): ReasoningEffort {
   const value = env.CODEX_SUBAGENTS_DEFAULT_REASONING_EFFORT?.trim();
-  return value !== "minimal" && reasoningEfforts.includes(value as ReasoningEffort)
+  return value !== "minimal" && enabledReasoningEfforts(env).includes(value as ReasoningEffort)
     ? (value as ReasoningEffort)
     : "medium";
 }
@@ -223,7 +234,7 @@ export function defaultReasoningEffort(env: NodeJS.ProcessEnv = process.env): Re
 export function defaultModel(env: NodeJS.ProcessEnv = process.env): string | undefined {
   const value = env.CODEX_SUBAGENTS_DEFAULT_MODEL?.trim();
   if (!value || value.includes("${")) return undefined;
-  return value;
+  return normalizeRequestedModel(value);
 }
 
 export function resolveRequestedModel(
@@ -231,13 +242,6 @@ export function resolveRequestedModel(
   env: NodeJS.ProcessEnv = process.env,
 ): string | undefined {
   return normalizeRequestedModel(options.model) || modelForPreset(options.modelPreset) || defaultModel(env);
-}
-
-export function normalizeRequestedModel(model: string | undefined): string | undefined {
-  const value = model?.trim();
-  if (!value) return undefined;
-  if (value === "gpt-5.5-codex") return "gpt-5.5";
-  return value;
 }
 
 export class RunValidationError extends Error {
@@ -268,22 +272,44 @@ export function validateRunConfiguration(
 } {
   const model = resolveRequestedModel(options, env);
   const reasoningEffort = options.reasoningEffort ?? defaultReasoningEffort(env);
-  let reasoningSummary = options.reasoningSummary;
+  const reasoningSummary = options.reasoningSummary;
+  const nestedConfigurations = (options.codexSubagents ?? []).map((agent) => ({
+    model: normalizeRequestedModel(
+      typeof agent.extraConfig?.model === "string" ? agent.extraConfig.model : agent.model,
+    ) || modelForPreset(agent.modelPreset) || model,
+    reasoningEffort: agent.extraConfig?.model_reasoning_effort ?? agent.reasoningEffort ?? reasoningEffort,
+  }));
+
+  const retiredModel = [model, ...nestedConfigurations.map((agent) => agent.model)]
+    .find((requested) => requested === retiredSparkModel);
+  if (retiredModel) {
+    throw new RunValidationError(
+      "model_preset='spark' and gpt-5.3-codex-spark are retired. Use model='gpt-6.1-sol' (preset 'sol' or 'codex'), model='gpt-6-astra' (preset 'astra'), or model='gpt-6-luna' (preset 'luna').",
+    );
+  }
+
+  for (const effort of [reasoningEffort, ...nestedConfigurations.map((agent) => agent.reasoningEffort)]) {
+    const flag = effort === "max" ? "CODEX_SUBAGENTS_ENABLE_MAX_REASONING" :
+      effort === "ultra" ? "CODEX_SUBAGENTS_ENABLE_ULTRA_REASONING" : undefined;
+    if (flag && env[flag] !== "1") {
+      throw new RunValidationError(`reasoning_effort='${effort}' is hidden and requires ${flag}=1 on the MCP server. Use 'xhigh' or lower otherwise.`);
+    }
+  }
+
+  const lunaUltra = (model === currentModels.luna && reasoningEffort === "ultra") ||
+    nestedConfigurations.some((agent) =>
+      agent.model === currentModels.luna && agent.reasoningEffort === "ultra",
+    );
+  if (lunaUltra) {
+    throw new RunValidationError(
+      "reasoning_effort='ultra' is not supported by gpt-6-luna. Use 'max' or lower, or select gpt-6.1-sol or gpt-6-astra for Ultra.",
+    );
+  }
 
   if (reasoningEffort === "minimal") {
     throw new RunValidationError(
       "reasoning_effort='minimal' is not supported by this plugin because Codex currently auto-attaches web_search, which the API rejects with reasoning.effort 'minimal'. Use reasoning_effort='low' or higher.",
     );
-  }
-
-  if (model === sparkModel && reasoningSummary) {
-    if (reasoningSummary === "none") {
-      reasoningSummary = undefined;
-    } else {
-      throw new RunValidationError(
-        `reasoning_summary='${reasoningSummary}' is not supported with model_preset='spark' (${sparkModel}). Omit reasoning_summary or use reasoning_summary='none'.`,
-      );
-    }
   }
 
   if (options.mcpConfigPolicy === "explicit" && Object.keys(options.codexMcpServers ?? {}).length === 0) {

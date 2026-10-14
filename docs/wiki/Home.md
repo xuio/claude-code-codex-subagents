@@ -3,13 +3,13 @@
 Welcome to the `claude-code-codex-subagents` wiki.
 
 This project is a Claude Code plugin for OpenAI Codex subagents. It lets Claude
-launch Codex, Codex Spark, parallel code-review agents, adversarial reviewers,
+launch Codex with GPT-6.1 Sol, Astra, or Luna, parallel code-review agents, adversarial reviewers,
 and long-running Codex sessions through a daemonless stdio Model Context Protocol
 (MCP) server. It is read-only by default and exposes a native-feeling
 `codex_task`/`codex_followup` flow with live steering through Codex app-server.
 
 Common search terms for this project include Claude Code Codex plugin, OpenAI
-Codex MCP server, Codex subagents for Claude, Codex Spark in Claude Code,
+Codex MCP server, Codex subagents for Claude, current Codex models in Claude Code,
 parallel Codex code review, and adversarial Codex review.
 
 ## Start Here

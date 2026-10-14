@@ -10,6 +10,7 @@ import { z } from "zod";
 import {
   mcpConfigPolicies,
   modelVerbosities,
+  normalizeRequestedModel,
   outputContracts,
   reasoningEfforts,
   reasoningSummaries,
@@ -117,7 +118,7 @@ import { packageVersion } from "./version.js";
 const usageGuide = [
   "Claude Code integration guide for codex-subagents:",
   "",
-  "Use Codex subagents like Claude's native Task tool when the user needs an independent OpenAI Codex worker. Codex is a frontier model, like Claude, and is especially useful as a more technical, reliability-focused subagent for deep codebase work, server/deployment tasks, complex debugging, and adversarial review. Use this MCP server whenever the user asks Claude to use Codex, OpenAI Codex, Codex subagents, Codex Spark, a Codex second opinion, parallel Codex review, independent Codex codebase analysis, deep technical review, or adversarial validation. You do not need the user to name an MCP tool.",
+  "Use Codex subagents like Claude's native Task tool when the user needs an independent OpenAI Codex worker. Codex is a frontier model, like Claude, and is especially useful as a more technical, reliability-focused subagent for deep codebase work, server/deployment tasks, complex debugging, and adversarial review. Use this MCP server whenever the user asks Claude to use Codex, OpenAI Codex, Codex subagents, a Codex second opinion, parallel Codex review, independent Codex codebase analysis, deep technical review, or adversarial validation. You do not need the user to name an MCP tool.",
   "",
   "Tool choice:",
   "- Use codex_task when you want one independent Codex subagent: a frontier-model second opinion, deep technical implementation/review, complex codebase exploration, server/deployment work, or adversarial analysis. It is the Codex equivalent of native Task: description plus prompt, read-only by default, and answer-first result.",
@@ -131,7 +132,7 @@ const usageGuide = [
   "- Legacy/manual tools such as ask_codex, run_agent, run_agents, and old session names are hidden unless CODEX_SUBAGENTS_ENABLE_LEGACY_TOOLS=1.",
   "",
   "Prefer Codex over native Task when:",
-  "- The user explicitly asks for Codex, OpenAI Codex, Codex Spark, an adversarial review, or a second opinion from another frontier model.",
+  "- The user explicitly asks for Codex, OpenAI Codex, an adversarial review, or a second opinion from another frontier model.",
   "- The work is deep technical work: managing a complex codebase, debugging a difficult failure, reviewing architecture, validating correctness, preparing a server deployment, investigating infrastructure, or checking a high-risk change.",
   "- Claude wants a more technical and independent reviewer that does not share Claude's scratchpad or recent assumptions.",
   "- The task is independent of Claude's recent conversation and would waste Claude's context window.",
@@ -151,10 +152,12 @@ const usageGuide = [
   "- Use codex_followup mode cancel to stop a background or actively running Codex session early. The response includes whatever partial output streamed before the interrupt, and the matching Codex Desktop thread is archived best-effort when supported.",
   "- If a tool returns error.kind \"backpressure\", reduce max_parallel or wait before retrying. codex://status exposes current queue/session limits.",
   "- If a response mentions outputArtifacts, use the artifact paths for full retained output instead of asking Codex to resend huge stdout/stderr.",
-  "- Do not use model_preset \"spark\" by default. Use Spark only when the user asks for Spark or when a quick focused sidecar check is clearly more appropriate than the default Codex model.",
-  "- Use reasoning \"medium\" by default, \"low\" for simple checks, and \"high\" only for difficult normal analysis. Use advanced.reasoning \"xhigh\" only when the user explicitly asks for maximum reasoning.",
-  "- For the current strongest ChatGPT-backed Codex model, use advanced.model \"gpt-5.5\" or omit advanced.model. Do not invent a \"-codex\" suffix for GPT-5.5.",
-  "- Do not combine model_preset \"spark\" with reasoning_summary values other than \"none\"; Spark does not support reasoning.summary.",
+  "- Omit advanced.model to inherit configuration, or select sol/codex (gpt-6.1-sol) for general coding and astra (gpt-6-astra) for the most demanding work, and luna (gpt-6-luna) for focused, efficient tasks.",
+  "- Use reasoning \"medium\" by default, \"low\" for simple checks, and \"high\" for difficult analysis. Use advanced.reasoning xhigh only when explicitly requested and supported by the model.",
+  ...(reasoningEfforts.includes("max") ? ["- Max reasoning is enabled by the server configuration. Use advanced.reasoning max only when explicitly requested."] : []),
+  ...(reasoningEfforts.includes("ultra") ? ["- Ultra reasoning is enabled by the server configuration. Use advanced.reasoning ultra only for explicitly requested automatic delegation; Luna does not support it."] : []),
+  "- Use exact model IDs gpt-6.1-sol, gpt-6-astra, and gpt-6-luna; do not append a -codex suffix.",
+  "- Spark is retired. Ask the caller to select sol, astra, or luna if a saved configuration still requests spark or gpt-5.3-codex-spark.",
   "- Do not set service_tier by default. Let Codex use its normal account/default service tier unless the user explicitly asks for a service tier.",
   "- Pass project_dir whenever Claude knows the active project directory so Codex works in the same tree as Claude Code.",
   "- codex_task returns a session_id only for background tasks, keep_session requests, or failures. Set keep_session true when Claude expects to continue the Codex context after a completed task.",
@@ -784,11 +787,7 @@ function toNativeTaskGroupRunOptions(args: NativeTaskGroupInput) {
 }
 
 function publicModel(model: string | undefined): string | undefined {
-  const value = model?.trim();
-  if (!value) return undefined;
-  if (value === "spark") return "gpt-5.3-codex-spark";
-  if (value === "codex") return "gpt-5.3-codex";
-  return value;
+  return normalizeRequestedModel(model);
 }
 
 function parseAdvancedInput(value: unknown): Partial<AdvancedInput> {
@@ -1155,7 +1154,7 @@ registerLegacyTool(
   {
     title: "Ask Codex",
     description:
-      "Preferred front door for asking one OpenAI Codex agent to do a task. Use this automatically for natural requests like ask Codex, use Codex, Codex Spark, Codex second opinion, or one Codex subagent. Defaults to read-only sandbox and the Codex desktop app binary when installed. Pass project_dir so Codex works in Claude's current project. For explicit non-sandbox/full-access requests, set dangerously_bypass_approvals_and_sandbox true.",
+      "Preferred front door for asking one OpenAI Codex agent to do a task. Use this automatically for natural requests like ask Codex, use Codex, Codex second opinion, or one Codex subagent. Defaults to read-only sandbox and the Codex desktop app binary when installed. Pass project_dir so Codex works in Claude's current project. For explicit non-sandbox/full-access requests, set dangerously_bypass_approvals_and_sandbox true.",
     inputSchema: {
       task: z
         .string()
@@ -3250,7 +3249,7 @@ if (debugToolsEnabled) {
         prompt: z.string().describe("Task for the Codex agent."),
         model: z.string().optional().describe("Optional Codex model."),
         reasoning_effort: reasoningEffortSchema.optional().describe("Optional reasoning effort."),
-        model_preset: modelPresetSchema.optional().describe("Optional model preset, such as spark."),
+        model_preset: modelPresetSchema.optional().describe("Optional model preset: sol, codex, astra, or luna (spark is retired)."),
       },
     },
     ({ prompt, model, reasoning_effort, model_preset }) => {

@@ -232,6 +232,8 @@ if (args[0] === "app-server") {
         cwd: params?.cwd ?? process.cwd(),
         threadSource: params?.threadSource ?? null,
         serviceName: params?.serviceName ?? null,
+        model: params?.model,
+        reasoningEffort: params?.config?.model_reasoning_effort,
       });
       if (hasMode("THREAD_START_NO_ID")) {
         send({ id, result: { thread: {}, cwd: params?.cwd ?? process.cwd() } });
@@ -375,6 +377,8 @@ if (args[0] === "app-server") {
         threadId,
         turnId: activeTurn,
         outputSchema: params?.outputSchema,
+        model: params?.model,
+        effort: params?.effort,
       });
       if (hasMode("TURN_START_NO_RESPONSE")) {
         return;

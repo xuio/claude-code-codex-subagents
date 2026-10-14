@@ -1,7 +1,7 @@
 {
   "name": "codex-subagents",
   "version": "0.3.0",
-  "description": "Claude Code plugin for OpenAI Codex subagents, Codex Spark, parallel code review, adversarial review, and native follow-up sessions through a daemonless MCP server with read-only defaults and explicit full-access mode.",
+  "description": "Claude Code plugin for OpenAI Codex subagents, GPT-6.1 Sol, Astra, Luna, parallel code review, adversarial review, and native follow-up sessions through a daemonless MCP server with read-only defaults and explicit full-access mode.",
   "author": {
     "name": "xuio"
   },
@@ -11,7 +11,9 @@
     "claude-code-plugin",
     "codex",
     "openai-codex",
-    "codex-spark",
+    "gpt-6.1-sol",
+    "gpt-6-astra",
+    "gpt-6-luna",
     "subagents",
     "mcp",
     "mcp-server",

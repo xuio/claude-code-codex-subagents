@@ -6,11 +6,16 @@ import { runQueuedAgents } from "../src/jobs.js";
 import {
   buildCodexExecArgs,
   defaultReasoningEffort,
+  enabledReasoningEfforts,
   normalizeRequestedModel,
+  resolveRequestedModel,
   probeCodexVersion,
   resolveWorkingDirectory,
   runAgent,
 } from "../src/runner.js";
+import { advancedInputSchema } from "../src/schemas.js";
+
+const hiddenReasoningEnv = { CODEX_SUBAGENTS_ENABLE_MAX_REASONING: "1", CODEX_SUBAGENTS_ENABLE_ULTRA_REASONING: "1" };
 
 const fakeCodex = path.resolve("test/fixtures/fake-codex.mjs");
 const tempDirs: string[] = [];
@@ -26,6 +31,40 @@ afterEach(async () => {
 });
 
 describe("buildCodexExecArgs", () => {
+  it.each([
+    ["sol", "gpt-6.1-sol", "max"],
+    ["codex", "gpt-6.1-sol", "ultra"],
+    ["astra", "gpt-6-astra", "ultra"],
+    ["luna", "gpt-6-luna", "max"],
+  ] as const)("passes %s and %s with %s reasoning through all configuration paths", (alias, model, effort) => {
+    expect(advancedInputSchema.safeParse({ model: alias, reasoning: effort }).success).toBe(false);
+    expect(resolveRequestedModel({}, { CODEX_SUBAGENTS_DEFAULT_MODEL: alias })).toBe(model);
+    expect(resolveRequestedModel({ model: "provider-custom", modelPreset: alias }, { CODEX_SUBAGENTS_DEFAULT_MODEL: "astra" })).toBe("provider-custom");
+    for (const options of [{ model: alias }, { model }, { modelPreset: alias }]) {
+      const args = buildCodexExecArgs({ ...options, reasoningEffort: effort }, "/tmp/out.md", hiddenReasoningEnv);
+      expect(args[args.indexOf("--model") + 1]).toBe(model);
+      expect(args).toContain(`model_reasoning_effort="${effort}"`);
+    }
+  });
+
+  it("inherits model configuration when no explicit model is selected", () => {
+    expect(buildCodexExecArgs({}, "/tmp/out.md", {})).not.toContain("--model");
+    expect(resolveRequestedModel({ modelPreset: "default" }, { CODEX_SUBAGENTS_DEFAULT_MODEL: "astra" })).toBe("gpt-6-astra");
+  });
+
+  it("rejects Luna Ultra in parent and nested-agent configurations", () => {
+    expect(() => buildCodexExecArgs({ model: "luna", reasoningEffort: "ultra" }, "/tmp/out.md", hiddenReasoningEnv)).toThrow(/ultra.*not supported.*gpt-6-luna/);
+    expect(() => buildCodexExecArgs({ reasoningEffort: "ultra" }, "/tmp/out.md", { ...hiddenReasoningEnv, CODEX_SUBAGENTS_DEFAULT_MODEL: "luna" })).toThrow(/ultra.*not supported.*gpt-6-luna/);
+    expect(() => buildCodexExecArgs({ model: "astra", reasoningEffort: "ultra", codexSubagents: [{ name: "child", description: "Child", developerInstructions: "Check code", modelPreset: "luna" }] }, "/tmp/out.md", hiddenReasoningEnv)).toThrow(/ultra.*not supported.*gpt-6-luna/);
+    expect(() => buildCodexExecArgs({ model: "astra", reasoningEffort: "ultra", codexSubagents: [{ name: "child", description: "Child", developerInstructions: "Check code", modelPreset: "luna", reasoningEffort: "max" }] }, "/tmp/out.md", hiddenReasoningEnv)).not.toThrow();
+  });
+
+  it("rejects retired nested Spark models while honoring explicit overrides", () => {
+    const child = { name: "child", description: "Child", developerInstructions: "Check code", modelPreset: "spark" as const };
+    expect(() => buildCodexExecArgs({ codexSubagents: [child] }, "/tmp/out.md", {})).toThrow(/retired/);
+    expect(() => buildCodexExecArgs({ codexSubagents: [{ ...child, model: "sol" }] }, "/tmp/out.md", {})).not.toThrow();
+  });
+
   it("defaults to read-only, non-interactive approvals, Codex default service tier, and stdin prompt input", () => {
     const args = buildCodexExecArgs({ cwd: "/repo" }, "/tmp/out.md", {});
 
@@ -140,7 +179,7 @@ describe("buildCodexExecArgs", () => {
     const args = buildCodexExecArgs(
       {
         cwd: "/repo",
-        modelPreset: "spark",
+        modelPreset: "sol",
         subagentRuntime: {
           maxThreads: 8,
           maxDepth: 2,
@@ -151,39 +190,14 @@ describe("buildCodexExecArgs", () => {
       {},
     );
 
-    expect(args[args.indexOf("--model") + 1]).toBe("gpt-5.3-codex-spark");
+    expect(args[args.indexOf("--model") + 1]).toBe("gpt-6.1-sol");
     expect(args).toContain("agents.max_threads=8");
     expect(args).toContain("agents.max_depth=2");
     expect(args).toContain("agents.job_max_runtime_seconds=900");
   });
 
-  it("rejects Spark reasoning summaries before starting Codex", () => {
-    expect(() =>
-      buildCodexExecArgs(
-        {
-          cwd: "/repo",
-          modelPreset: "spark",
-          reasoningSummary: "concise",
-        },
-        "/tmp/out.md",
-        {},
-      ),
-    ).toThrow(/reasoning_summary='concise'.*model_preset='spark'/);
-  });
-
-  it("drops Spark reasoning_summary none because it is equivalent to omitted", () => {
-    const args = buildCodexExecArgs(
-      {
-        cwd: "/repo",
-        modelPreset: "spark",
-        reasoningSummary: "none",
-      },
-      "/tmp/out.md",
-      {},
-    );
-
-    expect(args[args.indexOf("--model") + 1]).toBe("gpt-5.3-codex-spark");
-    expect(args.some((arg) => arg.includes("model_reasoning_summary="))).toBe(false);
+  it.each(["spark", "gpt-5.3-codex-spark"])("rejects retired model %s before starting Codex", (model) => {
+    expect(() => buildCodexExecArgs({ model }, "/tmp/out.md", {})).toThrow(/retired.*gpt-6.1-sol.*gpt-6-astra/);
   });
 
   it("rejects minimal reasoning before starting Codex", () => {
@@ -214,6 +228,25 @@ describe("buildCodexExecArgs", () => {
 });
 
 describe("defaultReasoningEffort", () => {
+  it("keeps advanced efforts hidden unless their independent flags are exactly 1", () => {
+    expect(enabledReasoningEfforts({})).toEqual(["minimal", "low", "medium", "high", "xhigh"]);
+    expect(enabledReasoningEfforts({ CODEX_SUBAGENTS_ENABLE_MAX_REASONING: "1" })).toContain("max");
+    expect(enabledReasoningEfforts({ CODEX_SUBAGENTS_ENABLE_MAX_REASONING: "1" })).not.toContain("ultra");
+    expect(enabledReasoningEfforts({ CODEX_SUBAGENTS_ENABLE_ULTRA_REASONING: "1" })).toContain("ultra");
+    expect(enabledReasoningEfforts({ CODEX_SUBAGENTS_ENABLE_ULTRA_REASONING: "1" })).not.toContain("max");
+    expect(enabledReasoningEfforts({ CODEX_SUBAGENTS_ENABLE_MAX_REASONING: "true", CODEX_SUBAGENTS_ENABLE_ULTRA_REASONING: "0" })).not.toContain("max");
+  });
+
+  it.each(["max", "ultra"] as const)("rejects disabled %s in direct and nested calls", (effort) => {
+    expect(defaultReasoningEffort({ CODEX_SUBAGENTS_DEFAULT_REASONING_EFFORT: effort })).toBe("medium");
+    expect(() => buildCodexExecArgs({ reasoningEffort: effort }, "/tmp/out.md", {})).toThrow(/hidden.*requires CODEX_SUBAGENTS_ENABLE_/);
+    expect(() => buildCodexExecArgs({ codexSubagents: [{ name: "child", description: "Child", developerInstructions: "Review", reasoningEffort: effort }] }, "/tmp/out.md", {})).toThrow(/hidden.*requires CODEX_SUBAGENTS_ENABLE_/);
+    expect(() => buildCodexExecArgs({ codexSubagents: [{ name: "child", description: "Child", developerInstructions: "Review", extraConfig: { model_reasoning_effort: effort } }] }, "/tmp/out.md", {})).toThrow(/hidden.*requires CODEX_SUBAGENTS_ENABLE_/);
+  });
+
+  it.each(["max", "ultra"] as const)("accepts %s as an environment default", (effort) => {
+    expect(defaultReasoningEffort({ ...hiddenReasoningEnv, CODEX_SUBAGENTS_DEFAULT_REASONING_EFFORT: effort })).toBe(effort);
+  });
   it("does not allow minimal as an environment default", () => {
     expect(
       defaultReasoningEffort({
@@ -306,18 +339,18 @@ describe("runAgent", () => {
       prompt: "coordinate nested work",
       projectDir,
       codexBin: fakeCodex,
-      modelPreset: "spark",
+      modelPreset: "sol",
       codexSubagents: [
         {
-          name: "ui_spark",
+          name: "ui_sol",
           description: "Fast focused UI iteration.",
           developerInstructions: "Stay scoped and concise.",
-          modelPreset: "spark",
+          modelPreset: "sol",
           reasoningEffort: "medium",
           sandbox: "read-only",
         },
       ],
-      subagentTasks: [{ agent: "ui_spark", prompt: "Inspect the toolbar." }],
+      subagentTasks: [{ agent: "ui_sol", prompt: "Inspect the toolbar." }],
       subagentRuntime: { maxThreads: 4, maxDepth: 2 },
       env: {
         FAKE_CODEX_RECORD_DIR: recordDir,
@@ -325,9 +358,9 @@ describe("runAgent", () => {
     });
 
     expect(result.ok).toBe(true);
-    expect(result.model).toBe("gpt-5.3-codex-spark");
+    expect(result.model).toBe("gpt-6.1-sol");
     expect(result.codexSubagents).toEqual({
-      customAgents: ["ui_spark"],
+      customAgents: ["ui_sol"],
       requestedTasks: 1,
       tempCodexHomeUsed: true,
     });
@@ -336,19 +369,19 @@ describe("runAgent", () => {
       .trim()
       .split("\n")
       .map((line) => JSON.parse(line));
-    expect(calls[0].prompt).toContain("Custom agents available: ui_spark");
-    expect(calls[0].prompt).toContain("Spawn ui_spark: Inspect the toolbar.");
-    expect(calls[0].args[calls[0].args.indexOf("--model") + 1]).toBe("gpt-5.3-codex-spark");
+    expect(calls[0].prompt).toContain("Custom agents available: ui_sol");
+    expect(calls[0].prompt).toContain("Spawn ui_sol: Inspect the toolbar.");
+    expect(calls[0].args[calls[0].args.indexOf("--model") + 1]).toBe("gpt-6.1-sol");
     expect(calls[0].args).toContain("agents.max_threads=4");
-    expect(calls[0].args).toContain('agents.ui_spark.description="Fast focused UI iteration."');
+    expect(calls[0].args).toContain('agents.ui_sol.description="Fast focused UI iteration."');
     expect(calls[0].args).toContain(
-      'agents.ui_spark.developer_instructions="Stay scoped and concise."',
+      'agents.ui_sol.developer_instructions="Stay scoped and concise."',
     );
-    expect(calls[0].args).toContain('agents.ui_spark.model="gpt-5.3-codex-spark"');
+    expect(calls[0].args).toContain('agents.ui_sol.model="gpt-6.1-sol"');
     expect(Object.values(calls[0].agentFiles).join("\n")).toContain(
-      'model = "gpt-5.3-codex-spark"',
+      'model = "gpt-6.1-sol"',
     );
-    expect(Object.values(calls[0].agentFiles).join("\n")).toContain('name = "ui_spark"');
+    expect(Object.values(calls[0].agentFiles).join("\n")).toContain('name = "ui_sol"');
     await expect(stat(calls[0].codexHome)).rejects.toThrow();
   });
 

@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+- Added GPT-6.1 Sol (`sol`/`codex`), GPT-6 Astra (`astra`), and GPT-6 Luna (`luna`) presets and aliases for native tools, legacy tools, environment defaults, and nested subagents.
+- Kept `max` and `ultra` reasoning hidden behind separate experimental MCP server flags; Luna rejects Ultra even when enabled.
+- Retired Spark requests with migration guidance and refreshed model documentation and runtime checks.
+
 ## 0.3.0
 
 - Refactored the default Claude-facing MCP surface to three native tools: `codex_task`, `codex_task_group`, and `codex_followup`.

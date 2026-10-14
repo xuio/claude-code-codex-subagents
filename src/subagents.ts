@@ -2,8 +2,15 @@ import { lstat, mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs
 import os from "node:os";
 import path from "node:path";
 
-export const modelPresets = ["default", "codex", "spark"] as const;
+// Keep the retired preset parseable so older callers receive a migration error.
+export const modelPresets = ["default", "codex", "sol", "astra", "luna", "spark"] as const;
 export type ModelPreset = (typeof modelPresets)[number];
+export const currentModels = {
+  sol: "gpt-6.1-sol",
+  astra: "gpt-6-astra",
+  luna: "gpt-6-luna",
+} as const;
+export const retiredSparkModel = "gpt-5.3-codex-spark";
 export const mcpConfigPolicies = [
   "inherit_codex",
   "isolated",
@@ -49,12 +56,27 @@ export interface PreparedSubagents {
 export function modelForPreset(preset?: ModelPreset): string | undefined {
   switch (preset) {
     case "codex":
-      return "gpt-5.3-codex";
+    case "sol":
+      return currentModels.sol;
+    case "astra":
+      return currentModels.astra;
+    case "luna":
+      return currentModels.luna;
     case "spark":
-      return "gpt-5.3-codex-spark";
+      return retiredSparkModel;
     default:
       return undefined;
   }
+}
+
+export function normalizeRequestedModel(model: string | undefined): string | undefined {
+  const value = model?.trim();
+  if (!value) return undefined;
+  if (value === "codex" || value === "sol" || value === "astra" || value === "luna" || value === "spark") {
+    return modelForPreset(value);
+  }
+  if (value === "gpt-5.5-codex") return "gpt-5.5";
+  return value;
 }
 
 function sanitizeAgentFileName(name: string): string {
@@ -105,7 +127,7 @@ export function serializeCodexSubagent(definition: CodexSubagentDefinition): str
     lines.push(`nickname_candidates = ${tomlValue(definition.nicknameCandidates)}`);
   }
 
-  const model = definition.model?.trim() || modelForPreset(definition.modelPreset);
+  const model = normalizeRequestedModel(definition.model) || modelForPreset(definition.modelPreset);
   if (model) lines.push(`model = ${tomlValue(model)}`);
   if (definition.reasoningEffort) {
     lines.push(`model_reasoning_effort = ${tomlValue(definition.reasoningEffort)}`);
@@ -167,7 +189,7 @@ export function codexSubagentConfigOverrides(
     );
     appendConfigOverride(overrides, `${prefix}.nickname_candidates`, definition.nicknameCandidates);
 
-    const model = definition.model?.trim() || modelForPreset(definition.modelPreset);
+    const model = normalizeRequestedModel(definition.model) || modelForPreset(definition.modelPreset);
     appendConfigOverride(overrides, `${prefix}.model`, model);
     appendConfigOverride(
       overrides,

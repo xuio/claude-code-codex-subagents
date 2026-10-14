@@ -4,7 +4,7 @@
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![Node >=20](https://img.shields.io/badge/node-%3E%3D20-339933.svg)](package.json)
 
-**Claude Code plugin for OpenAI Codex subagents.** Run Codex, Codex Spark,
+**Claude Code plugin for OpenAI Codex subagents.** Run Codex with GPT-6.1 Sol, Astra, or Luna,
 parallel code-review agents, and long-running Codex sessions from Claude Code
 through a daemonless Model Context Protocol (MCP) server.
 
@@ -24,7 +24,7 @@ Codex MCP server, or Codex subagents for Claude, this is the integration.
 - **Read-only by default:** Codex starts with `--sandbox read-only` and non-interactive approvals.
 - **Daemonless MCP server:** Claude launches the MCP server over stdio for the active session.
 - **Fast parallel review:** Claude can launch several independent Codex agents with bounded concurrency.
-- **Codex Spark support:** Claude can request quick focused Spark checks without remembering model slugs.
+- **Current Codex models:** Select GPT-6.1 Sol, Astra, or Luna with simple model aliases.
 - **Persistent sessions:** App-server sessions keep Codex context across prompts and support live steering.
 - **Codex desktop friendly:** The plugin prefers the Codex binary shipped inside `Codex.app` and creates normal Codex threads with task names for Desktop history.
 - **Debuggable:** Verbose JSONL logging, diagnostics bundles, progress events, per-session resources, and recovery hints are built in.
@@ -35,7 +35,7 @@ Codex MCP server, or Codex subagents for Claude, this is the integration.
 - Independent adversarial review before merging high-risk code.
 - Parallel codebase analysis across API, tests, security, performance, docs, or deployment paths.
 - Long-running Codex sessions that preserve context across follow-up prompts.
-- Codex Spark side checks for fast focused technical passes.
+- Luna checks for focused technical tasks, with Sol and Astra for deeper work.
 - Read-only-by-default delegation with explicit opt-in for full local Codex capabilities.
 
 ## Quick Start
@@ -97,13 +97,16 @@ Launch three Codex subagents in parallel: one for API behavior, one for tests, a
 Claude can call `codex_task` three times in parallel, or use `codex_task_group`
 when a single rolled-up response is useful.
 
-### Use Spark
+### Choose A Model
 
 ```text
-Use Codex Spark to do a fast focused pass on the tool descriptions.
+Use Codex with GPT-6.1 Sol to review the tool descriptions.
 ```
 
-Claude can pass `advanced.model: "spark"` instead of remembering the exact Spark model slug.
+Claude can pass `advanced.model: "sol"` (or `"codex"`) for `gpt-6.1-sol`,
+`"astra"` for `gpt-6-astra`, or `"luna"` for `gpt-6-luna`. Omit the model to
+inherit configuration. Spark is retired; saved Spark requests return a migration
+message. See [model and reasoning options](docs/USAGE.md#models-and-reasoning).
 
 ### Keep A Codex Session Alive
 

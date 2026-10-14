@@ -94,12 +94,12 @@ try {
   const frontDoorSingle = await callTool("ask_codex", {
     task: "matrix-front-door-single RUN_COMMAND_EVENT",
     project_dir: projectDir,
-    model_preset: "spark",
+    model_preset: "sol",
   });
   const frontDoorAgent = frontDoorSingle.structuredContent?.agent;
   assert(frontDoorAgent?.ok, "ask_codex should succeed", frontDoorSingle);
   assert(frontDoorAgent.cwd === projectDir, "ask_codex should pass project_dir", frontDoorAgent);
-  assert(frontDoorAgent.model === "gpt-5.3-codex-spark", "ask_codex should use Spark preset", frontDoorAgent);
+  assert(frontDoorAgent.model === "gpt-6.1-sol", "ask_codex should use Sol preset", frontDoorAgent);
   assert(
     frontDoorAgent.eventSummary?.commands?.[0]?.command === "rg example",
     "ask_codex should share run_agent event parsing",
@@ -164,15 +164,15 @@ try {
     model_preset: "spark",
     reasoning_summary: "concise",
   });
-  assert(invalidSparkSummary.isError, "Spark reasoning_summary should fail at plugin layer");
+  assert(invalidSparkSummary.isError, "Retired Spark preset should fail at plugin layer");
   assert(
-    invalidSparkSummary.structuredContent?.agent?.validationError?.includes("model_preset='spark'"),
-    "Spark reasoning_summary failure should explain the unsupported pair",
+    invalidSparkSummary.structuredContent?.agent?.validationError?.includes("retired"),
+    "Retired Spark preset failure should explain the retired model",
     invalidSparkSummary.structuredContent,
   );
   assert(
     (await readCalls()).length === callsBeforeValidation,
-    "Spark reasoning_summary validation should not spawn Codex",
+    "Retired Spark preset validation should not spawn Codex",
   );
 
   const minimalReasoning = await callTool("run_agent", {
@@ -222,15 +222,15 @@ try {
       { name: "front-b", task: "matrix-front-parallel-b DELAY_MS=40", project_dir: projectDir },
     ],
     max_parallel: 2,
-    model_preset: "spark",
+    model_preset: "sol",
   });
   assert(frontDoorParallel.structuredContent?.ok, "ask_codex_parallel should succeed", frontDoorParallel);
   assert(
     frontDoorParallel.structuredContent?.agents?.length === 2 &&
       frontDoorParallel.structuredContent.agents.every(
-        (agent) => agent.cwd === projectDir && agent.model === "gpt-5.3-codex-spark",
+        (agent) => agent.cwd === projectDir && agent.model === "gpt-6.1-sol",
       ),
-    "ask_codex_parallel should pass shared project_dir and Spark preset",
+    "ask_codex_parallel should pass shared project_dir and Sol preset",
     frontDoorParallel.structuredContent,
   );
 
@@ -273,7 +273,7 @@ try {
   assert(
     mixedValidation.structuredContent.agents.filter((agent) => agent.ok).length === 3 &&
       mixedValidation.structuredContent.agents.some((agent) =>
-        agent.validationError?.includes("model_preset='spark'"),
+        agent.validationError?.includes("retired"),
       ),
     "run_agents should validate one bad agent without aborting siblings",
     mixedValidation.structuredContent,
@@ -307,14 +307,14 @@ try {
   const nested = await callTool("run_agent", {
     prompt: "matrix-nested coordinate nested work",
     project_dir: projectDir,
-    model_preset: "spark",
+    model_preset: "sol",
     codex_subagents: [
       {
-        name: "ui_spark",
+        name: "ui_sol",
         description: "Fast focused UI iteration.",
         developer_instructions: "Stay scoped and concise.",
-        nickname_candidates: ["Spark One", "Spark Two"],
-        model_preset: "spark",
+        nickname_candidates: ["Sol One", "Sol Two"],
+        model_preset: "sol",
         reasoning_effort: "medium",
         sandbox: "read-only",
         mcp_servers: {
@@ -334,7 +334,7 @@ try {
       },
     ],
     subagent_tasks: [
-      { agent: "ui_spark", name: "toolbar", prompt: "Inspect the toolbar." },
+      { agent: "ui_sol", name: "toolbar", prompt: "Inspect the toolbar." },
       { agent: "explorer", name: "repo", prompt: "Map the repository." },
     ],
     subagent_runtime: {
@@ -344,11 +344,11 @@ try {
     },
   });
   const nestedAgent = nested.structuredContent?.agent;
-  assert(nestedAgent?.ok, "nested Spark run should succeed", nested);
-  assert(nestedAgent.model === "gpt-5.3-codex-spark", "spark preset should map to Spark model", nestedAgent);
+  assert(nestedAgent?.ok, "nested Sol run should succeed", nested);
+  assert(nestedAgent.model === "gpt-6.1-sol", "sol preset should map to Sol model", nestedAgent);
   assert(nestedAgent.codexSubagents?.requestedTasks === 2, "nested tasks should be counted", nestedAgent);
   assert(
-    nestedAgent.codexSubagents?.customAgents?.[0] === "ui_spark" &&
+    nestedAgent.codexSubagents?.customAgents?.[0] === "ui_sol" &&
       nestedAgent.codexSubagents?.tempCodexHomeUsed,
     "nested run should materialize custom agents in a temp Codex home",
     nestedAgent.codexSubagents,
@@ -360,22 +360,22 @@ try {
   );
   assert(nestedCall, "fake Codex should record the nested call", calls);
   assert(
-    nestedCall.prompt.includes("Spawn ui_spark as toolbar: Inspect the toolbar.") &&
+    nestedCall.prompt.includes("Spawn ui_sol as toolbar: Inspect the toolbar.") &&
       nestedCall.prompt.includes("Spawn explorer as repo: Map the repository."),
     "nested prompt should instruct parent Codex to spawn requested subagents",
     nestedCall.prompt,
   );
   assert(
-    nestedCall.args.includes('agents.ui_spark.model="gpt-5.3-codex-spark"') &&
+    nestedCall.args.includes('agents.ui_sol.model="gpt-6.1-sol"') &&
       !nestedCall.args.some((arg) => arg.includes("mcp_servers") || arg.includes("skills.config") || arg.includes("model_verbosity")) &&
       nestedCall.args.includes("agents.max_threads=4") &&
       nestedCall.args.includes("agents.max_depth=2") &&
       nestedCall.args.includes("agents.job_max_runtime_seconds=900"),
-    "nested Codex args should include safe Spark/runtime overrides without nested MCP, skills, or extra config",
+    "nested Codex args should include safe Sol/runtime overrides without nested MCP, skills, or extra config",
     nestedCall.args,
   );
   const agentToml = Object.values(nestedCall.agentFiles).join("\n");
-  assert(agentToml.includes('model = "gpt-5.3-codex-spark"'), "nested temp agent TOML should include Spark");
+  assert(agentToml.includes('model = "gpt-6.1-sol"'), "nested temp agent TOML should include Sol");
   assert(agentToml.includes("[mcp_servers.docs]"), "nested temp agent TOML should include MCP config");
   assert(agentToml.includes("[skills.config.playwright]"), "nested temp agent TOML should include skills config");
   assert(agentToml.includes('model_verbosity = "low"'), "nested temp agent TOML should include extra config");

@@ -21343,52 +21343,228 @@ var StdioServerTransport = class {
   }
 };
 
-// src/aggregate.ts
-function agentName(result, index) {
-  return result.name ?? `agent-${index + 1}`;
+// src/runner.ts
+import { spawn } from "node:child_process";
+import { mkdtemp as mkdtemp2, readFile as readFile2, rm as rm2, stat, writeFile as writeFile2 } from "node:fs/promises";
+import os4 from "node:os";
+import path5 from "node:path";
+
+// src/binary.ts
+import { accessSync, constants, statSync } from "node:fs";
+import os from "node:os";
+import path from "node:path";
+function cleanOption(value) {
+  const trimmed = value?.trim();
+  if (!trimmed) return void 0;
+  if (trimmed.includes("${")) return void 0;
+  return trimmed;
 }
-function structuredRecord(value) {
-  return value && typeof value === "object" && !Array.isArray(value) ? value : void 0;
+function isExecutable(candidate) {
+  try {
+    if (!statSync(candidate).isFile()) return false;
+    accessSync(candidate, constants.X_OK);
+    return true;
+  } catch {
+    return false;
+  }
 }
-function aggregateAgentResults(results) {
-  const failedAgents = results.map((result, index) => ({ result, name: agentName(result, index) })).filter(({ result }) => !result.ok).map(({ name }) => name);
-  const findings = [];
-  const summaries = [];
-  results.forEach((result, index) => {
-    const name = agentName(result, index);
-    const structured = structuredRecord(result.structuredOutput);
-    if (typeof structured?.summary === "string") {
-      summaries.push({ agent: name, summary: structured.summary });
-    } else if (result.finalMessage.trim()) {
-      summaries.push({ agent: name, summary: result.finalMessage.trim().slice(0, 1e3) });
+function desktopCodexCandidates(env = process.env, platform = process.platform, homedir = os.homedir()) {
+  if (platform !== "darwin") return [];
+  const candidates = [];
+  const appOverride = cleanOption(env.CODEX_DESKTOP_APP_PATH);
+  if (appOverride) {
+    candidates.push(
+      appOverride.endsWith(".app") ? path.join(appOverride, "Contents", "Resources", "codex") : appOverride
+    );
+  }
+  candidates.push(
+    "/Applications/Codex.app/Contents/Resources/codex",
+    path.join(homedir, "Applications", "Codex.app", "Contents", "Resources", "codex")
+  );
+  return candidates;
+}
+function findOnPath(command, env = process.env, existsExecutable = isExecutable) {
+  const pathEnv = env.PATH;
+  if (!pathEnv) return void 0;
+  const extensions = process.platform === "win32" ? (env.PATHEXT ?? ".EXE;.CMD;.BAT;.COM").split(";") : [""];
+  for (const directory of pathEnv.split(path.delimiter)) {
+    if (!directory) continue;
+    for (const extension of extensions) {
+      const candidate = path.join(directory, `${command}${extension}`);
+      if (existsExecutable(candidate)) return candidate;
     }
-    const structuredFindings = Array.isArray(structured?.findings) ? structured.findings : Array.isArray(structured?.risks) ? structured.risks : Array.isArray(structured?.suggestions) ? structured.suggestions : [];
-    for (const finding of structuredFindings) {
-      if (finding && typeof finding === "object") {
-        findings.push({ agent: name, ...finding });
-      }
+  }
+  return void 0;
+}
+function resolveCodexBinary(options = {}) {
+  const env = options.env ?? process.env;
+  const exists2 = options.existsExecutable ?? isExecutable;
+  const platform = options.platform ?? process.platform;
+  const homedir = options.homedir ?? os.homedir();
+  const explicit = cleanOption(options.explicitPath);
+  if (explicit) {
+    if (!exists2(explicit)) {
+      throw new Error(`Configured Codex binary is not executable: ${explicit}`);
     }
-  });
-  return {
-    ok: failedAgents.length === 0,
-    totalAgents: results.length,
-    completedAgents: results.filter((result) => result.ok).length,
-    failedAgents,
-    findings,
-    summaries,
-    recommendedNextAction: failedAgents.length > 0 ? `Inspect failed agents first: ${failedAgents.join(", ")}.` : findings.length > 0 ? "Review the aggregated findings and address the highest-severity concrete items first." : "Use the per-agent summaries to decide whether more focused follow-up is needed."
-  };
+    return { path: explicit, source: "explicit" };
+  }
+  const pluginConfigured = cleanOption(env.CODEX_SUBAGENTS_CODEX_BIN);
+  if (pluginConfigured) {
+    if (!exists2(pluginConfigured)) {
+      throw new Error(
+        `CODEX_SUBAGENTS_CODEX_BIN is set but is not executable: ${pluginConfigured}`
+      );
+    }
+    return { path: pluginConfigured, source: "plugin-config" };
+  }
+  for (const candidate of desktopCodexCandidates(env, platform, homedir)) {
+    if (exists2(candidate)) return { path: candidate, source: "desktop-app" };
+  }
+  const envConfigured = cleanOption(env.CODEX_BIN);
+  if (envConfigured) {
+    if (!exists2(envConfigured)) {
+      throw new Error(`CODEX_BIN is set but is not executable: ${envConfigured}`);
+    }
+    return { path: envConfigured, source: "CODEX_BIN" };
+  }
+  const fromPath = findOnPath("codex", env, exists2);
+  if (fromPath) return { path: fromPath, source: "PATH" };
+  throw new Error(
+    "Could not find a Codex CLI binary. Install the Codex desktop app, install `codex` on PATH, or set CODEX_SUBAGENTS_CODEX_BIN."
+  );
 }
 
-// src/diagnostics.ts
-import { mkdir, mkdtemp, open, writeFile } from "node:fs/promises";
-import os from "node:os";
-import path2 from "node:path";
+// src/contracts.ts
+var outputContracts = [
+  "freeform",
+  "review_findings",
+  "plan",
+  "risk_matrix",
+  "patch_suggestions"
+];
+var reviewFindingsSchema = {
+  type: "object",
+  additionalProperties: false,
+  required: ["summary", "findings"],
+  properties: {
+    summary: { type: "string" },
+    findings: {
+      type: "array",
+      items: {
+        type: "object",
+        additionalProperties: false,
+        required: ["severity", "title", "description", "file", "line", "recommendation"],
+        properties: {
+          severity: { type: "string", enum: ["critical", "high", "medium", "low", "info"] },
+          title: { type: "string" },
+          description: { type: "string" },
+          file: { type: ["string", "null"] },
+          line: { type: ["integer", "null"] },
+          recommendation: { type: ["string", "null"] }
+        }
+      }
+    }
+  }
+};
+var planSchema = {
+  type: "object",
+  additionalProperties: false,
+  required: ["summary", "steps"],
+  properties: {
+    summary: { type: "string" },
+    steps: {
+      type: "array",
+      items: {
+        type: "object",
+        additionalProperties: false,
+        required: ["title", "description", "status", "files"],
+        properties: {
+          title: { type: "string" },
+          description: { type: "string" },
+          status: { type: ["string", "null"] },
+          files: { type: ["array", "null"], items: { type: "string" } }
+        }
+      }
+    }
+  }
+};
+var riskMatrixSchema = {
+  type: "object",
+  additionalProperties: false,
+  required: ["summary", "risks"],
+  properties: {
+    summary: { type: "string" },
+    risks: {
+      type: "array",
+      items: {
+        type: "object",
+        additionalProperties: false,
+        required: ["risk", "likelihood", "impact", "mitigation", "owner"],
+        properties: {
+          risk: { type: "string" },
+          likelihood: { type: "string", enum: ["low", "medium", "high"] },
+          impact: { type: "string", enum: ["low", "medium", "high"] },
+          mitigation: { type: "string" },
+          owner: { type: ["string", "null"] }
+        }
+      }
+    }
+  }
+};
+var patchSuggestionsSchema = {
+  type: "object",
+  additionalProperties: false,
+  required: ["summary", "suggestions"],
+  properties: {
+    summary: { type: "string" },
+    suggestions: {
+      type: "array",
+      items: {
+        type: "object",
+        additionalProperties: false,
+        required: ["file", "description", "line", "suggested_change", "rationale"],
+        properties: {
+          file: { type: "string" },
+          line: { type: ["integer", "null"] },
+          description: { type: "string" },
+          suggested_change: { type: ["string", "null"] },
+          rationale: { type: ["string", "null"] }
+        }
+      }
+    }
+  }
+};
+function schemaForOutputContract(contract, customSchema) {
+  if (customSchema) return customSchema;
+  switch (contract) {
+    case "review_findings":
+      return reviewFindingsSchema;
+    case "plan":
+      return planSchema;
+    case "risk_matrix":
+      return riskMatrixSchema;
+    case "patch_suggestions":
+      return patchSuggestionsSchema;
+    default:
+      return void 0;
+  }
+}
+function parseStructuredOutput(text) {
+  const trimmed = text.trim();
+  if (!trimmed) return { error: "Codex returned an empty final message." };
+  try {
+    return { value: JSON.parse(trimmed) };
+  } catch (error2) {
+    return {
+      error: error2 instanceof Error ? error2.message : String(error2)
+    };
+  }
+}
 
 // src/logging.ts
 import { createHash, randomUUID } from "node:crypto";
-import { appendFileSync, chmodSync, mkdirSync, renameSync, statSync } from "node:fs";
-import path from "node:path";
+import { appendFileSync, chmodSync, mkdirSync, renameSync, statSync as statSync2 } from "node:fs";
+import path2 from "node:path";
 
 // src/redaction.ts
 var privateKeyPattern = new RegExp(
@@ -21636,9 +21812,9 @@ function writeDefaultLog(line) {
   const logFile = process.env.CODEX_SUBAGENTS_LOG_FILE?.trim();
   if (!logFile) return;
   try {
-    mkdirSync(path.dirname(logFile), { recursive: true });
+    mkdirSync(path2.dirname(logFile), { recursive: true });
     try {
-      if (statSync(logFile).size > logFileMaxBytes()) {
+      if (statSync2(logFile).size > logFileMaxBytes()) {
         chmodSync(logFile, 384);
         const rotated = `${logFile}.1`;
         renameSync(logFile, rotated);
@@ -21655,304 +21831,6 @@ function writeDefaultLog(line) {
     lastLogFileError = void 0;
   } catch (error2) {
     lastLogFileError = error2 instanceof Error ? error2.message : String(error2);
-  }
-}
-
-// src/diagnostics.ts
-var events = [];
-function maxEvents(env = process.env) {
-  const parsed = Number(env.CODEX_SUBAGENTS_DIAGNOSTIC_EVENTS);
-  if (!Number.isInteger(parsed) || parsed < 1) return 100;
-  return Math.min(parsed, 1e3);
-}
-function makeId() {
-  return `diag-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
-}
-function recordDiagnosticEvent(event, env = process.env) {
-  const entry = {
-    id: makeId(),
-    ts: (/* @__PURE__ */ new Date()).toISOString(),
-    ...event,
-    message: redactSensitiveText(event.message),
-    recovery: event.recovery === void 0 ? void 0 : redactJsonValue(event.recovery),
-    detail: event.detail === void 0 ? void 0 : redactJsonValue(event.detail)
-  };
-  events.push(entry);
-  const limit = maxEvents(env);
-  while (events.length > limit) events.shift();
-  return entry;
-}
-function recentDiagnosticEvents(limit = 50) {
-  return events.slice(-Math.max(0, Math.min(limit, events.length)));
-}
-function diagnosticStats() {
-  return {
-    retainedEvents: events.length,
-    recentErrors: events.filter((event) => event.severity === "error").length,
-    newestEventAt: events.at(-1)?.ts
-  };
-}
-async function tailFile(file, maxBytes = 2e5) {
-  let handle;
-  try {
-    handle = await open(file, "r");
-    const stat3 = await handle.stat();
-    const length = Math.min(stat3.size, maxBytes);
-    const buffer = Buffer.alloc(length);
-    await handle.read(buffer, 0, length, stat3.size - length);
-    return buffer.toString("utf8");
-  } catch {
-    return void 0;
-  } finally {
-    await handle?.close().catch(() => {
-    });
-  }
-}
-async function createDebugBundle(input = {}) {
-  const env = input.env ?? process.env;
-  const base = path2.resolve(env.CODEX_SUBAGENTS_DEBUG_BUNDLE_DIR?.trim() || os.tmpdir());
-  await mkdir(base, { recursive: true });
-  const bundleDir = await mkdtemp(path2.join(base, "codex-subagents-debug-"));
-  const logFile = env.CODEX_SUBAGENTS_LOG_FILE?.trim();
-  const payload = redactJsonValue({
-    createdAt: (/* @__PURE__ */ new Date()).toISOString(),
-    pid: process.pid,
-    cwd: process.cwd(),
-    node: process.version,
-    platform: {
-      platform: process.platform,
-      arch: process.arch,
-      release: os.release()
-    },
-    envKeys: Object.keys(env).filter((key) => key.startsWith("CODEX_SUBAGENTS_") || key.startsWith("CLAUDE_")).sort(),
-    logging: loggingDiagnostics(env),
-    recentDiagnostics: recentDiagnosticEvents(100),
-    status: input.status,
-    session: input.session,
-    job: input.job,
-    notes: input.notes,
-    logTail: input.includeLogTail && logFile ? await tailFile(logFile) : void 0
-  });
-  const diagnosticsPath = path2.join(bundleDir, "diagnostics.json");
-  await writeFile(diagnosticsPath, JSON.stringify(payload, null, 2), "utf8");
-  return { bundleDir, diagnosticsPath };
-}
-
-// src/runner.ts
-import { spawn } from "node:child_process";
-import { mkdtemp as mkdtemp3, readFile as readFile2, rm as rm2, stat, writeFile as writeFile3 } from "node:fs/promises";
-import os5 from "node:os";
-import path6 from "node:path";
-
-// src/binary.ts
-import { accessSync, constants, statSync as statSync2 } from "node:fs";
-import os2 from "node:os";
-import path3 from "node:path";
-function cleanOption(value) {
-  const trimmed = value?.trim();
-  if (!trimmed) return void 0;
-  if (trimmed.includes("${")) return void 0;
-  return trimmed;
-}
-function isExecutable(candidate) {
-  try {
-    if (!statSync2(candidate).isFile()) return false;
-    accessSync(candidate, constants.X_OK);
-    return true;
-  } catch {
-    return false;
-  }
-}
-function desktopCodexCandidates(env = process.env, platform = process.platform, homedir = os2.homedir()) {
-  if (platform !== "darwin") return [];
-  const candidates = [];
-  const appOverride = cleanOption(env.CODEX_DESKTOP_APP_PATH);
-  if (appOverride) {
-    candidates.push(
-      appOverride.endsWith(".app") ? path3.join(appOverride, "Contents", "Resources", "codex") : appOverride
-    );
-  }
-  candidates.push(
-    "/Applications/Codex.app/Contents/Resources/codex",
-    path3.join(homedir, "Applications", "Codex.app", "Contents", "Resources", "codex")
-  );
-  return candidates;
-}
-function findOnPath(command, env = process.env, existsExecutable = isExecutable) {
-  const pathEnv = env.PATH;
-  if (!pathEnv) return void 0;
-  const extensions = process.platform === "win32" ? (env.PATHEXT ?? ".EXE;.CMD;.BAT;.COM").split(";") : [""];
-  for (const directory of pathEnv.split(path3.delimiter)) {
-    if (!directory) continue;
-    for (const extension of extensions) {
-      const candidate = path3.join(directory, `${command}${extension}`);
-      if (existsExecutable(candidate)) return candidate;
-    }
-  }
-  return void 0;
-}
-function resolveCodexBinary(options = {}) {
-  const env = options.env ?? process.env;
-  const exists2 = options.existsExecutable ?? isExecutable;
-  const platform = options.platform ?? process.platform;
-  const homedir = options.homedir ?? os2.homedir();
-  const explicit = cleanOption(options.explicitPath);
-  if (explicit) {
-    if (!exists2(explicit)) {
-      throw new Error(`Configured Codex binary is not executable: ${explicit}`);
-    }
-    return { path: explicit, source: "explicit" };
-  }
-  const pluginConfigured = cleanOption(env.CODEX_SUBAGENTS_CODEX_BIN);
-  if (pluginConfigured) {
-    if (!exists2(pluginConfigured)) {
-      throw new Error(
-        `CODEX_SUBAGENTS_CODEX_BIN is set but is not executable: ${pluginConfigured}`
-      );
-    }
-    return { path: pluginConfigured, source: "plugin-config" };
-  }
-  for (const candidate of desktopCodexCandidates(env, platform, homedir)) {
-    if (exists2(candidate)) return { path: candidate, source: "desktop-app" };
-  }
-  const envConfigured = cleanOption(env.CODEX_BIN);
-  if (envConfigured) {
-    if (!exists2(envConfigured)) {
-      throw new Error(`CODEX_BIN is set but is not executable: ${envConfigured}`);
-    }
-    return { path: envConfigured, source: "CODEX_BIN" };
-  }
-  const fromPath = findOnPath("codex", env, exists2);
-  if (fromPath) return { path: fromPath, source: "PATH" };
-  throw new Error(
-    "Could not find a Codex CLI binary. Install the Codex desktop app, install `codex` on PATH, or set CODEX_SUBAGENTS_CODEX_BIN."
-  );
-}
-
-// src/contracts.ts
-var outputContracts = [
-  "freeform",
-  "review_findings",
-  "plan",
-  "risk_matrix",
-  "patch_suggestions"
-];
-var reviewFindingsSchema = {
-  type: "object",
-  additionalProperties: false,
-  required: ["summary", "findings"],
-  properties: {
-    summary: { type: "string" },
-    findings: {
-      type: "array",
-      items: {
-        type: "object",
-        additionalProperties: false,
-        required: ["severity", "title", "description", "file", "line", "recommendation"],
-        properties: {
-          severity: { type: "string", enum: ["critical", "high", "medium", "low", "info"] },
-          title: { type: "string" },
-          description: { type: "string" },
-          file: { type: ["string", "null"] },
-          line: { type: ["integer", "null"] },
-          recommendation: { type: ["string", "null"] }
-        }
-      }
-    }
-  }
-};
-var planSchema = {
-  type: "object",
-  additionalProperties: false,
-  required: ["summary", "steps"],
-  properties: {
-    summary: { type: "string" },
-    steps: {
-      type: "array",
-      items: {
-        type: "object",
-        additionalProperties: false,
-        required: ["title", "description", "status", "files"],
-        properties: {
-          title: { type: "string" },
-          description: { type: "string" },
-          status: { type: ["string", "null"] },
-          files: { type: ["array", "null"], items: { type: "string" } }
-        }
-      }
-    }
-  }
-};
-var riskMatrixSchema = {
-  type: "object",
-  additionalProperties: false,
-  required: ["summary", "risks"],
-  properties: {
-    summary: { type: "string" },
-    risks: {
-      type: "array",
-      items: {
-        type: "object",
-        additionalProperties: false,
-        required: ["risk", "likelihood", "impact", "mitigation", "owner"],
-        properties: {
-          risk: { type: "string" },
-          likelihood: { type: "string", enum: ["low", "medium", "high"] },
-          impact: { type: "string", enum: ["low", "medium", "high"] },
-          mitigation: { type: "string" },
-          owner: { type: ["string", "null"] }
-        }
-      }
-    }
-  }
-};
-var patchSuggestionsSchema = {
-  type: "object",
-  additionalProperties: false,
-  required: ["summary", "suggestions"],
-  properties: {
-    summary: { type: "string" },
-    suggestions: {
-      type: "array",
-      items: {
-        type: "object",
-        additionalProperties: false,
-        required: ["file", "description", "line", "suggested_change", "rationale"],
-        properties: {
-          file: { type: "string" },
-          line: { type: ["integer", "null"] },
-          description: { type: "string" },
-          suggested_change: { type: ["string", "null"] },
-          rationale: { type: ["string", "null"] }
-        }
-      }
-    }
-  }
-};
-function schemaForOutputContract(contract, customSchema) {
-  if (customSchema) return customSchema;
-  switch (contract) {
-    case "review_findings":
-      return reviewFindingsSchema;
-    case "plan":
-      return planSchema;
-    case "risk_matrix":
-      return riskMatrixSchema;
-    case "patch_suggestions":
-      return patchSuggestionsSchema;
-    default:
-      return void 0;
-  }
-}
-function parseStructuredOutput(text) {
-  const trimmed = text.trim();
-  if (!trimmed) return { error: "Codex returned an empty final message." };
-  try {
-    return { value: JSON.parse(trimmed) };
-  } catch (error2) {
-    return {
-      error: error2 instanceof Error ? error2.message : String(error2)
-    };
   }
 }
 
@@ -22024,10 +21902,16 @@ async function cleanupRuntime(reason, graceMs = 2500) {
 }
 
 // src/subagents.ts
-import { lstat, mkdir as mkdir2, mkdtemp as mkdtemp2, readFile, rm, symlink, writeFile as writeFile2 } from "node:fs/promises";
-import os3 from "node:os";
-import path4 from "node:path";
-var modelPresets = ["default", "codex", "spark"];
+import { lstat, mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
+import os2 from "node:os";
+import path3 from "node:path";
+var modelPresets = ["default", "codex", "sol", "astra", "luna", "spark"];
+var currentModels = {
+  sol: "gpt-6.1-sol",
+  astra: "gpt-6-astra",
+  luna: "gpt-6-luna"
+};
+var retiredSparkModel = "gpt-5.3-codex-spark";
 var mcpConfigPolicies = [
   "inherit_codex",
   "isolated",
@@ -22037,12 +21921,26 @@ var mcpConfigPolicies = [
 function modelForPreset(preset) {
   switch (preset) {
     case "codex":
-      return "gpt-5.3-codex";
+    case "sol":
+      return currentModels.sol;
+    case "astra":
+      return currentModels.astra;
+    case "luna":
+      return currentModels.luna;
     case "spark":
-      return "gpt-5.3-codex-spark";
+      return retiredSparkModel;
     default:
       return void 0;
   }
+}
+function normalizeRequestedModel(model) {
+  const value = model?.trim();
+  if (!value) return void 0;
+  if (value === "codex" || value === "sol" || value === "astra" || value === "luna" || value === "spark") {
+    return modelForPreset(value);
+  }
+  if (value === "gpt-5.5-codex") return "gpt-5.5";
+  return value;
 }
 function sanitizeAgentFileName(name) {
   return name.replace(/[^a-zA-Z0-9_-]+/g, "-").replace(/^-+|-+$/g, "") || "agent";
@@ -22085,7 +21983,7 @@ function serializeCodexSubagent(definition) {
   if (definition.nicknameCandidates?.length) {
     lines.push(`nickname_candidates = ${tomlValue(definition.nicknameCandidates)}`);
   }
-  const model = definition.model?.trim() || modelForPreset(definition.modelPreset);
+  const model = normalizeRequestedModel(definition.model) || modelForPreset(definition.modelPreset);
   if (model) lines.push(`model = ${tomlValue(model)}`);
   if (definition.reasoningEffort) {
     lines.push(`model_reasoning_effort = ${tomlValue(definition.reasoningEffort)}`);
@@ -22131,7 +22029,7 @@ function codexSubagentConfigOverrides(definitions = []) {
       definition.developerInstructions
     );
     appendConfigOverride(overrides, `${prefix}.nickname_candidates`, definition.nicknameCandidates);
-    const model = definition.model?.trim() || modelForPreset(definition.modelPreset);
+    const model = normalizeRequestedModel(definition.model) || modelForPreset(definition.modelPreset);
     appendConfigOverride(overrides, `${prefix}.model`, model);
     appendConfigOverride(
       overrides,
@@ -22155,35 +22053,35 @@ async function linkIfPresent(source, destination) {
   await symlink(source, destination);
 }
 async function prepareTempCodexHome(definitions, env, options = {}) {
-  const realCodexHome = env.CODEX_HOME?.trim() || path4.join(os3.homedir(), ".codex");
-  const tempCodexHome = await mkdtemp2(path4.join(os3.tmpdir(), "codex-subagents-home-"));
+  const realCodexHome = env.CODEX_HOME?.trim() || path3.join(os2.homedir(), ".codex");
+  const tempCodexHome = await mkdtemp(path3.join(os2.tmpdir(), "codex-subagents-home-"));
   const links = [
-    linkIfPresent(path4.join(realCodexHome, "auth.json"), path4.join(tempCodexHome, "auth.json")),
-    linkIfPresent(path4.join(realCodexHome, "AGENTS.md"), path4.join(tempCodexHome, "AGENTS.md")),
-    linkIfPresent(path4.join(realCodexHome, "skills"), path4.join(tempCodexHome, "skills")),
-    linkIfPresent(path4.join(realCodexHome, "rules"), path4.join(tempCodexHome, "rules")),
-    linkIfPresent(path4.join(realCodexHome, "plugins"), path4.join(tempCodexHome, "plugins"))
+    linkIfPresent(path3.join(realCodexHome, "auth.json"), path3.join(tempCodexHome, "auth.json")),
+    linkIfPresent(path3.join(realCodexHome, "AGENTS.md"), path3.join(tempCodexHome, "AGENTS.md")),
+    linkIfPresent(path3.join(realCodexHome, "skills"), path3.join(tempCodexHome, "skills")),
+    linkIfPresent(path3.join(realCodexHome, "rules"), path3.join(tempCodexHome, "rules")),
+    linkIfPresent(path3.join(realCodexHome, "plugins"), path3.join(tempCodexHome, "plugins"))
   ];
   if (options.isolated || options.mcpServers) {
     links.push(
-      writeFile2(
-        path4.join(tempCodexHome, "config.toml"),
+      writeFile(
+        path3.join(tempCodexHome, "config.toml"),
         serializeGeneratedConfig(options.mcpServers),
         "utf8"
       )
     );
   } else {
-    links.push(linkIfPresent(path4.join(realCodexHome, "config.toml"), path4.join(tempCodexHome, "config.toml")));
+    links.push(linkIfPresent(path3.join(realCodexHome, "config.toml"), path3.join(tempCodexHome, "config.toml")));
   }
   await Promise.all(links);
-  const agentsDir = path4.join(tempCodexHome, "agents");
-  await mkdir2(agentsDir, { recursive: true });
+  const agentsDir = path3.join(tempCodexHome, "agents");
+  await mkdir(agentsDir, { recursive: true });
   await Promise.all(
     definitions.map(async (definition, index) => {
       const fileName = `${String(index + 1).padStart(2, "0")}-${sanitizeAgentFileName(
         definition.name
       )}.toml`;
-      await writeFile2(path4.join(agentsDir, fileName), serializeCodexSubagent(definition), "utf8");
+      await writeFile(path3.join(agentsDir, fileName), serializeCodexSubagent(definition), "utf8");
     })
   );
   return tempCodexHome;
@@ -22258,8 +22156,8 @@ async function prepareSubagents(options) {
 async function readClaudeProjectMcpServers(projectDir) {
   if (!projectDir) return void 0;
   const candidates = [
-    path4.join(projectDir, ".mcp.json"),
-    path4.join(projectDir, ".claude", "mcp.json")
+    path3.join(projectDir, ".mcp.json"),
+    path3.join(projectDir, ".claude", "mcp.json")
   ];
   for (const candidate of candidates) {
     try {
@@ -22276,8 +22174,8 @@ async function readClaudeProjectMcpServers(projectDir) {
 
 // src/artifacts.ts
 import { appendFileSync as appendFileSync2, mkdirSync as mkdirSync2, mkdtempSync, rmSync, writeFileSync } from "node:fs";
-import os4 from "node:os";
-import path5 from "node:path";
+import os3 from "node:os";
+import path4 from "node:path";
 function artifactsEnabled(env = process.env) {
   return env.CODEX_SUBAGENTS_OUTPUT_ARTIFACTS !== "0";
 }
@@ -22288,7 +22186,7 @@ function redactArtifacts(env = process.env) {
   return env.CODEX_SUBAGENTS_ARTIFACT_REDACT !== "0";
 }
 function artifactBaseDir(env = process.env) {
-  return path5.resolve(env.CODEX_SUBAGENTS_ARTIFACT_DIR?.trim() || path5.join(os4.tmpdir(), "codex-subagents-artifacts"));
+  return path4.resolve(env.CODEX_SUBAGENTS_ARTIFACT_DIR?.trim() || path4.join(os3.tmpdir(), "codex-subagents-artifacts"));
 }
 function safeText(text, redacted) {
   return redacted ? redactSensitiveText(text) : text;
@@ -22357,11 +22255,11 @@ var OutputArtifactWriter = class {
     if (this.dir) return;
     const base = artifactBaseDir(this.env);
     mkdirSync2(base, { recursive: true });
-    this.dir = mkdtempSync(path5.join(base, `${this.label.replace(/[^a-zA-Z0-9_.-]/g, "_")}-`));
+    this.dir = mkdtempSync(path4.join(base, `${this.label.replace(/[^a-zA-Z0-9_.-]/g, "_")}-`));
   }
   pathFor(file) {
     if (!this.dir) throw new Error("Output artifact directory was not initialized.");
-    return path5.join(this.dir, file);
+    return path4.join(this.dir, file);
   }
 };
 function outputArtifactDiagnostics(env = process.env) {
@@ -22374,12 +22272,17 @@ function outputArtifactDiagnostics(env = process.env) {
 }
 
 // src/runner.ts
-var reasoningEfforts = ["minimal", "low", "medium", "high", "xhigh"];
+function enabledReasoningEfforts(env = process.env) {
+  const efforts = ["minimal", "low", "medium", "high", "xhigh"];
+  if (env.CODEX_SUBAGENTS_ENABLE_MAX_REASONING === "1") efforts.push("max");
+  if (env.CODEX_SUBAGENTS_ENABLE_ULTRA_REASONING === "1") efforts.push("ultra");
+  return efforts;
+}
+var reasoningEfforts = enabledReasoningEfforts();
 var sandboxModes = ["read-only", "workspace-write", "danger-full-access"];
 var serviceTiers = ["fast", "flex"];
 var modelVerbosities = ["low", "medium", "high"];
 var reasoningSummaries = ["auto", "concise", "detailed", "none"];
-var sparkModel = "gpt-5.3-codex-spark";
 var maxPendingJsonLineChars = 1e6;
 var LimitedText = class {
   constructor(maxChars) {
@@ -22412,21 +22315,15 @@ function versionProbeTimeoutMs(env = process.env) {
 }
 function defaultReasoningEffort(env = process.env) {
   const value = env.CODEX_SUBAGENTS_DEFAULT_REASONING_EFFORT?.trim();
-  return value !== "minimal" && reasoningEfforts.includes(value) ? value : "medium";
+  return value !== "minimal" && enabledReasoningEfforts(env).includes(value) ? value : "medium";
 }
 function defaultModel(env = process.env) {
   const value = env.CODEX_SUBAGENTS_DEFAULT_MODEL?.trim();
   if (!value || value.includes("${")) return void 0;
-  return value;
+  return normalizeRequestedModel(value);
 }
 function resolveRequestedModel(options, env = process.env) {
   return normalizeRequestedModel(options.model) || modelForPreset(options.modelPreset) || defaultModel(env);
-}
-function normalizeRequestedModel(model) {
-  const value = model?.trim();
-  if (!value) return void 0;
-  if (value === "gpt-5.5-codex") return "gpt-5.5";
-  return value;
 }
 var RunValidationError = class extends Error {
   constructor(message) {
@@ -22437,20 +22334,37 @@ var RunValidationError = class extends Error {
 function validateRunConfiguration(options, env = process.env) {
   const model = resolveRequestedModel(options, env);
   const reasoningEffort = options.reasoningEffort ?? defaultReasoningEffort(env);
-  let reasoningSummary = options.reasoningSummary;
+  const reasoningSummary = options.reasoningSummary;
+  const nestedConfigurations = (options.codexSubagents ?? []).map((agent) => ({
+    model: normalizeRequestedModel(
+      typeof agent.extraConfig?.model === "string" ? agent.extraConfig.model : agent.model
+    ) || modelForPreset(agent.modelPreset) || model,
+    reasoningEffort: agent.extraConfig?.model_reasoning_effort ?? agent.reasoningEffort ?? reasoningEffort
+  }));
+  const retiredModel = [model, ...nestedConfigurations.map((agent) => agent.model)].find((requested) => requested === retiredSparkModel);
+  if (retiredModel) {
+    throw new RunValidationError(
+      "model_preset='spark' and gpt-5.3-codex-spark are retired. Use model='gpt-6.1-sol' (preset 'sol' or 'codex'), model='gpt-6-astra' (preset 'astra'), or model='gpt-6-luna' (preset 'luna')."
+    );
+  }
+  for (const effort of [reasoningEffort, ...nestedConfigurations.map((agent) => agent.reasoningEffort)]) {
+    const flag = effort === "max" ? "CODEX_SUBAGENTS_ENABLE_MAX_REASONING" : effort === "ultra" ? "CODEX_SUBAGENTS_ENABLE_ULTRA_REASONING" : void 0;
+    if (flag && env[flag] !== "1") {
+      throw new RunValidationError(`reasoning_effort='${effort}' is hidden and requires ${flag}=1 on the MCP server. Use 'xhigh' or lower otherwise.`);
+    }
+  }
+  const lunaUltra = model === currentModels.luna && reasoningEffort === "ultra" || nestedConfigurations.some(
+    (agent) => agent.model === currentModels.luna && agent.reasoningEffort === "ultra"
+  );
+  if (lunaUltra) {
+    throw new RunValidationError(
+      "reasoning_effort='ultra' is not supported by gpt-6-luna. Use 'max' or lower, or select gpt-6.1-sol or gpt-6-astra for Ultra."
+    );
+  }
   if (reasoningEffort === "minimal") {
     throw new RunValidationError(
       "reasoning_effort='minimal' is not supported by this plugin because Codex currently auto-attaches web_search, which the API rejects with reasoning.effort 'minimal'. Use reasoning_effort='low' or higher."
     );
-  }
-  if (model === sparkModel && reasoningSummary) {
-    if (reasoningSummary === "none") {
-      reasoningSummary = void 0;
-    } else {
-      throw new RunValidationError(
-        `reasoning_summary='${reasoningSummary}' is not supported with model_preset='spark' (${sparkModel}). Omit reasoning_summary or use reasoning_summary='none'.`
-      );
-    }
   }
   if (options.mcpConfigPolicy === "explicit" && Object.keys(options.codexMcpServers ?? {}).length === 0) {
     throw new RunValidationError(
@@ -22474,7 +22388,7 @@ async function resolveWorkingDirectory(cwd, env = process.env) {
   const requested = cwd?.trim();
   const claudeProjectDir = env.CLAUDE_PROJECT_DIR?.trim();
   const fallback = claudeProjectDir && !claudeProjectDir.includes("${") ? claudeProjectDir : process.env.PWD ?? process.cwd();
-  const resolved = path6.resolve(requested || fallback);
+  const resolved = path5.resolve(requested || fallback);
   const info = await stat(resolved);
   if (!info.isDirectory()) {
     throw new Error(`Codex working directory is not a directory: ${resolved}`);
@@ -22640,7 +22554,7 @@ function agentFailureResultForError(options, error2, started = Date.now()) {
   const mergedEnv = { ...process.env, ...options.env };
   let cwd = options.projectDir ?? options.cwd ?? process.env.CLAUDE_PROJECT_DIR ?? process.cwd();
   try {
-    cwd = path6.resolve(cwd);
+    cwd = path5.resolve(cwd);
   } catch {
     cwd = process.cwd();
   }
@@ -22797,7 +22711,7 @@ async function runAgent(options) {
     }
     throw error2;
   }
-  const tempDir = await mkdtemp3(path6.join(os5.tmpdir(), "codex-subagents-"));
+  const tempDir = await mkdtemp2(path5.join(os4.tmpdir(), "codex-subagents-"));
   const artifactWriter = new OutputArtifactWriter(runId, mergedEnv);
   const preparedSubagents = await prepareSubagents({
     definitions: options.codexSubagents,
@@ -22815,10 +22729,10 @@ async function runAgent(options) {
     tempCodexHomeUsed: Boolean(preparedSubagents.tempCodexHome)
   });
   const childEnv = sanitizeChildEnv({ ...mergedEnv, ...preparedSubagents.env }, options.forwardSensitiveEnv);
-  const outputPath = path6.join(tempDir, "last-message.md");
+  const outputPath = path5.join(tempDir, "last-message.md");
   const outputSchema = schemaForOutputContract(options.outputContract, options.outputSchema);
-  const outputSchemaPath = outputSchema && !options.resumeSessionId && !options.resumeLast ? path6.join(tempDir, "output-schema.json") : void 0;
-  if (outputSchemaPath) await writeFile3(outputSchemaPath, JSON.stringify(outputSchema), "utf8");
+  const outputSchemaPath = outputSchema && !options.resumeSessionId && !options.resumeLast ? path5.join(tempDir, "output-schema.json") : void 0;
+  if (outputSchemaPath) await writeFile2(outputSchemaPath, JSON.stringify(outputSchema), "utf8");
   const args = buildCodexExecArgs({ ...options, cwd, outputSchemaPath }, outputPath, childEnv);
   logger.rawDebug("codex.spawn", {
     runId,
@@ -23126,6 +23040,126 @@ async function probeCodexVersion(codexBin, env = process.env, options = {}) {
     });
   });
   return { binary, ...version2 };
+}
+
+// src/aggregate.ts
+function agentName(result, index) {
+  return result.name ?? `agent-${index + 1}`;
+}
+function structuredRecord(value) {
+  return value && typeof value === "object" && !Array.isArray(value) ? value : void 0;
+}
+function aggregateAgentResults(results) {
+  const failedAgents = results.map((result, index) => ({ result, name: agentName(result, index) })).filter(({ result }) => !result.ok).map(({ name }) => name);
+  const findings = [];
+  const summaries = [];
+  results.forEach((result, index) => {
+    const name = agentName(result, index);
+    const structured = structuredRecord(result.structuredOutput);
+    if (typeof structured?.summary === "string") {
+      summaries.push({ agent: name, summary: structured.summary });
+    } else if (result.finalMessage.trim()) {
+      summaries.push({ agent: name, summary: result.finalMessage.trim().slice(0, 1e3) });
+    }
+    const structuredFindings = Array.isArray(structured?.findings) ? structured.findings : Array.isArray(structured?.risks) ? structured.risks : Array.isArray(structured?.suggestions) ? structured.suggestions : [];
+    for (const finding of structuredFindings) {
+      if (finding && typeof finding === "object") {
+        findings.push({ agent: name, ...finding });
+      }
+    }
+  });
+  return {
+    ok: failedAgents.length === 0,
+    totalAgents: results.length,
+    completedAgents: results.filter((result) => result.ok).length,
+    failedAgents,
+    findings,
+    summaries,
+    recommendedNextAction: failedAgents.length > 0 ? `Inspect failed agents first: ${failedAgents.join(", ")}.` : findings.length > 0 ? "Review the aggregated findings and address the highest-severity concrete items first." : "Use the per-agent summaries to decide whether more focused follow-up is needed."
+  };
+}
+
+// src/diagnostics.ts
+import { mkdir as mkdir2, mkdtemp as mkdtemp3, open, writeFile as writeFile3 } from "node:fs/promises";
+import os5 from "node:os";
+import path6 from "node:path";
+var events = [];
+function maxEvents(env = process.env) {
+  const parsed = Number(env.CODEX_SUBAGENTS_DIAGNOSTIC_EVENTS);
+  if (!Number.isInteger(parsed) || parsed < 1) return 100;
+  return Math.min(parsed, 1e3);
+}
+function makeId() {
+  return `diag-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
+}
+function recordDiagnosticEvent(event, env = process.env) {
+  const entry = {
+    id: makeId(),
+    ts: (/* @__PURE__ */ new Date()).toISOString(),
+    ...event,
+    message: redactSensitiveText(event.message),
+    recovery: event.recovery === void 0 ? void 0 : redactJsonValue(event.recovery),
+    detail: event.detail === void 0 ? void 0 : redactJsonValue(event.detail)
+  };
+  events.push(entry);
+  const limit = maxEvents(env);
+  while (events.length > limit) events.shift();
+  return entry;
+}
+function recentDiagnosticEvents(limit = 50) {
+  return events.slice(-Math.max(0, Math.min(limit, events.length)));
+}
+function diagnosticStats() {
+  return {
+    retainedEvents: events.length,
+    recentErrors: events.filter((event) => event.severity === "error").length,
+    newestEventAt: events.at(-1)?.ts
+  };
+}
+async function tailFile(file, maxBytes = 2e5) {
+  let handle;
+  try {
+    handle = await open(file, "r");
+    const stat3 = await handle.stat();
+    const length = Math.min(stat3.size, maxBytes);
+    const buffer = Buffer.alloc(length);
+    await handle.read(buffer, 0, length, stat3.size - length);
+    return buffer.toString("utf8");
+  } catch {
+    return void 0;
+  } finally {
+    await handle?.close().catch(() => {
+    });
+  }
+}
+async function createDebugBundle(input = {}) {
+  const env = input.env ?? process.env;
+  const base = path6.resolve(env.CODEX_SUBAGENTS_DEBUG_BUNDLE_DIR?.trim() || os5.tmpdir());
+  await mkdir2(base, { recursive: true });
+  const bundleDir = await mkdtemp3(path6.join(base, "codex-subagents-debug-"));
+  const logFile = env.CODEX_SUBAGENTS_LOG_FILE?.trim();
+  const payload = redactJsonValue({
+    createdAt: (/* @__PURE__ */ new Date()).toISOString(),
+    pid: process.pid,
+    cwd: process.cwd(),
+    node: process.version,
+    platform: {
+      platform: process.platform,
+      arch: process.arch,
+      release: os5.release()
+    },
+    envKeys: Object.keys(env).filter((key) => key.startsWith("CODEX_SUBAGENTS_") || key.startsWith("CLAUDE_")).sort(),
+    logging: loggingDiagnostics(env),
+    recentDiagnostics: recentDiagnosticEvents(100),
+    status: input.status,
+    session: input.session,
+    job: input.job,
+    notes: input.notes,
+    logTail: input.includeLogTail && logFile ? await tailFile(logFile) : void 0
+  });
+  const diagnosticsPath = path6.join(bundleDir, "diagnostics.json");
+  await writeFile3(diagnosticsPath, JSON.stringify(payload, null, 2), "utf8");
+  return { bundleDir, diagnosticsPath };
 }
 
 // src/jobs.ts
@@ -23631,11 +23665,11 @@ function recoveryForError(error2, context = "tool_call") {
       retryAfterMs: 1e3
     };
   }
-  if (lower.includes("validation") || lower.includes("reasoning_effort") || lower.includes("reasoning_summary")) {
+  if (lower.includes("validation") || lower.includes("reasoning_effort") || lower.includes("reasoning_summary") || lower.includes("model_preset")) {
     return {
       recoverable: false,
       reason: "invalid_request",
-      recommendedAction: "Adjust the model/reasoning settings and retry. Do not use minimal reasoning or Spark with reasoning summaries."
+      recommendedAction: "Select sol, astra, or luna and an enabled reasoning effort, then retry. Spark and minimal reasoning are unsupported."
     };
   }
   return {
@@ -26854,9 +26888,10 @@ async function codexStatusPayload(codexBin, visibility) {
     },
     appServerFallback: process.env.CODEX_SUBAGENTS_DISABLE_EXEC_FALLBACK === "1" ? "disabled" : "enabled",
     modelPresets: {
-      codex: "gpt-5.3-codex",
-      spark: "gpt-5.3-codex-spark"
+      codex: currentModels.sol,
+      ...currentModels
     },
+    retiredModelPresets: ["spark"],
     outputContracts,
     mcpConfigPolicies,
     pluginCodexBin: cleanOption(process.env.CODEX_SUBAGENTS_CODEX_BIN),
@@ -27105,7 +27140,7 @@ var codexSubagentSchema = external_exports.object({
   developer_instructions: external_exports.string().trim().min(1).describe("Core instructions defining this Codex subagent's behavior."),
   nickname_candidates: external_exports.array(external_exports.string().trim().min(1)).min(1).optional().describe("Optional display nicknames for multiple instances of this subagent."),
   model: external_exports.string().trim().min(1).optional().describe("Exact model for this Codex subagent. Overrides model_preset."),
-  model_preset: modelPresetSchema.optional().describe("Convenience preset. `spark` maps to gpt-5.3-codex-spark."),
+  model_preset: modelPresetSchema.optional().describe("Convenience preset: `sol`/`codex` selects gpt-6.1-sol, `astra` selects gpt-6-astra, `luna` selects gpt-6-luna. `spark` is retired."),
   reasoning_effort: reasoningEffortSchema.optional().describe("Reasoning effort for this Codex subagent."),
   sandbox: sandboxModeSchema.optional().describe("Sandbox mode for this Codex subagent. Parent runtime overrides still apply."),
   mcp_servers: looseRecordSchema.optional().describe("Optional Codex mcp_servers config for this custom subagent."),
@@ -27124,13 +27159,13 @@ var subagentRuntimeSchema = external_exports.object({
 });
 var commonInputSchema = {
   model: external_exports.string().trim().min(1).optional().describe(
-    "Exact Codex model, for example gpt-5.3-codex. Omit to use model_preset, the plugin default, or Codex default."
+    "Exact Codex model, for example gpt-6.1-sol, gpt-6-astra, or gpt-6-luna. Omit to use model_preset, the plugin default, or Codex default."
   ),
   model_preset: modelPresetSchema.optional().describe(
-    "Convenience model preset. Use `spark` for responsive Codex Spark work; it maps to gpt-5.3-codex-spark."
+    "Convenience model preset: `sol`/`codex` selects gpt-6.1-sol, `astra` selects gpt-6-astra, `luna` selects gpt-6-luna. `default` inherits configuration. `spark` is retired."
   ),
   reasoning_effort: reasoningEffortSchema.optional().describe(
-    "Codex model reasoning effort. Prefer medium by default, low for simple checks, high/xhigh only for difficult analysis. `minimal` is rejected because Codex currently auto-attaches web_search, which the API does not allow with minimal reasoning."
+    "Codex model reasoning effort. Prefer medium by default, low for simple checks, high/xhigh for difficult analysis. `minimal` is rejected because Codex currently auto-attaches web_search, which the API does not allow with minimal reasoning."
   ),
   sandbox: sandboxModeSchema.default("read-only").describe("Codex sandbox mode. Keep read-only unless the user explicitly asks otherwise."),
   dangerously_bypass_approvals_and_sandbox: external_exports.boolean().default(false).describe(
@@ -27139,9 +27174,9 @@ var commonInputSchema = {
   service_tier: serviceTierSchema.optional().describe(
     "Optional Codex service tier. Omit by default; only set this when the user explicitly asks for a service tier."
   ),
-  model_verbosity: modelVerbositySchema.optional().describe("Optional GPT-5 model verbosity override."),
+  model_verbosity: modelVerbositySchema.optional().describe("Optional model verbosity override."),
   reasoning_summary: reasoningSummarySchema.optional().describe(
-    "Optional Codex reasoning summary setting. Do not use with model_preset `spark` except `none`; Spark does not support reasoning.summary."
+    "Optional Codex reasoning summary setting, when supported by the selected model."
   ),
   cwd: external_exports.string().trim().min(1).optional().describe("Compatibility alias for project_dir."),
   project_dir: external_exports.string().trim().min(1).optional().describe(
@@ -27312,10 +27347,10 @@ var codexRoleDefaults = {
 };
 var advancedInputSchema = external_exports.object({
   model: external_exports.string().trim().min(1).optional().describe(
-    "Exact Codex model, or alias `spark` / `codex`. Omit by default; use `spark` only when the user asks for Codex Spark or a quick focused sidecar check."
+    "Exact Codex model, or alias `sol` / `codex` (gpt-6.1-sol) / `astra` (gpt-6-astra) / `luna` (gpt-6-luna). Omit to inherit configuration. `spark` is retired."
   ),
   model_preset: modelPresetSchema.optional().describe("Compatibility preset retained for older callers. Prefer advanced.model for new calls."),
-  reasoning: reasoningEffortSchema.optional().describe("Advanced reasoning effort, including xhigh. Minimal is still rejected by this server."),
+  reasoning: reasoningEffortSchema.optional().describe("Advanced reasoning effort. Use xhigh only when explicitly requested. Server feature flags control additional efforts; minimal is rejected."),
   reasoning_effort: reasoningEffortSchema.optional().describe("Compatibility alias for advanced.reasoning."),
   sandbox: sandboxModeSchema.optional().describe("Advanced sandbox override. Leave unset for normal read-only Codex delegation."),
   service_tier: commonInputSchema.service_tier,
@@ -27348,7 +27383,7 @@ var advancedInputSchema = external_exports.object({
   "DO NOT USE unless the user explicitly asked for exact model, timeout, diagnostics, custom MCP sharing, nested Codex subagents, or another uncommon Codex setting."
 );
 var advertisedAdvancedInputSchema = looseRecordSchema.describe(
-  "Power-user Codex settings object. Usually omit. Common keys: model (`spark`, `codex`, or exact model), reasoning (`xhigh` only when explicitly requested), timeout_ms, include_diagnostics, sandbox, codex_bin, output_contract, output_schema, codex_subagents, subagent_tasks, subagent_runtime, and MCP sharing options. The server validates this object strictly at runtime."
+  "Power-user Codex settings object. Usually omit. Common keys: model (`sol`, `codex`, `astra`, `luna`, or exact model), reasoning (`xhigh` only when explicitly requested), timeout_ms, include_diagnostics, sandbox, codex_bin, output_contract, output_schema, codex_subagents, subagent_tasks, subagent_runtime, and MCP sharing options. The server validates this object strictly at runtime."
 );
 var nativeBaseInputSchema = {
   project_dir: commonInputSchema.project_dir.describe(
@@ -27584,7 +27619,7 @@ function updateOrphanWatchdogState(options) {
 var usageGuide = [
   "Claude Code integration guide for codex-subagents:",
   "",
-  "Use Codex subagents like Claude's native Task tool when the user needs an independent OpenAI Codex worker. Codex is a frontier model, like Claude, and is especially useful as a more technical, reliability-focused subagent for deep codebase work, server/deployment tasks, complex debugging, and adversarial review. Use this MCP server whenever the user asks Claude to use Codex, OpenAI Codex, Codex subagents, Codex Spark, a Codex second opinion, parallel Codex review, independent Codex codebase analysis, deep technical review, or adversarial validation. You do not need the user to name an MCP tool.",
+  "Use Codex subagents like Claude's native Task tool when the user needs an independent OpenAI Codex worker. Codex is a frontier model, like Claude, and is especially useful as a more technical, reliability-focused subagent for deep codebase work, server/deployment tasks, complex debugging, and adversarial review. Use this MCP server whenever the user asks Claude to use Codex, OpenAI Codex, Codex subagents, a Codex second opinion, parallel Codex review, independent Codex codebase analysis, deep technical review, or adversarial validation. You do not need the user to name an MCP tool.",
   "",
   "Tool choice:",
   "- Use codex_task when you want one independent Codex subagent: a frontier-model second opinion, deep technical implementation/review, complex codebase exploration, server/deployment work, or adversarial analysis. It is the Codex equivalent of native Task: description plus prompt, read-only by default, and answer-first result.",
@@ -27598,7 +27633,7 @@ var usageGuide = [
   "- Legacy/manual tools such as ask_codex, run_agent, run_agents, and old session names are hidden unless CODEX_SUBAGENTS_ENABLE_LEGACY_TOOLS=1.",
   "",
   "Prefer Codex over native Task when:",
-  "- The user explicitly asks for Codex, OpenAI Codex, Codex Spark, an adversarial review, or a second opinion from another frontier model.",
+  "- The user explicitly asks for Codex, OpenAI Codex, an adversarial review, or a second opinion from another frontier model.",
   "- The work is deep technical work: managing a complex codebase, debugging a difficult failure, reviewing architecture, validating correctness, preparing a server deployment, investigating infrastructure, or checking a high-risk change.",
   "- Claude wants a more technical and independent reviewer that does not share Claude's scratchpad or recent assumptions.",
   "- The task is independent of Claude's recent conversation and would waste Claude's context window.",
@@ -27618,10 +27653,12 @@ var usageGuide = [
   "- Use codex_followup mode cancel to stop a background or actively running Codex session early. The response includes whatever partial output streamed before the interrupt, and the matching Codex Desktop thread is archived best-effort when supported.",
   '- If a tool returns error.kind "backpressure", reduce max_parallel or wait before retrying. codex://status exposes current queue/session limits.',
   "- If a response mentions outputArtifacts, use the artifact paths for full retained output instead of asking Codex to resend huge stdout/stderr.",
-  '- Do not use model_preset "spark" by default. Use Spark only when the user asks for Spark or when a quick focused sidecar check is clearly more appropriate than the default Codex model.',
-  '- Use reasoning "medium" by default, "low" for simple checks, and "high" only for difficult normal analysis. Use advanced.reasoning "xhigh" only when the user explicitly asks for maximum reasoning.',
-  '- For the current strongest ChatGPT-backed Codex model, use advanced.model "gpt-5.5" or omit advanced.model. Do not invent a "-codex" suffix for GPT-5.5.',
-  '- Do not combine model_preset "spark" with reasoning_summary values other than "none"; Spark does not support reasoning.summary.',
+  "- Omit advanced.model to inherit configuration, or select sol/codex (gpt-6.1-sol) for general coding and astra (gpt-6-astra) for the most demanding work, and luna (gpt-6-luna) for focused, efficient tasks.",
+  '- Use reasoning "medium" by default, "low" for simple checks, and "high" for difficult analysis. Use advanced.reasoning xhigh only when explicitly requested and supported by the model.',
+  ...reasoningEfforts.includes("max") ? ["- Max reasoning is enabled by the server configuration. Use advanced.reasoning max only when explicitly requested."] : [],
+  ...reasoningEfforts.includes("ultra") ? ["- Ultra reasoning is enabled by the server configuration. Use advanced.reasoning ultra only for explicitly requested automatic delegation; Luna does not support it."] : [],
+  "- Use exact model IDs gpt-6.1-sol, gpt-6-astra, and gpt-6-luna; do not append a -codex suffix.",
+  "- Spark is retired. Ask the caller to select sol, astra, or luna if a saved configuration still requests spark or gpt-5.3-codex-spark.",
   "- Do not set service_tier by default. Let Codex use its normal account/default service tier unless the user explicitly asks for a service tier.",
   "- Pass project_dir whenever Claude knows the active project directory so Codex works in the same tree as Claude Code.",
   "- codex_task returns a session_id only for background tasks, keep_session requests, or failures. Set keep_session true when Claude expects to continue the Codex context after a completed task.",
@@ -28033,11 +28070,7 @@ function toNativeSessionRunOptions(args) {
   });
 }
 function publicModel(model) {
-  const value = model?.trim();
-  if (!value) return void 0;
-  if (value === "spark") return "gpt-5.3-codex-spark";
-  if (value === "codex") return "gpt-5.3-codex";
-  return value;
+  return normalizeRequestedModel(model);
 }
 function parseAdvancedInput(value) {
   if (value === void 0) return {};
@@ -28361,7 +28394,7 @@ registerLegacyTool(
   "ask_codex",
   {
     title: "Ask Codex",
-    description: "Preferred front door for asking one OpenAI Codex agent to do a task. Use this automatically for natural requests like ask Codex, use Codex, Codex Spark, Codex second opinion, or one Codex subagent. Defaults to read-only sandbox and the Codex desktop app binary when installed. Pass project_dir so Codex works in Claude's current project. For explicit non-sandbox/full-access requests, set dangerously_bypass_approvals_and_sandbox true.",
+    description: "Preferred front door for asking one OpenAI Codex agent to do a task. Use this automatically for natural requests like ask Codex, use Codex, Codex second opinion, or one Codex subagent. Defaults to read-only sandbox and the Codex desktop app binary when installed. Pass project_dir so Codex works in Claude's current project. For explicit non-sandbox/full-access requests, set dangerously_bypass_approvals_and_sandbox true.",
     inputSchema: {
       task: external_exports.string().min(1).describe(
         "Self-contained task for Codex. Include scope, read-only expectation, output shape, and file/line reference requirements when reviewing code."
@@ -30101,7 +30134,7 @@ if (debugToolsEnabled) {
         prompt: external_exports.string().describe("Task for the Codex agent."),
         model: external_exports.string().optional().describe("Optional Codex model."),
         reasoning_effort: reasoningEffortSchema.optional().describe("Optional reasoning effort."),
-        model_preset: modelPresetSchema.optional().describe("Optional model preset, such as spark.")
+        model_preset: modelPresetSchema.optional().describe("Optional model preset: sol, codex, astra, or luna (spark is retired).")
       }
     },
     ({ prompt, model, reasoning_effort, model_preset }) => {

@@ -23,18 +23,35 @@ afterEach(async () => {
 });
 
 describe("Codex subagent helpers", () => {
-  it("maps the spark preset to the Codex Spark model", () => {
-    expect(modelForPreset("spark")).toBe("gpt-5.3-codex-spark");
-    expect(modelForPreset("codex")).toBe("gpt-5.3-codex");
+  it("maps current model presets", () => {
+    expect(modelForPreset("sol")).toBe("gpt-6.1-sol");
+    expect(modelForPreset("codex")).toBe("gpt-6.1-sol");
+    expect(modelForPreset("astra")).toBe("gpt-6-astra");
+    expect(modelForPreset("luna")).toBe("gpt-6-luna");
+    expect(modelForPreset("default")).toBeUndefined();
+    expect(modelForPreset()).toBeUndefined();
+  });
+
+  it("resolves exact-model aliases consistently in nested TOML and argv", () => {
+    const definition = {
+      name: "review",
+      description: "Review code.",
+      developerInstructions: "Return findings.",
+      model: " astra ",
+      modelPreset: "luna" as const,
+      reasoningEffort: "max",
+    };
+    expect(serializeCodexSubagent(definition)).toContain('model = "gpt-6-astra"');
+    expect(codexSubagentConfigOverrides([definition])).toContain('agents.review.model="gpt-6-astra"');
   });
 
   it("serializes complete custom agent definitions as Codex TOML", () => {
     const toml = serializeCodexSubagent({
-      name: "ui_spark",
+      name: "ui_sol",
       description: "Fast focused UI iteration.",
       developerInstructions: "Stay scoped and return concise diffs.",
-      nicknameCandidates: ["Spark One", "Spark Two"],
-      modelPreset: "spark",
+      nicknameCandidates: ["Sol One", "Sol Two"],
+      modelPreset: "sol",
       reasoningEffort: "medium",
       sandbox: "read-only",
       mcpServers: {
@@ -52,8 +69,8 @@ describe("Codex subagent helpers", () => {
       },
     });
 
-    expect(toml).toContain('name = "ui_spark"');
-    expect(toml).toContain('model = "gpt-5.3-codex-spark"');
+    expect(toml).toContain('name = "ui_sol"');
+    expect(toml).toContain('model = "gpt-6.1-sol"');
     expect(toml).toContain('model_reasoning_effort = "medium"');
     expect(toml).toContain('sandbox_mode = "read-only"');
     expect(toml).toContain("[mcp_servers.docs]");
@@ -66,11 +83,11 @@ describe("Codex subagent helpers", () => {
   it("keeps secret-bearing nested subagent config out of Codex argv overrides", () => {
     const overrides = codexSubagentConfigOverrides([
       {
-        name: "ui_spark",
+        name: "ui_sol",
         description: "Fast focused UI iteration.",
         developerInstructions: "Stay scoped and return concise diffs.",
-        nicknameCandidates: ["Spark One", "Spark Two"],
-        modelPreset: "spark",
+        nicknameCandidates: ["Sol One", "Sol Two"],
+        modelPreset: "sol",
         reasoningEffort: "medium",
         sandbox: "read-only",
         mcpServers: {
@@ -93,13 +110,13 @@ describe("Codex subagent helpers", () => {
       },
     ]);
 
-    expect(overrides).toContain('agents.ui_spark.description="Fast focused UI iteration."');
+    expect(overrides).toContain('agents.ui_sol.description="Fast focused UI iteration."');
     expect(overrides).toContain(
-      'agents.ui_spark.developer_instructions="Stay scoped and return concise diffs."',
+      'agents.ui_sol.developer_instructions="Stay scoped and return concise diffs."',
     );
-    expect(overrides).toContain('agents.ui_spark.model="gpt-5.3-codex-spark"');
-    expect(overrides).toContain('agents.ui_spark.model_reasoning_effort="medium"');
-    expect(overrides).toContain('agents.ui_spark.sandbox_mode="read-only"');
+    expect(overrides).toContain('agents.ui_sol.model="gpt-6.1-sol"');
+    expect(overrides).toContain('agents.ui_sol.model_reasoning_effort="medium"');
+    expect(overrides).toContain('agents.ui_sol.sandbox_mode="read-only"');
     expect(overrides.join("\n")).not.toContain("mcp_servers");
     expect(overrides.join("\n")).not.toContain("skills.config");
     expect(overrides.join("\n")).not.toContain("model_verbosity");
@@ -110,17 +127,17 @@ describe("Codex subagent helpers", () => {
     const prompt = buildSubagentPromptPrefix(
       [
         {
-          name: "ui_spark",
+          name: "ui_sol",
           description: "Fast focused UI iteration.",
           developerInstructions: "Stay scoped.",
-          modelPreset: "spark",
+          modelPreset: "sol",
         },
       ],
-      [{ agent: "ui_spark", name: "header", prompt: "Inspect the header UI." }],
+      [{ agent: "ui_sol", name: "header", prompt: "Inspect the header UI." }],
     );
 
-    expect(prompt).toContain("Custom agents available: ui_spark");
-    expect(prompt).toContain("Spawn ui_spark as header: Inspect the header UI.");
+    expect(prompt).toContain("Custom agents available: ui_sol");
+    expect(prompt).toContain("Spawn ui_sol as header: Inspect the header UI.");
   });
 
   it("creates and cleans a temporary Codex home for custom agents", async () => {
@@ -128,10 +145,10 @@ describe("Codex subagent helpers", () => {
     const prepared = await prepareSubagents({
       definitions: [
         {
-          name: "review_spark",
+          name: "review_sol",
           description: "Fast review.",
           developerInstructions: "Review only.",
-          modelPreset: "spark",
+          modelPreset: "sol",
         },
       ],
       env: { CODEX_HOME: codexHome },
@@ -140,10 +157,10 @@ describe("Codex subagent helpers", () => {
     expect(prepared.tempCodexHome).toBeTruthy();
     expect(prepared.env.CODEX_HOME).toBe(prepared.tempCodexHome);
     const files = await readFile(
-      path.join(prepared.tempCodexHome!, "agents", "01-review_spark.toml"),
+      path.join(prepared.tempCodexHome!, "agents", "01-review_sol.toml"),
       "utf8",
     );
-    expect(files).toContain('model = "gpt-5.3-codex-spark"');
+    expect(files).toContain('model = "gpt-6.1-sol"');
 
     await prepared.cleanup();
     await expect(stat(prepared.tempCodexHome!)).rejects.toThrow();

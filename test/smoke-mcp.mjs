@@ -334,7 +334,7 @@ try {
     prompt: "single smoke RUN_COMMAND_EVENT",
     project_dir: projectDir,
     keep_session: true,
-    advanced: { model: "spark", include_diagnostics: true },
+    advanced: { model: "sol", include_diagnostics: true },
   });
   assert(single.structuredContent?.ok, "codex_task should return ok", single.structuredContent);
   assert(single.structuredContent?.result?.includes("single smoke"), "codex_task should return answer-first result", single.structuredContent);
@@ -347,11 +347,44 @@ try {
   );
   assert(
     single.structuredContent?.diagnostics?.cwd === projectDir &&
-      single.structuredContent?.diagnostics?.model === "gpt-5.3-codex-spark" &&
+      single.structuredContent?.diagnostics?.model === "gpt-6.1-sol" &&
       single.structuredContent?.diagnostics?.sandbox === "read-only",
     "codex_task did not preserve project/model/read-only defaults",
     single.structuredContent,
   );
+
+  for (const [model, expectedModel, reasoning] of [
+    ["astra", "gpt-6-astra", "xhigh"],
+    ["luna", "gpt-6-luna", "high"],
+  ]) {
+    const currentModel = await callTool("codex_task", {
+      description: `Current model ${model}`,
+      prompt: `smoke model ${model}`,
+      project_dir: projectDir,
+      advanced: { model, reasoning, include_diagnostics: true },
+    });
+    assert(
+      currentModel.structuredContent?.ok &&
+        currentModel.structuredContent?.diagnostics?.model === expectedModel &&
+        currentModel.structuredContent?.diagnostics?.reasoning_effort === reasoning,
+      `native codex_task should resolve ${model} with ${reasoning}`,
+      currentModel.structuredContent,
+    );
+  }
+
+  for (const [model, reasoning, expectedError] of [
+    ["spark", "medium", "retired"],
+    ["luna", "ultra", "Invalid enum value"],
+  ]) {
+    const invalidModel = await callTool("codex_task", {
+      description: `Unsupported model configuration ${model}`,
+      prompt: "should not start",
+      project_dir: projectDir,
+      advanced: { model, reasoning },
+    });
+    assert(invalidModel.isError && invalidModel.content?.[0]?.text?.includes(expectedError),
+      `native model validation should reject ${model} with ${reasoning}`, invalidModel);
+  }
 
   const structured = await callTool("codex_task", {
     description: "Structured smoke",
@@ -705,25 +738,25 @@ try {
     prompt: "coordinate nested fake work",
     project_dir: projectDir,
     advanced: {
-      model: "spark",
+      model: "sol",
       include_diagnostics: true,
       codex_subagents: [
         {
-          name: "ui_spark",
+          name: "ui_sol",
           description: "Fast focused UI iteration.",
           developer_instructions: "Stay scoped and concise.",
-          model_preset: "spark",
+          model_preset: "sol",
           reasoning_effort: "medium",
           sandbox: "read-only",
         },
       ],
-      subagent_tasks: [{ agent: "ui_spark", prompt: "Inspect the toolbar." }],
+      subagent_tasks: [{ agent: "ui_sol", prompt: "Inspect the toolbar." }],
       subagent_runtime: { max_threads: 4, max_depth: 2 },
     },
   });
   assert(
     nested.structuredContent?.ok &&
-      nested.structuredContent?.diagnostics?.model === "gpt-5.3-codex-spark" &&
+      nested.structuredContent?.diagnostics?.model === "gpt-6.1-sol" &&
       nested.structuredContent?.diagnostics?.event_summary?.commands !== undefined,
     "nested native subagent smoke failed",
     nested.structuredContent,

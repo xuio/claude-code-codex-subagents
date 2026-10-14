@@ -34,18 +34,21 @@ Ask Codex for an adversarial review of the MCP server read-only. Return the top 
 Launch three Codex subagents in parallel: one for API behavior, one for tests, and one for security.
 ```
 
-## Spark
+## Models
 
-Ask Claude to use Codex Spark, or pass:
+Use `sol`/`codex` for GPT-6.1 Sol, `astra` for GPT-6 Astra, or `luna` for GPT-6 Luna:
 
 ```json
 {
   "advanced": {
-    "model": "spark"
+    "model": "sol"
   },
   "reasoning": "medium"
 }
 ```
+
+Omit the model to inherit configuration. Spark is retired. Advanced reasoning
+supports `xhigh` when explicitly requested. Additional levels require developer opt-ins.
 
 ## Full Access
 

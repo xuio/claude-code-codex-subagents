@@ -145,3 +145,23 @@ installation behavior; it requires Claude Code to be installed.
 | `npm run wiki:publish` | Publish `docs/wiki/*.md` to the GitHub wiki repo |
 | `npm run diagnostics` | Write a sanitized local diagnostics bundle |
 | `npm run validate:plugin` | Run Claude's plugin manifest validator |
+
+## Hidden Reasoning Flags
+
+Normal servers expose `low`, `medium`, `high`, and `xhigh`. Two independent,
+experimental environment flags opt into additional reasoning levels:
+
+| MCP server environment flag | Enables |
+| --- | --- |
+| `CODEX_SUBAGENTS_ENABLE_MAX_REASONING=1` | `max` |
+| `CODEX_SUBAGENTS_ENABLE_ULTRA_REASONING=1` | `ultra` |
+
+Set the flags in the MCP server environment and restart the server. Only the
+literal value `1` enables a level. Without its flag, a level is absent from the
+reasoning schemas and diagnostics, explicit requests are rejected before Codex
+starts, and an environment default requesting it falls back to `medium`.
+The flags apply to native tools, legacy tools, sessions, and nested subagents.
+When enabled, pass `advanced.reasoning` (or legacy `reasoning_effort`) as usual.
+Ultra enables automatic delegation and requires a supporting model; Luna remains
+limited to Max even with both flags enabled. These flags do not grant model or
+plan access.

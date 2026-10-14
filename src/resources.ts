@@ -22,7 +22,7 @@ import {
   sandboxModes,
 } from "./runner.js";
 import { maxSessionMilestones, sessionManager, type CodexSessionSnapshot, type SessionMilestone } from "./sessions.js";
-import { modelPresets } from "./subagents.js";
+import { currentModels, modelPresets } from "./subagents.js";
 import {
   configuredMaxBlockingWaitMs,
   defaultBlockingWaitTimeoutMs,
@@ -70,9 +70,10 @@ export async function codexStatusPayload(codexBin?: string, visibility?: Resourc
     },
     appServerFallback: process.env.CODEX_SUBAGENTS_DISABLE_EXEC_FALLBACK === "1" ? "disabled" : "enabled",
     modelPresets: {
-      codex: "gpt-5.3-codex",
-      spark: "gpt-5.3-codex-spark",
+      codex: currentModels.sol,
+      ...currentModels,
     },
+    retiredModelPresets: ["spark"],
     outputContracts,
     mcpConfigPolicies,
     pluginCodexBin: cleanOption(process.env.CODEX_SUBAGENTS_CODEX_BIN),

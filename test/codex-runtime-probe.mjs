@@ -1,7 +1,9 @@
 import { execFileSync } from "node:child_process";
-import { access } from "node:fs/promises";
+import { existsSync } from "node:fs";
 
-const codex = "/Applications/Codex.app/Contents/Resources/codex";
+const desktopCodex = "/Applications/Codex.app/Contents/Resources/codex";
+const codex = process.env.CLAUDE_REAL_CODEX_BIN ?? process.env.CODEX_SUBAGENTS_CODEX_BIN ??
+  (existsSync(desktopCodex) ? desktopCodex : "codex");
 
 function assert(condition, message, details) {
   if (!condition) {
@@ -16,10 +18,8 @@ function run(args, options = {}) {
   });
 }
 
-await access(codex);
-
 const version = run(["--version"]).trim();
-assert(version.includes("codex-cli"), "Codex desktop binary should report a CLI version", version);
+assert(version.includes("codex-cli"), "Codex binary should report a CLI version", version);
 
 const execHelp = run(["exec", "--help"]);
 for (const expected of [
@@ -36,10 +36,13 @@ for (const expected of [
 const features = run(["features", "list"]);
 assert(features.includes("multi_agent"), "Codex runtime should expose multi_agent feature", features);
 
-const models = JSON.parse(run(["debug", "models"], { maxBuffer: 64 * 1024 * 1024 }));
-const slugs = new Set((models.models ?? []).map((model) => model.slug));
-assert(slugs.has("gpt-5.3-codex"), "Codex model catalog should include gpt-5.3-codex");
-assert(slugs.has("gpt-5.3-codex-spark"), "Codex model catalog should include gpt-5.3-codex-spark");
+const models = JSON.parse(run(["debug", "models", "--bundled"], { maxBuffer: 64 * 1024 * 1024 }));
+const preferredModels = ["gpt-6.1-sol", "gpt-6-astra", "gpt-6-luna"];
+const availableModels = (models.models ?? []).filter((model) => preferredModels.includes(model.slug));
+assert(availableModels.length > 0, "Codex catalog should offer a supported current model", models);
+const model = availableModels[0];
+assert(model.supported_reasoning_levels?.some((level) => level.effort === "max"),
+  "Current Codex models should support max reasoning", model);
 
 run([
   "debug",
@@ -49,11 +52,11 @@ run([
   "-c",
   'sandbox_mode="read-only"',
   "-c",
-  'agents.ui_spark.description="Fast focused UI iteration."',
+  'agents.ui_sol.description="Fast focused UI iteration."',
   "-c",
-  'agents.ui_spark.developer_instructions="Stay scoped and concise."',
+  'agents.ui_sol.developer_instructions="Stay scoped and concise."',
   "-c",
-  'agents.ui_spark.model="gpt-5.3-codex-spark"',
+  `agents.ui_sol.model="${model.slug}"`,
   "probe",
 ]);
 

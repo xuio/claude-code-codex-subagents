@@ -84,11 +84,11 @@ export function recoveryForError(error: unknown, context = "tool_call"): Recover
     };
   }
 
-  if (lower.includes("validation") || lower.includes("reasoning_effort") || lower.includes("reasoning_summary")) {
+  if (lower.includes("validation") || lower.includes("reasoning_effort") || lower.includes("reasoning_summary") || lower.includes("model_preset")) {
     return {
       recoverable: false,
       reason: "invalid_request",
-      recommendedAction: "Adjust the model/reasoning settings and retry. Do not use minimal reasoning or Spark with reasoning summaries.",
+      recommendedAction: "Select sol, astra, or luna and an enabled reasoning effort, then retry. Spark and minimal reasoning are unsupported.",
     };
   }
 

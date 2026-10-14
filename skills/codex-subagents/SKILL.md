@@ -1,10 +1,10 @@
 ---
-description: Launch one or more OpenAI Codex agents from Claude Code for read-only-by-default exploration, review, planning, second opinions, Spark checks, parallel codebase analysis, or explicit full-access Codex work. Use automatically when the user asks for Codex, OpenAI Codex, Codex Spark, Codex subagents, parallel Codex agents, a Codex second opinion, or for Claude Code to delegate work to Codex.
+description: Launch one or more OpenAI Codex agents from Claude Code for read-only-by-default exploration, review, planning, second opinions, parallel codebase analysis, or explicit full-access Codex work. Use automatically when the user asks for Codex, OpenAI Codex, Codex subagents, parallel Codex agents, a Codex second opinion, or for Claude Code to delegate work to Codex.
 ---
 
 # Codex Subagents
 
-Use the `codex-subagents` MCP server like Claude's native Task tool when the task benefits from an independent OpenAI Codex worker inside Claude Code. If the user asks to "use Codex", "ask Codex", "launch Codex subagents", "use Spark", "get a Codex second opinion", or "run parallel Codex agents", call the MCP tools directly. Do not wait for the user to name the MCP tool.
+Use the `codex-subagents` MCP server like Claude's native Task tool when the task benefits from an independent OpenAI Codex worker inside Claude Code. If the user asks to "use Codex", "ask Codex", "launch Codex subagents", "get a Codex second opinion", or "run parallel Codex agents", call the MCP tools directly. Do not wait for the user to name the MCP tool.
 
 Default behavior:
 
@@ -14,7 +14,7 @@ Default behavior:
 - Uses non-interactive approvals so write or privileged operations fail instead of prompting.
 - Supports explicit non-sandbox/full-access execution with `full_access: true`, which maps to Codex's `--dangerously-bypass-approvals-and-sandbox` flag and allows DNS/network plus unrestricted file and git writes.
 - Lets the caller set model, reasoning effort, project directory, timeout, and parallelism per agent. Put uncommon settings under `advanced`.
-- Supports `advanced.model: "spark"` for Codex Spark (`gpt-5.3-codex-spark`) without requiring Claude to remember the exact model string.
+- Supports `advanced.model: "sol"` or `"codex"` for GPT-6.1 Sol (`gpt-6.1-sol`), `"astra"` for GPT-6 Astra (`gpt-6-astra`), and `"luna"` for GPT-6 Luna (`gpt-6-luna`).
 - Supports nested Codex subagents by passing `advanced.codex_subagents`, `advanced.subagent_tasks`, and `advanced.subagent_runtime`; custom agents are sent as Codex `agents.<name>...` config overrides for the child run.
 - Supports persistent Codex sessions through the `session_id` returned by `codex_task` and `codex_task_group`; use `codex_followup` to continue, steer, wait on, cancel, or otherwise manage the same Codex context.
 - Supports `codex_wait_any` for harvesting whichever background Codex session finishes first when Claude launched several sessions in parallel.
@@ -39,11 +39,11 @@ Do not use Bash, Read, or filesystem inspection to locate Codex. The MCP server 
 
 When the user explicitly asks Codex to edit files, write to git, use DNS/network, install packages, or otherwise run with normal non-sandbox Codex capabilities, set `full_access: true`. Keep it off for routine review or exploration.
 
-Prefer top-level `reasoning: "medium"` for exploration and `high` only when the task is complex enough to justify the extra latency and token usage. Use `advanced.reasoning: "xhigh"` only when the user asks for maximum reasoning. Do not use `minimal`; the plugin rejects it because Codex currently auto-attaches `web_search`, which the API does not allow with minimal reasoning.
+Prefer top-level `reasoning: "medium"` for exploration and `high` only when the task is complex enough to justify the extra latency and token usage. Use `advanced.reasoning: "xhigh"` only when explicitly requested. Use only the reasoning levels enabled by the server configuration. Do not use `minimal`; the plugin rejects it because Codex currently auto-attaches `web_search`, which the API does not allow with minimal reasoning.
 
-Do not use `advanced.model: "spark"` by default. Use Spark only when the user asks for Spark or when a quick focused sidecar check is clearly more appropriate than the default Codex model. The server also accepts the compatibility alias `advanced.model: "codex"` for the default Codex model; omit `advanced.model` unless the user asked for a specific model.
+Omit `advanced.model` to inherit the plugin environment default or Codex configuration. When selecting a model, use `sol`/`codex` for general coding, `astra` for the most demanding work, and `luna` for focused, repeatable tasks. Exact model IDs remain accepted, including provider-specific IDs; availability depends on the installed CLI, signed-in account, and workspace. Use exact IDs without appending a `-codex` suffix.
 
-Do not set `advanced.reasoning_summary` with `advanced.model: "spark"` except for `advanced.reasoning_summary: "none"`. Spark does not support `reasoning.summary`, and the plugin rejects unsupported combinations before starting Codex.
+Spark is retired. If a saved request uses `spark` or `gpt-5.3-codex-spark`, select `sol`, `astra`, or `luna` before retrying.
 
 Do not set `service_tier` by default. Let Codex use its normal account/default service tier unless the user explicitly asks for a service tier.
 

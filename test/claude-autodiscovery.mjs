@@ -156,7 +156,7 @@ After the Codex result comes back, return exactly one compact JSON object and no
     (String(envelope.result ?? "").trim() ? extractJsonResult(envelope.result) : undefined);
   assert(validation, "Claude autodiscovery returned no structured result", envelope);
   assert(
-    validation.model === "gpt-5.3-codex-spark",
+    validation.model === "gpt-6.1-sol",
     "Claude should choose Codex Spark from the natural-language request",
     validation,
   );

@@ -34,7 +34,7 @@ try {
         reasoning: "low",
         advanced: {
           codex_bin: codexBin,
-          model: "spark",
+          model: "sol",
           timeout_ms: 180_000,
           isolated_codex_home: true,
         },
@@ -59,7 +59,7 @@ try {
         reasoning: "low",
         advanced: {
           codex_bin: codexBin,
-          model: "spark",
+          model: "sol",
           timeout_ms: 180_000,
           isolated_codex_home: true,
         },

@@ -50,7 +50,7 @@ const codexSubagentSchema = z.object({
     .describe("Exact model for this Codex subagent. Overrides model_preset."),
   model_preset: modelPresetSchema
     .optional()
-    .describe("Convenience preset. `spark` maps to gpt-5.3-codex-spark."),
+    .describe("Convenience preset: `sol`/`codex` selects gpt-6.1-sol, `astra` selects gpt-6-astra, `luna` selects gpt-6-luna. `spark` is retired."),
   reasoning_effort: reasoningEffortSchema
     .optional()
     .describe("Reasoning effort for this Codex subagent."),
@@ -91,17 +91,17 @@ export const commonInputSchema = {
     .min(1)
     .optional()
     .describe(
-      "Exact Codex model, for example gpt-5.3-codex. Omit to use model_preset, the plugin default, or Codex default.",
+      "Exact Codex model, for example gpt-6.1-sol, gpt-6-astra, or gpt-6-luna. Omit to use model_preset, the plugin default, or Codex default.",
     ),
   model_preset: modelPresetSchema
     .optional()
     .describe(
-      "Convenience model preset. Use `spark` for responsive Codex Spark work; it maps to gpt-5.3-codex-spark.",
+      "Convenience model preset: `sol`/`codex` selects gpt-6.1-sol, `astra` selects gpt-6-astra, `luna` selects gpt-6-luna. `default` inherits configuration. `spark` is retired.",
     ),
   reasoning_effort: reasoningEffortSchema
     .optional()
     .describe(
-      "Codex model reasoning effort. Prefer medium by default, low for simple checks, high/xhigh only for difficult analysis. `minimal` is rejected because Codex currently auto-attaches web_search, which the API does not allow with minimal reasoning.",
+      "Codex model reasoning effort. Prefer medium by default, low for simple checks, high/xhigh for difficult analysis. `minimal` is rejected because Codex currently auto-attaches web_search, which the API does not allow with minimal reasoning.",
     ),
   sandbox: sandboxModeSchema
     .default("read-only")
@@ -119,11 +119,11 @@ export const commonInputSchema = {
     ),
   model_verbosity: modelVerbositySchema
     .optional()
-    .describe("Optional GPT-5 model verbosity override."),
+    .describe("Optional model verbosity override."),
   reasoning_summary: reasoningSummarySchema
     .optional()
     .describe(
-      "Optional Codex reasoning summary setting. Do not use with model_preset `spark` except `none`; Spark does not support reasoning.summary.",
+      "Optional Codex reasoning summary setting, when supported by the selected model.",
     ),
   cwd: z
     .string()
@@ -405,14 +405,14 @@ export const advancedInputSchema = z
       .min(1)
       .optional()
       .describe(
-        "Exact Codex model, or alias `spark` / `codex`. Omit by default; use `spark` only when the user asks for Codex Spark or a quick focused sidecar check.",
+        "Exact Codex model, or alias `sol` / `codex` (gpt-6.1-sol) / `astra` (gpt-6-astra) / `luna` (gpt-6-luna). Omit to inherit configuration. `spark` is retired.",
       ),
     model_preset: modelPresetSchema
       .optional()
       .describe("Compatibility preset retained for older callers. Prefer advanced.model for new calls."),
     reasoning: reasoningEffortSchema
       .optional()
-      .describe("Advanced reasoning effort, including xhigh. Minimal is still rejected by this server."),
+      .describe("Advanced reasoning effort. Use xhigh only when explicitly requested. Server feature flags control additional efforts; minimal is rejected."),
     reasoning_effort: reasoningEffortSchema
       .optional()
       .describe("Compatibility alias for advanced.reasoning."),
@@ -459,7 +459,7 @@ export const advancedInputSchema = z
   );
 
 export const advertisedAdvancedInputSchema = looseRecordSchema.describe(
-  "Power-user Codex settings object. Usually omit. Common keys: model (`spark`, `codex`, or exact model), reasoning (`xhigh` only when explicitly requested), timeout_ms, include_diagnostics, sandbox, codex_bin, output_contract, output_schema, codex_subagents, subagent_tasks, subagent_runtime, and MCP sharing options. The server validates this object strictly at runtime.",
+  "Power-user Codex settings object. Usually omit. Common keys: model (`sol`, `codex`, `astra`, `luna`, or exact model), reasoning (`xhigh` only when explicitly requested), timeout_ms, include_diagnostics, sandbox, codex_bin, output_contract, output_schema, codex_subagents, subagent_tasks, subagent_runtime, and MCP sharing options. The server validates this object strictly at runtime.",
 );
 
 export const nativeBaseInputSchema = {

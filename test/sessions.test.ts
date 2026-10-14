@@ -52,6 +52,36 @@ afterEach(async () => {
 });
 
 describe("CodexSessionManager", () => {
+  it.each([
+    ["sol", "gpt-6.1-sol", "ultra"],
+    ["astra", "gpt-6-astra", "ultra"],
+    ["luna", "gpt-6-luna", "max"],
+  ] as const)("keeps %s and %s reasoning across app-server turns", async (modelPreset, model, reasoningEffort) => {
+    const manager = new CodexSessionManager();
+    const projectDir = await tempDir("codex-model-session-");
+    const recordDir = await tempDir("codex-model-record-");
+    try {
+      const started = await manager.start({
+        prompt: "first model turn", projectDir, codexBin: fakeCodex,
+        modelPreset, reasoningEffort, env: { FAKE_CODEX_RECORD_DIR: recordDir, CODEX_SUBAGENTS_ENABLE_MAX_REASONING: "1", CODEX_SUBAGENTS_ENABLE_ULTRA_REASONING: "1" },
+      });
+      expect(started.result.ok).toBe(true);
+      expect(started.result.model).toBe(model);
+      expect(started.result.reasoningEffort).toBe(reasoningEffort);
+      const followed = await manager.send(started.session.id, "second model turn");
+      expect(followed.result?.ok).toBe(true);
+      expect(followed.result?.model).toBe(model);
+      expect(followed.result?.reasoningEffort).toBe(reasoningEffort);
+      const calls = await recordedCalls(recordDir);
+      expect(calls.find((call) => call.method === "thread/start")).toMatchObject({ model, reasoningEffort });
+      const turns = calls.filter((call) => call.method === "turn/start");
+      expect(turns).toHaveLength(2);
+      for (const turn of turns) expect(turn).toMatchObject({ model, effort: reasoningEffort });
+    } finally {
+      await manager.shutdown("test_cleanup");
+    }
+  });
+
   it("uses app-server sessions by default and preserves the project directory", async () => {
     const manager = new CodexSessionManager();
     const projectDir = await tempDir("codex-subagents-session-project-");
@@ -490,13 +520,12 @@ describe("CodexSessionManager", () => {
         prompt: "invalid app-server configuration",
         projectDir,
         codexBin: fakeCodex,
-        modelPreset: "spark",
-        reasoningSummary: "concise",
+        model: "gpt-5.3-codex-spark",
         env: {
           FAKE_CODEX_RECORD_DIR: recordDir,
         },
       }),
-    ).rejects.toThrow(/reasoning_summary='concise'/);
+    ).rejects.toThrow(/retired.*gpt-6.1-sol/);
 
     await expect(readFile(path.join(recordDir, "calls.jsonl"), "utf8")).rejects.toThrow();
     await manager.shutdown("test_cleanup");
