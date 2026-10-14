@@ -43,21 +43,76 @@ Codex MCP server, or Codex subagents for Claude, this is the integration.
 Requirements:
 
 - Node.js 20 or newer
-- Claude Code
-- Codex CLI, preferably the Codex desktop app
+- Git (for marketplace downloads)
+- Claude Code with plugin marketplace support
+- Codex CLI installed and signed in, preferably through the Codex desktop app
 
-Install the plugin once:
+### Install Through Claude Code Marketplace
+
+In a terminal, register this repository's marketplace and install the plugin for
+your user account:
+
+```sh
+claude plugin marketplace add xuio/claude-code-codex-subagents
+claude plugin install codex-subagents@codex-subagents --scope user
+```
+
+Or, inside Claude Code:
+
+```text
+/plugin marketplace add xuio/claude-code-codex-subagents
+/plugin install codex-subagents@codex-subagents
+```
+
+Select **Install for you** if Claude Code opens the plugin details panel. You can
+also open `/plugin`, find the `codex-subagents` marketplace under **Marketplaces**,
+and install its `codex-subagents` entry from **Discover**.
+
+The repository includes the built MCP server and skill. Marketplace installs
+need no `npm install`, build step, or manual MCP registration. Node.js and Codex
+must be available to Claude Code. Model availability depends on your Codex account.
+
+Start a new Claude Code session after installation, then ask:
+
+```text
+Use Codex to review this PR for correctness, security, and deployment risks.
+```
+
+To verify installation from the terminal:
+
+```sh
+claude plugin list
+```
+
+Look for `codex-subagents@codex-subagents` with enabled status. In a session,
+`/plugin` shows the installed plugin, and `/mcp` shows its `codex-subagents` server.
+
+### Update A Marketplace Install
+
+```sh
+claude plugin marketplace update codex-subagents
+claude plugin update codex-subagents@codex-subagents --scope user
+```
+
+The new version loads in your next session. For automatic updates, open `/plugin`,
+select `codex-subagents` under **Marketplaces**, and enable auto-update.
+
+If you previously used the local development installer, disable
+`codex-subagents@codex-subagents-local` in `/plugin` before enabling the marketplace
+copy, so Claude loads one copy of the MCP server.
+
+This repository hosts its own marketplace. See the
+[Claude Code marketplace documentation](https://code.claude.com/docs/en/plugin-marketplaces)
+for marketplace and installation details.
+
+### Install From A Local Checkout
+
+For local development or an editable install:
 
 ```sh
 git clone https://github.com/xuio/claude-code-codex-subagents.git
 cd claude-code-codex-subagents
 npm run install:local
-```
-
-Restart Claude Code, then ask Claude in any project:
-
-```text
-Use Codex to review this PR for correctness, security, and deployment risks.
 ```
 
 For plugin development, run Claude directly against this checkout without
@@ -234,7 +289,7 @@ See [Development](docs/DEVELOPMENT.md) for the full test matrix.
 
 ## Project Status
 
-Current release: `v0.3.0`.
+Current release: `v0.3.1`.
 
 This project is early, but it is already tested across:
 

@@ -3,17 +3,21 @@
 Requirements:
 
 - Node.js 20 or newer
+- Git (for marketplace downloads)
 - Claude Code
 - Codex CLI, preferably the Codex desktop app
 
-Install and run locally:
+Install from Claude Code's marketplace:
 
 ```sh
-git clone https://github.com/xuio/claude-code-codex-subagents.git
-cd claude-code-codex-subagents
-npm run install:local
-claude --plugin-dir .
+claude plugin marketplace add xuio/claude-code-codex-subagents
+claude plugin install codex-subagents@codex-subagents --scope user
 ```
+
+Or use `/plugin marketplace add xuio/claude-code-codex-subagents` and
+`/plugin install codex-subagents@codex-subagents` inside Claude Code.
+The built server is included; no npm install or build step is needed.
+Start a new session after installation.
 
 Ask Claude:
 
@@ -32,7 +36,15 @@ npm run dev:watch
 CLI and the Claude Desktop bundled Claude Code binary load the same working tree
 after `dist/index.js` is rebuilt.
 
-To update an existing local install:
+To update a marketplace install:
+
+```sh
+claude plugin marketplace update codex-subagents
+claude plugin update codex-subagents@codex-subagents --scope user
+```
+
+For an editable local install, clone the repository and run `npm run install:local`.
+To update that local install:
 
 ```sh
 npm run update:local

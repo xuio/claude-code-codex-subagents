@@ -1,5 +1,20 @@
 # Release Notes
 
+## v0.3.1
+
+Install from the repository marketplace:
+
+```sh
+claude plugin marketplace add xuio/claude-code-codex-subagents
+claude plugin install codex-subagents@codex-subagents --scope user
+```
+
+The marketplace ships the built MCP server and skill, with no npm install or
+build step. This release also adds Sol, Astra, and Luna aliases, retires Spark,
+and keeps Max/Ultra reasoning behind independent experimental flags.
+See the [README](../README.md#install-through-claude-code-marketplace) for setup
+requirements, update instructions, and migration from the local development install.
+
 ## v0.3.0
 
 `v0.3.0` focuses on making Codex subagents feel native to Claude.

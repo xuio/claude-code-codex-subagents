@@ -1,0 +1,19 @@
+{
+  "name": "codex-subagents",
+  "metadata": {
+    "description": "OpenAI Codex subagents for Claude Code: Sol, Astra, Luna, parallel reviews, and persistent sessions."
+  },
+  "owner": {
+    "name": "xuio",
+    "url": "https://github.com/xuio"
+  },
+  "plugins": [
+    {
+      "name": "codex-subagents",
+      "source": "./",
+      "description": "Delegate to OpenAI Codex with read-only defaults, parallel tasks, persistent context, and live steering.",
+      "category": "development",
+      "strict": true
+    }
+  ]
+}

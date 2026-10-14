@@ -1,6 +1,6 @@
 {
   "name": "claude-code-codex-subagents",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "description": "Claude Code plugin for OpenAI Codex subagents, GPT-6.1 Sol, Astra, Luna, parallel code review, and long-running Codex sessions through a daemonless MCP server.",
   "type": "module",
   "private": true,
@@ -24,7 +24,7 @@
     "dev:watch": "node scripts/watch-dist.mjs",
     "wiki:publish": "node scripts/publish-wiki.mjs",
     "diagnostics": "node scripts/diagnostics.mjs",
-    "validate:plugin": "claude plugin validate .",
+    "validate:plugin": "claude plugin validate .claude-plugin/plugin.json && claude plugin validate .claude-plugin/marketplace.json",
     "smoke:mcp": "node test/smoke-mcp.mjs",
     "test:reliability": "node test/reliability-matrix.mjs",
     "test:stress": "node test/stress-mcp.mjs",
@@ -33,6 +33,7 @@
     "test:stdio-shutdown": "node test/stdio-shutdown.mjs",
     "test:dev-link": "node test/dev-link.mjs",
     "test:plugin-manifest": "node test/plugin-manifest.mjs",
+    "test:marketplace-package": "node test/marketplace-package.mjs",
     "test:reasoning-flags": "node test/reasoning-flags.mjs",
     "test:codex-runtime": "node test/codex-runtime-probe.mjs",
     "test:app-server-contract": "node test/app-server-protocol-contract.mjs",
@@ -45,7 +46,7 @@
     "test:claude-real-codex": "node test/claude-real-codex.mjs",
     "test:claude-real-session": "node test/claude-real-session.mjs",
     "test:real-soak": "node test/real-soak.mjs",
-    "test:ci": "npm run build && npm run test:plugin-manifest && env CODEX_SUBAGENTS_LOG_LEVEL=${CODEX_SUBAGENTS_LOG_LEVEL:-silent} npm test && npm run test:reasoning-flags && npm run test:stdio-shutdown && npm run smoke:mcp && npm run test:reliability && npm run test:stress && npm run test:progress && npm run test:advanced && npm run test:dev-link",
+    "test:ci": "npm run build && npm run test:plugin-manifest && npm run test:marketplace-package && env CODEX_SUBAGENTS_LOG_LEVEL=${CODEX_SUBAGENTS_LOG_LEVEL:-silent} npm test && npm run test:reasoning-flags && npm run test:stdio-shutdown && npm run smoke:mcp && npm run test:reliability && npm run test:stress && npm run test:progress && npm run test:advanced && npm run test:dev-link",
     "test:comprehensive": "npm run build && npm test && npm run test:stdio-shutdown && npm run smoke:mcp && npm run test:reliability && npm run test:stress && npm run test:progress && npm run test:advanced && npm run test:codex-runtime && npm run test:app-server-contract && npm run test:real-matrix && npm run validate:plugin && npm run test:claude-desktop",
     "test:claude-desktop": "node test/claude-desktop-cli.mjs"
   },

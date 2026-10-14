@@ -8,7 +8,11 @@ npm run build
 ```
 
 The Claude plugin manifest points at `dist/index.js`, so rebuild after changing
-TypeScript source.
+TypeScript source. The repository also hosts its marketplace at
+`.claude-plugin/marketplace.json`; its `./` source installs the repository root.
+Keep version metadata in `package.json`, `package-lock.json`, and
+`.claude-plugin/plugin.json` aligned. Bump the plugin version for published
+updates so marketplace users can receive them; the marketplace entry inherits it.
 
 For the normal local install/update path:
 
@@ -61,6 +65,7 @@ npm run test:stress
 npm run test:progress
 npm run test:advanced
 npm run test:plugin-manifest
+npm run test:marketplace-package
 npm run validate:plugin
 ```
 
@@ -128,9 +133,11 @@ The wiki files intentionally duplicate selected docs pages. Update the tracked
 
 ## Plugin Validation
 
-`npm run test:ci` is portable and uses a local manifest wiring check. Run
+`npm run test:ci` is portable and uses a local manifest wiring check plus an
+isolated package test with no `node_modules` or npm install. Run
 `npm run validate:plugin` locally when changing `.claude-plugin/`, `skills/`, or
-installation behavior; it requires Claude Code to be installed.
+installation behavior; it validates both the plugin and marketplace manifests
+and requires Claude Code to be installed.
 
 ## Useful Scripts
 
